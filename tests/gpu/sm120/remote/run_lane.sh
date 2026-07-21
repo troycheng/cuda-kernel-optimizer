@@ -15,32 +15,58 @@ case "$lane" in
     ;;
 esac
 
-readonly allowed_root="/data/tcheng/cuda-skill-e2e/v3.1"
-readonly allowed_cutlass="/data/tcheng/cuda-skill-e2e/deps/cutlass"
 readonly expected_cutlass_version="4.6.1"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd -- "$script_dir/../../../.." && pwd -P)"
-if [[ "$repo_root" != "$allowed_root/repo" ]]; then
-  echo "refusing repository outside $allowed_root/repo: $repo_root" >&2
+
+: "${CUDA_E2E_ROOT:?set CUDA_E2E_ROOT to the isolated lane root}"
+: "${CUDA_E2E_ARTIFACTS:?set CUDA_E2E_ARTIFACTS below CUDA_E2E_ROOT/artifacts}"
+: "${CUTLASS_PATH:?set CUTLASS_PATH to a dedicated CUTLASS 4.6.1 checkout}"
+e2e_root="$(cd -- "$CUDA_E2E_ROOT" && pwd -P)"
+case "$repo_root/" in
+  "$e2e_root/"*) ;;
+  *)
+    echo "refusing repository outside CUDA_E2E_ROOT: $repo_root" >&2
+    exit 2
+    ;;
+esac
+if [[ "$repo_root" == "$e2e_root" ]]; then
+  echo "repository must be a child of CUDA_E2E_ROOT: $repo_root" >&2
   exit 2
 fi
+case "$repo_root/" in
+  "$e2e_root/artifacts/"*)
+    echo "repository and writable artifact root must not overlap: $repo_root" >&2
+    exit 2
+    ;;
+esac
 
-: "${CUDA_E2E_ARTIFACTS:?set CUDA_E2E_ARTIFACTS below $allowed_root/artifacts}"
-: "${CUTLASS_PATH:?set CUTLASS_PATH to $allowed_cutlass}"
 artifacts="$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).expanduser().resolve(strict=False))' "$CUDA_E2E_ARTIFACTS")"
 case "$artifacts/" in
-  "$allowed_root/artifacts/"*) ;;
+  "$e2e_root/artifacts/"*) ;;
   *)
-    echo "refusing artifact path outside $allowed_root/artifacts: $artifacts" >&2
+    echo "refusing artifact path outside $e2e_root/artifacts: $artifacts" >&2
     exit 2
     ;;
 esac
 mkdir -p -- "$artifacts"
 artifacts="$(cd -- "$artifacts" && pwd -P)"
 case "$artifacts/" in
-  "$allowed_root/artifacts/"*) ;;
+  "$e2e_root/artifacts/"*) ;;
   *)
-    echo "refusing resolved artifact path outside $allowed_root/artifacts: $artifacts" >&2
+    echo "refusing resolved artifact path outside $e2e_root/artifacts: $artifacts" >&2
+    exit 2
+    ;;
+esac
+case "$artifacts/" in
+  "$repo_root/"*)
+    echo "repository and writable artifact lane must not overlap: $artifacts" >&2
+    exit 2
+    ;;
+esac
+case "$repo_root/" in
+  "$artifacts/"*)
+    echo "repository and writable artifact lane must not overlap: $repo_root" >&2
     exit 2
     ;;
 esac
@@ -62,10 +88,6 @@ case "$CUTLASS_PATH" in
     ;;
 esac
 cutlass_path="$(cd -- "$CUTLASS_PATH" && pwd -P)"
-if [[ "$cutlass_path" != "$allowed_cutlass" ]]; then
-  echo "CUTLASS physical path must equal $allowed_cutlass: $cutlass_path" >&2
-  exit 2
-fi
 case "$cutlass_path/" in
   "$repo_root/"*)
     echo "CUTLASS checkout must not overlap the test repository" >&2

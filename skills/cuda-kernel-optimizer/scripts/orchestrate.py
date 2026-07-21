@@ -1971,30 +1971,159 @@ def cmd_setup(args):
 # open-iter  —  profile + roofline for iteration N (if not done by setup)
 # ---------------------------------------------------------------------------
 
+def _open_iter_budget_context(state: Mapping, run_dir: Path):
+    if state.get("budget") is None:
+        policy = resolve_budget("quick")
+    else:
+        policy = _policy_from_state(state)
+
+    store = ArtifactStore(run_dir)
+    checkpoint = None
+    elapsed_seconds = 0.0
+    checkpoint_path = run_dir / "checkpoint.json"
+    if checkpoint_path.exists() or checkpoint_path.is_symlink():
+        input_hash = state.get("input_hash")
+        if not isinstance(input_hash, str) or not input_hash:
+            raise ValueError("checkpointed open-iter requires state input_hash")
+        checkpoint = _validate_checkpoint(
+            store.load_checkpoint(expected_input_hash=input_hash),
+            input_hash=input_hash,
+        )
+        elapsed_seconds = _finite_real(
+            checkpoint["budget"]["elapsed_seconds"],
+            "checkpoint budget.elapsed_seconds",
+            minimum=0.0,
+        )
+    else:
+        started_at = state.get("started_at")
+        if (
+            isinstance(started_at, (int, float))
+            and not isinstance(started_at, bool)
+            and math.isfinite(float(started_at))
+        ):
+            elapsed_seconds = max(0.0, time.time() - float(started_at))
+
+    return (
+        BudgetClock(
+            policy,
+            started_at=time.monotonic(),
+            elapsed_seconds=elapsed_seconds,
+        ),
+        store,
+        checkpoint,
+    )
+
+
+def _persist_open_iter_budget(store, checkpoint, clock):
+    if checkpoint is None:
+        return None
+    now = time.monotonic()
+    updated = copy.deepcopy(checkpoint)
+    updated["budget"] = _checkpoint_budget(clock, now)
+    updated["updated_at"] = now
+    return _persist_checkpoint(
+        store, updated, input_hash=updated["input_hash"]
+    )
+
+
+def _stop_open_iter_at_deadline(args, *, clock, store, checkpoint, command):
+    if checkpoint is not None:
+        checkpoint = _persist_hard_timeout(
+            checkpoint,
+            "candidate_correctness",
+            store=store,
+            clock=clock,
+        )
+    elapsed_seconds = (
+        checkpoint["budget"]["elapsed_seconds"]
+        if checkpoint is not None
+        else clock.elapsed(now=time.monotonic())
+    )
+    payload = {
+        "iter": args.iter,
+        "status": "budget_exhausted",
+        "stop_reason": "hard_execution_deadline",
+        "command": command,
+        "elapsed_seconds": elapsed_seconds,
+        "skipped_expensive_stages": (
+            ["roofline", "branch_seed"]
+            if command == "profile_ncu"
+            else ["branch_seed"]
+        ),
+    }
+    store.write_json(
+        Path(f"iterv{args.iter}") / "open_iter_terminal.json", payload
+    )
+    print(json.dumps(payload, indent=2))
+
+
 def cmd_open_iter(args):
-    state_path = os.path.join(args.run_dir, "state.json")
+    run_dir = Path(args.run_dir).expanduser().resolve(strict=True)
+    state_path = str(run_dir / "state.json")
     if not os.path.isfile(state_path):
         sys.exit(f"state.json missing: {state_path}")
 
     state = _read(state_path)
+    clock, store, checkpoint = _open_iter_budget_context(state, run_dir)
 
     # Profile best_input for this iter
-    rc = _run([
+    profile_timeout = _hard_timeout_seconds(clock)
+    if profile_timeout <= 0.0:
+        _stop_open_iter_at_deadline(
+            args,
+            clock=clock,
+            store=store,
+            checkpoint=checkpoint,
+            command="profile_ncu",
+        )
+        return
+    profile_result = _run([
         sys.executable, str(SCRIPT_DIR / "profile_ncu.py"),
         "--state", state_path,
         "--iter", str(args.iter),
         "--which", "best_input",
         "--benchmark", os.path.abspath(args.benchmark),
-    ]).returncode
+    ], hard_timeout=profile_timeout)
+    if getattr(profile_result, "timed_out", False):
+        _stop_open_iter_at_deadline(
+            args,
+            clock=clock,
+            store=store,
+            checkpoint=checkpoint,
+            command="profile_ncu",
+        )
+        return
+    checkpoint = _persist_open_iter_budget(store, checkpoint, clock)
+    rc = profile_result.returncode
     if rc != 0:
         print("[warn] ncu profiling failed or degraded", file=sys.stderr)
 
     # Roofline
-    rc = _run([
+    roofline_timeout = _hard_timeout_seconds(clock)
+    if roofline_timeout <= 0.0:
+        _stop_open_iter_at_deadline(
+            args,
+            clock=clock,
+            store=store,
+            checkpoint=checkpoint,
+            command="roofline",
+        )
+        return
+    roofline_result = _run([
         sys.executable, str(SCRIPT_DIR / "roofline.py"),
         "--state", state_path,
         "--iter", str(args.iter),
-    ]).returncode
+    ], hard_timeout=roofline_timeout)
+    if getattr(roofline_result, "timed_out", False):
+        _stop_open_iter_at_deadline(
+            args,
+            clock=clock,
+            store=store,
+            checkpoint=checkpoint,
+            command="roofline",
+        )
+        return
+    checkpoint = _persist_open_iter_budget(store, checkpoint, clock)
 
     # Check early stop
     iter_dir = os.path.join(args.run_dir, f"iterv{args.iter}")
@@ -2042,6 +2171,11 @@ def cmd_open_iter(args):
     print(json.dumps({
         "iter": args.iter,
         "early_stop": early_stop,
+        "elapsed_seconds": (
+            checkpoint["budget"]["elapsed_seconds"]
+            if checkpoint is not None
+            else clock.elapsed(now=time.monotonic())
+        ),
         "branches_dir": branches_dir,
         "num_branches": num_branches,
         "next_step": (

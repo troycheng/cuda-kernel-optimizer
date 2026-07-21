@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/troycheng/cuda-optimized-skill/gate_evidence.schema.json",
+  "$id": "https://github.com/troycheng/cuda-kernel-optimizer/gate_evidence.schema.json",
   "title": "CUDA optimizer adapter-specific gate evidence v1",
   "$comment": "cases_passed == cases_total is enforced by gate_evidence.py because standard JSON Schema cannot express this equality without non-portable extensions.",
   "type": "object",

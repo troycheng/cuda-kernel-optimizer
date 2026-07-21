@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/troycheng/cuda-optimized-skill/workload_contract.schema.json",
+  "$id": "https://github.com/troycheng/cuda-kernel-optimizer/workload_contract.schema.json",
   "title": "CUDA optimizer frozen workload contract v1",
   "type": "object",
   "additionalProperties": false,

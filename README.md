@@ -49,7 +49,9 @@ recommendations unless the user separately authorizes them.
 Installation is performed by Codex. Ask Codex to install or update
 `skills/cuda-kernel-optimizer` from
 [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer),
-then start a new session so the instructions are reloaded.
+using the latest published release tag. Use the moving `main` branch only when
+deliberately testing unreleased changes. Start a new session after installation
+so the instructions are reloaded.
 
 Provide a runnable target, correctness reference, target environment,
 performance goal, constraints, and allowed modification scope. A real workload must be supplied by the user; the skill does not download or invent one. When a
@@ -127,7 +129,7 @@ fast number cannot repair an invalid experiment. The installed `self_check` is
 CPU/static only and does not validate a GPU environment.
 
 See [Evidence & Safety](docs/evidence-and-safety.md), the
-[formal V2.5 reference](skills/cuda-kernel-optimizer/references/evidence_automation.md),
+[pre-V1 protocol 2.5 reference](skills/cuda-kernel-optimizer/references/evidence_automation.md),
 and the [long-run control reference](skills/cuda-kernel-optimizer/references/long_running_control.md).
 
 ## Validation status
@@ -138,6 +140,13 @@ RTX 5090 lane, tool permissions, and the real-pair stability result.
 separate. Neither page predicts the speedup of a new project.
 
 ## Release notes
+
+### V1.0.1
+
+- Include `LICENSE` and `NOTICE` in the installable skill artifact.
+- Make the physical GPU lane configurable instead of binding it to maintainer paths.
+- Apply the hard deadline and durable elapsed-time accounting to `open-iter`.
+- Separate standalone release numbers from retained pre-V1 protocol identities.
 
 ### V1.0.0
 

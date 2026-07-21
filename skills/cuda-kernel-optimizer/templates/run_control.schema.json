@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/troycheng/cuda-optimized-skill/run_control.schema.json",
+  "$id": "https://github.com/troycheng/cuda-kernel-optimizer/run_control.schema.json",
   "title": "CUDA optimizer deterministic run-control state v1",
   "type": "object",
   "additionalProperties": false,

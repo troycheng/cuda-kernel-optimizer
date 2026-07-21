@@ -41,7 +41,8 @@ Skill 不会自动修改宿主机配置。驱动、counter 权限、频率、功
 
 安装由 Codex 完成。让 Codex 从
 [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer)
-安装或更新 `skills/cuda-kernel-optimizer`，然后开启新会话，让新指令生效。
+按最新发布标签安装或更新 `skills/cuda-kernel-optimizer`。只有需要试用尚未发布的修改时，
+才使用持续变化的 `main` 分支。安装完成后开启新会话，让新指令生效。
 
 请提供可运行目标、正确性 reference、目标环境、性能目标、约束和允许修改的范围。
 真实 workload 必须由用户提供；skill 不会自行下载或编造。缺少基础条件时，它会先说明
@@ -122,6 +123,13 @@ Controller 才终止整个进程组。修工具不等于性能提升。
 workload 结果。两者都不承诺新项目能获得相同提速。
 
 ## 版本记录
+
+### V1.0.1
+
+- 安装后的 skill 现在包含 `LICENSE` 与 `NOTICE`。
+- 物理 GPU 验收路径改为参数配置，不再绑定维护者目录。
+- `open-iter` 统一使用 hard deadline，并持久记录实际耗时。
+- 明确区分独立项目版本和保留的 pre-V1 协议标识。
 
 ### V1.0.0
 

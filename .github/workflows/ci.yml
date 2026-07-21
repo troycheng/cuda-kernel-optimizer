@@ -30,6 +30,15 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_*.py'
       - name: Installed-skill tests
         run: python -m unittest discover -s skills/cuda-kernel-optimizer/tests -p 'test_*.py'
+      - name: Staged installation smoke
+        run: |
+          stage="$(mktemp -d)"
+          cp -R skills/cuda-kernel-optimizer "$stage/cuda-kernel-optimizer"
+          cd "$stage/cuda-kernel-optimizer"
+          test -f LICENSE
+          test -f NOTICE
+          python -m unittest discover -s tests -p 'test_*.py'
+          python scripts/self_check.py
       - name: Compile Python sources
         run: python -m compileall -q skills/cuda-kernel-optimizer/scripts tests
       - name: Skill self-check

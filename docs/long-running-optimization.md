@@ -1,8 +1,13 @@
 # Long-running optimization
 
-Version 3.0 is designed for optimization work that may take hours, cross many
-candidates, or resume after interruption. The AI still analyzes profiles and
-writes code, but it does not control the rules of the experiment.
+The long-running Controller is designed for optimization work that may take
+hours, cross many candidates, or resume after interruption. The AI still
+analyzes profiles and writes code, but it does not control the rules of the
+experiment.
+
+The project release starts at V1.0.0. Labels such as 2.5, 3.0, and 3.1 in
+schemas and validation records identify pre-V1 protocol generations retained
+for compatibility; they are not project release versions.
 
 ## The control loop
 
@@ -38,8 +43,8 @@ match exact architecture, task, observed signals, and available evidence before
 loading a playbook. A card can suggest what to try and how to disprove it; it
 cannot authorize execution or promotion.
 
-V3.1 adds the active-diagnosis loop between the first global scan and candidate
-admission. The Controller freezes user-owned evidence adapters, obtains available
+Protocol generation 3.1 introduced the active-diagnosis loop between the first
+global scan and candidate admission. The Controller freezes user-owned evidence adapters, obtains available
 capabilities from the current readiness report, and deterministically chooses one
 request from the AI's competing hypotheses. The selected outcome has predefined
 support and opposition effects. Those effects, the artifact digest, equivalent-request

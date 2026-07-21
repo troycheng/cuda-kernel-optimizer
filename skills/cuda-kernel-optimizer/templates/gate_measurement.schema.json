@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/troycheng/cuda-optimized-skill/gate_measurement.schema.json",
+  "$id": "https://github.com/troycheng/cuda-kernel-optimizer/gate_measurement.schema.json",
   "title": "CUDA optimizer raw gate adapter measurement v1",
   "$comment": "Controller selects the adapter kind outside this document. oneOf infers the closed shape from kind-specific subject/result fields. Cross-field equality such as cases_passed == cases_total remains a runtime-only invariant.",
   "type": "object",

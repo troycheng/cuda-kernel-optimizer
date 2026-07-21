@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/troycheng/cuda-optimized-skill/planner_admission.schema.json",
+  "$id": "https://github.com/troycheng/cuda-kernel-optimizer/planner_admission.schema.json",
   "title": "CUDA optimizer Planner admission v1",
   "type": "object",
   "additionalProperties": false,

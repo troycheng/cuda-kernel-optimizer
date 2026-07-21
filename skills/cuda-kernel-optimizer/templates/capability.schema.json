@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/troycheng/cuda-optimized-skill/capability.schema.json",
+  "$id": "https://github.com/troycheng/cuda-kernel-optimizer/capability.schema.json",
   "title": "CUDA optimizer capability metadata v1",
   "type": "object",
   "additionalProperties": false,
