@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from dataclasses import FrozenInstanceError
@@ -261,6 +262,52 @@ class BudgetClockTests(unittest.TestCase):
                         elapsed_seconds=value,
                     ),
                 )
+
+
+class CandidateGateTests(unittest.TestCase):
+    def test_action_exception_returns_terminal_stop(self) -> None:
+        gate = budget.CandidateGate(
+            {
+                "soft_target_seconds": 30,
+                "hard_ceiling_seconds": 300,
+                "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
+            },
+            {
+                "claim_layer": "workload",
+                "cheapest_falsifier": "static_review",
+                "estimated_cost": {
+                    "static_review": 1,
+                    "build_correctness": 2,
+                    "short_paired": 3,
+                    "profiler": 4,
+                    "formal_paired": 5,
+                    "service": 6,
+                },
+                "minimum_effect": {"metric": "service_pct", "value": 0.5},
+                "rejection_condition": "any gate fails",
+                "promotion_condition": "all gates pass",
+            },
+        )
+
+        result = gate.run(
+            {
+                "static_review": lambda: {"status": "passed"},
+                "build_correctness": lambda: {"status": "passed"},
+                "short_paired": lambda: (_ for _ in ()).throw(
+                    RuntimeError("sensitive backend detail")
+                ),
+            }
+        )
+
+        self.assertEqual(result["decision"], "STOP")
+        self.assertEqual(result["stop_reason"], "short_paired_action_failed")
+        self.assertEqual(result["failed_stage"], "short_paired")
+        self.assertEqual(result["failure_type"], "RuntimeError")
+        self.assertNotIn("sensitive backend detail", json.dumps(result))
+        self.assertEqual(
+            result["completed_stages"], ["static_review", "build_correctness"]
+        )
+        self.assertIn("formal_paired", result["skipped_expensive_stages"])
 
 
 if __name__ == "__main__":

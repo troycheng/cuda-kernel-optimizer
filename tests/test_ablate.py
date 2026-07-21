@@ -22,6 +22,21 @@ def _load_ablate():
     return module
 
 
+def _paired_observations(champion_ms: float, ablated_ms: float, count: int = 4) -> dict:
+    return {
+        "pairs": [
+            {
+                "order": "AB" if index % 2 == 0 else "BA",
+                "baseline": champion_ms,
+                "candidate": ablated_ms,
+                "valid": True,
+                "invalid_reasons": [],
+            }
+            for index in range(count)
+        ]
+    }
+
+
 class AblateEvidenceTests(unittest.TestCase):
     @staticmethod
     def _fixture(root: Path):
@@ -47,10 +62,18 @@ class AblateEvidenceTests(unittest.TestCase):
         state.write_text(json.dumps({
             "run_dir": str(run), "ref_file": str(ref), "dims": {},
             "ptr_size": 8, "noise_threshold_pct": 2.0,
+            "input_hash": "f" * 64,
+            "budget": {"min_pairs": 4},
+            "confidence": 0.95,
+            "bootstrap_samples": 100,
+            "seed": 0,
+            "backend": "auto",
+            "arch": "sm_120",
+            "nvcc_bin": "nvcc",
         }), encoding="utf-8")
         return iteration, ablation, champion, kernel, state
 
-    def test_dotted_method_publishes_bound_rounded_evidence(self) -> None:
+    def test_dotted_method_publishes_bound_paired_evidence(self) -> None:
         module = _load_ablate()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -65,7 +88,12 @@ class AblateEvidenceTests(unittest.TestCase):
                 bench.write_text(json.dumps(result), encoding="utf-8")
                 return result
 
-            with mock.patch.object(module, "_bench_kernel", side_effect=fake_bench):
+            with mock.patch.object(module, "_bench_kernel", side_effect=fake_bench), mock.patch.object(
+                module,
+                "_run_paired",
+                return_value=_paired_observations(10.123456, 12.654321),
+                create=True,
+            ) as paired:
                 output = module.run(str(state), 1)
             item = output["attributions"][0]
             bench = ablation / "bench.json"
@@ -76,13 +104,17 @@ class AblateEvidenceTests(unittest.TestCase):
             self.assertEqual(item["champion_bench_sha256"], hashlib.sha256(champion.read_bytes()).hexdigest())
             self.assertEqual(item["ablated_bench"], str(bench.resolve()))
             self.assertEqual(item["ablated_bench_sha256"], hashlib.sha256(bench.read_bytes()).hexdigest())
-            self.assertEqual(item["champion_ms"], round(10.123456, 4))
-            self.assertEqual(item["ablated_ms"], round(12.654321, 4))
-            self.assertEqual(item["attribution_ms"], round(12.654321 - 10.123456, 4))
+            self.assertEqual(item["champion_ms"], 10.123456)
+            self.assertEqual(item["ablated_ms"], 12.654321)
+            self.assertEqual(item["attribution_ms"], 12.654321 - 10.123456)
             self.assertEqual(
                 item["attribution_pct"],
-                round((12.654321 - 10.123456) / 10.123456 * 100.0, 2),
+                (12.654321 - 10.123456) / 10.123456 * 100.0,
             )
+            self.assertEqual(item["evidence_kind"], "performance_attribution")
+            self.assertEqual(item["statistics"]["status"], "confirmed_win")
+            self.assertEqual(item["paired_samples"]["pairs"], 4)
+            paired.assert_called_once()
 
     def test_failed_benchmark_cannot_reuse_stale_json(self) -> None:
         module = _load_ablate()
@@ -155,7 +187,12 @@ class AblateEvidenceTests(unittest.TestCase):
                 Path(args[5]).write_text(json.dumps(result), encoding="utf-8")
                 return result
 
-            with mock.patch.object(module, "_bench_kernel", side_effect=fake_bench):
+            with mock.patch.object(module, "_bench_kernel", side_effect=fake_bench), mock.patch.object(
+                module,
+                "_run_paired",
+                return_value=_paired_observations(10.123456, 12.0),
+                create=True,
+            ):
                 output = module.run(str(state), 1)
 
             self.assertEqual(
@@ -218,7 +255,12 @@ class AblateEvidenceTests(unittest.TestCase):
                 )
                 return result
 
-            with mock.patch.object(module, "_bench_kernel", side_effect=fake_bench):
+            with mock.patch.object(module, "_bench_kernel", side_effect=fake_bench), mock.patch.object(
+                module,
+                "_run_paired",
+                return_value=_paired_observations(10.123456, 12.654321),
+                create=True,
+            ):
                 output = module.run(str(state), 1)
 
             selected = iteration / "kernel.py"
@@ -236,7 +278,7 @@ class AblateEvidenceTests(unittest.TestCase):
                 hashlib.sha256(kernel.read_bytes()).hexdigest(),
             )
 
-    def test_correctness_failure_is_bound_as_essential_method_evidence(self) -> None:
+    def test_correctness_failure_cannot_prove_method_contribution(self) -> None:
         module = _load_ablate()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -251,12 +293,16 @@ class AblateEvidenceTests(unittest.TestCase):
                 bench.write_text(json.dumps(result), encoding="utf-8")
                 return result
 
-            with mock.patch.object(module, "_bench_kernel", side_effect=fake_bench):
+            with mock.patch.object(module, "_bench_kernel", side_effect=fake_bench), mock.patch.object(
+                module, "_run_paired", create=True
+            ) as paired:
                 output = module.run(str(state), 1)
 
             item = output["attributions"][0]
-            self.assertTrue(item["contributed"])
-            self.assertEqual(item["evidence_kind"], "correctness_essential")
+            self.assertFalse(item["contributed"])
+            self.assertNotIn("evidence_kind", item)
+            self.assertEqual(item["note"], "ablated_kernel_failed_correctness")
+            paired.assert_not_called()
             self.assertEqual(
                 item["ablated_kernel_sha256"],
                 hashlib.sha256(kernel.read_bytes()).hexdigest(),
@@ -265,6 +311,47 @@ class AblateEvidenceTests(unittest.TestCase):
                 item["ablated_bench_sha256"],
                 hashlib.sha256((ablation / "bench.json").read_bytes()).hexdigest(),
             )
+
+    def test_each_method_requires_exactly_one_ablated_kernel(self) -> None:
+        module = _load_ablate()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _iteration, ablation, _champion, _kernel, state = self._fixture(root)
+            (ablation / "kernel.cu").write_text("// duplicate\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(SystemExit, "exactly one ablated kernel"):
+                module.run(str(state), 1)
+
+    def test_sub_microsecond_ablation_does_not_prove_contribution(self) -> None:
+        module = _load_ablate()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _iteration, ablation, _champion, _kernel, state = self._fixture(root)
+            result = {
+                "correctness": {"passed": True},
+                "kernel": {"average_ms": 0.0205},
+            }
+
+            def fake_bench(*_args):
+                (ablation / "bench.json").write_text(
+                    json.dumps(result), encoding="utf-8"
+                )
+                return result
+
+            with mock.patch.object(
+                module, "_bench_kernel", side_effect=fake_bench
+            ), mock.patch.object(
+                module,
+                "_run_paired",
+                return_value=_paired_observations(0.0200, 0.0205),
+            ):
+                output = module.run(str(state), 1)
+
+            item = output["attributions"][0]
+            self.assertFalse(item["contributed"])
+            self.assertEqual(item["statistics"]["status"], "inconclusive")
+            self.assertEqual(item["minimum_effect_us"], 1.0)
+            self.assertAlmostEqual(item["effective_min_effect_pct"], 5.0)
 
 
 if __name__ == "__main__":

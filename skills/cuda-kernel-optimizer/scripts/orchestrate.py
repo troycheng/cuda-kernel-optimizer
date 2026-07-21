@@ -509,96 +509,7 @@ def _verify_candidate_success_inheritance(
             if isinstance(proof, Mapping)
             else {"status": "not_required", "required_method_ids": []}
         )
-    attribution = _load_iteration_json(iteration_dir, "attribution.json")
     candidate_snapshot = _candidate_snapshot(candidate)
-    if attribution.get("candidate_sha256") != candidate_snapshot["sha256"]:
-        raise ValueError("candidate inheritance attribution does not bind candidate bytes")
-    records = attribution.get("attributions")
-    if not isinstance(records, list):
-        raise ValueError("candidate inheritance attribution is malformed")
-    by_method = {
-        item.get("method_id"): item
-        for item in records
-        if isinstance(item, Mapping) and isinstance(item.get("method_id"), str)
-    }
-    try:
-        ablation_root = (iteration_dir / "ablations").resolve(strict=True)
-    except OSError as error:
-        raise ValueError("candidate inheritance ablation directory is missing") from error
-    verified_methods = []
-    for method_id in required_method_ids:
-        record = by_method.get(method_id)
-        if not isinstance(record, Mapping) or record.get("contributed") is not True:
-            raise ValueError(
-                f"candidate-specific inheritance verification failed for {method_id}"
-            )
-        try:
-            method_dir = (ablation_root / method_id).resolve(strict=True)
-        except OSError as error:
-            raise ValueError(
-                f"candidate inheritance evidence path is invalid for {method_id}"
-            ) from error
-        if method_dir.parent != ablation_root:
-            raise ValueError("candidate inheritance evidence escapes iteration")
-        kernel_path = Path(str(record.get("ablated_kernel", ""))).expanduser()
-        bench_path = Path(str(record.get("ablated_bench", ""))).expanduser()
-        if (
-            kernel_path.is_symlink()
-            or not kernel_path.is_file()
-            or kernel_path.resolve(strict=True).parent != method_dir
-            or kernel_path.name not in {"kernel.cu", "kernel.py"}
-            or bench_path.is_symlink()
-            or not bench_path.is_file()
-            or bench_path.resolve(strict=True) != method_dir / "bench.json"
-        ):
-            raise ValueError(
-                f"candidate inheritance evidence path is invalid for {method_id}"
-            )
-        kernel_sha256 = sha256_file(kernel_path)
-        bench_sha256 = sha256_file(bench_path)
-        if (
-            record.get("ablated_kernel_sha256") != kernel_sha256
-            or record.get("ablated_bench_sha256") != bench_sha256
-        ):
-            raise ValueError(
-                f"candidate inheritance evidence digest mismatch for {method_id}"
-            )
-        bench = _read(bench_path)
-        correctness_passed = bool(
-            bench.get("correctness", {}).get("passed", False)
-        )
-        evidence_kind = record.get("evidence_kind", "performance_attribution")
-        attribution_ms = record.get("attribution_ms")
-        if evidence_kind == "correctness_essential":
-            if correctness_passed or record.get("note") != (
-                "ablated_kernel_failed_validation_method_essential"
-            ):
-                raise ValueError(
-                    f"candidate correctness inheritance evidence is invalid for {method_id}"
-                )
-            clean_attribution = None
-        elif (
-            evidence_kind != "performance_attribution"
-            or not correctness_passed
-            or isinstance(attribution_ms, bool)
-            or not isinstance(attribution_ms, (int, float))
-            or not math.isfinite(float(attribution_ms))
-            or float(attribution_ms) <= 0.0
-        ):
-            raise ValueError(
-                f"candidate performance inheritance evidence is invalid for {method_id}"
-            )
-        else:
-            clean_attribution = float(attribution_ms)
-        verified_methods.append(
-            {
-                "method_id": method_id,
-                "evidence_kind": evidence_kind,
-                "attribution_ms": clean_attribution,
-                "ablated_kernel_sha256": kernel_sha256,
-                "ablated_bench_sha256": bench_sha256,
-            }
-        )
     baseline_proof = branch_payload.get("inheritance_verification")
     if not isinstance(baseline_proof, Mapping):
         raise ValueError("branch inheritance baseline binding is missing")
@@ -610,6 +521,27 @@ def _verify_candidate_success_inheritance(
         or baseline_proof.get("required_method_ids") != required_method_ids
     ):
         raise ValueError("branch inheritance baseline binding is invalid")
+    iteration_match = re.fullmatch(r"iterv([1-9][0-9]*)", iteration_dir.name)
+    if iteration_match is None:
+        raise ValueError("candidate inheritance iteration directory is invalid")
+    existing_attribution_sha256 = None
+    if baseline_proof.get("status") == "passed":
+        if (
+            baseline_proof.get("evidence_kind") != "candidate_ablation"
+            or baseline_proof.get("candidate_sha256") != candidate_snapshot["sha256"]
+            or baseline_proof.get("required_method_ids") != required_method_ids
+        ):
+            raise ValueError("candidate inheritance proof does not bind selected candidate")
+        existing_attribution_sha256 = baseline_proof.get("attribution_sha256")
+        if not isinstance(existing_attribution_sha256, str):
+            raise ValueError("candidate inheritance proof lacks attribution digest")
+    artifact_proof = state_manager.validate_success_inheritance_artifacts(
+        state,
+        iteration=int(iteration_match.group(1)),
+        candidate_sha256=candidate_snapshot["sha256"],
+        required_method_ids=required_method_ids,
+        expected_attribution_sha256=existing_attribution_sha256,
+    )
     candidate_id = _candidate_checkpoint_id(candidate)
     proof = {
         **dict(baseline_proof),
@@ -618,13 +550,22 @@ def _verify_candidate_success_inheritance(
         "verified_candidate_ids": [candidate_id],
         "candidate_file": candidate_snapshot["path"],
         "candidate_sha256": candidate_snapshot["sha256"],
-        "attribution_sha256": sha256_file(iteration_dir / "attribution.json"),
-        "verified_methods": verified_methods,
+        "attribution_sha256": artifact_proof["attribution_sha256"],
+        "verified_methods": artifact_proof["verified_methods"],
     }
     updated_payload = _strict_json_copy(branch_payload, "branch results")
     updated_payload["inheritance_verification"] = proof
     atomic_write_json(iteration_dir / "branch_results.json", updated_payload)
     return proof
+
+
+def _inheritance_proof_is_sealed(branch_payload: Mapping) -> bool:
+    proof = branch_payload.get("inheritance_verification")
+    return (
+        isinstance(proof, Mapping)
+        and proof.get("status") == "passed"
+        and proof.get("evidence_kind") == "candidate_ablation"
+    )
 
 
 def _inheritance_verified_candidates(
@@ -4060,54 +4001,56 @@ def _cmd_close_iter_lifecycle(args, state, state_path, iter_dir, methods_json):
             if eligible_candidates and (
                 ablation_dir.is_dir() or inherited_method_ids
             ):
-                if not clock.can_start(
-                    now=time.monotonic(),
-                    estimated_seconds=_STAGE_ESTIMATES_SECONDS["ablation"],
-                ):
-                    denied = schedule_next(
-                        checkpoint,
-                        clock,
-                        _STAGE_ESTIMATES_SECONDS["ablation"],
+                proof_already_sealed = _inheritance_proof_is_sealed(branch_payload)
+                if not proof_already_sealed:
+                    if not clock.can_start(
                         now=time.monotonic(),
-                        store=store,
-                        candidate_id=candidate_id,
+                        estimated_seconds=_STAGE_ESTIMATES_SECONDS["ablation"],
+                    ):
+                        denied = schedule_next(
+                            checkpoint,
+                            clock,
+                            _STAGE_ESTIMATES_SECONDS["ablation"],
+                            now=time.monotonic(),
+                            store=store,
+                            candidate_id=candidate_id,
+                        )
+                        _budget_stop_output(args, denied)
+                        return
+                    attribution_artifact = iteration_dir / "attribution.json"
+                    if attribution_artifact.is_symlink():
+                        raise ValueError("attribution.json must not be a symlink")
+                    if attribution_artifact.exists():
+                        if not attribution_artifact.is_file():
+                            raise ValueError("attribution.json must be a regular file")
+                        attribution_artifact.unlink()
+                    ablation_result = _run(
+                        [
+                            sys.executable,
+                            str(SCRIPT_DIR / "ablate.py"),
+                            "--state",
+                            state_path,
+                            "--iter",
+                            str(args.iter),
+                            "--benchmark",
+                            os.path.abspath(args.benchmark),
+                        ],
+                        hard_timeout=_hard_timeout_seconds(clock),
                     )
-                    _budget_stop_output(args, denied)
-                    return
-                attribution_artifact = iteration_dir / "attribution.json"
-                if attribution_artifact.is_symlink():
-                    raise ValueError("attribution.json must not be a symlink")
-                if attribution_artifact.exists():
-                    if not attribution_artifact.is_file():
-                        raise ValueError("attribution.json must be a regular file")
-                    attribution_artifact.unlink()
-                ablation_result = _run(
-                    [
-                        sys.executable,
-                        str(SCRIPT_DIR / "ablate.py"),
-                        "--state",
-                        state_path,
-                        "--iter",
-                        str(args.iter),
-                        "--benchmark",
-                        os.path.abspath(args.benchmark),
-                    ],
-                    hard_timeout=_hard_timeout_seconds(clock),
-                )
-                if getattr(ablation_result, "timed_out", False):
-                    checkpoint = _persist_hard_timeout(
-                        checkpoint,
-                        next_stage,
-                        store=store,
-                        clock=clock,
-                        candidate_id=candidate_id,
-                    )
-                    _budget_stop_output(args, checkpoint)
-                    return
-                if ablation_result.returncode != 0:
-                    raise SystemExit(
-                        f"ablate failed rc={ablation_result.returncode}"
-                    )
+                    if getattr(ablation_result, "timed_out", False):
+                        checkpoint = _persist_hard_timeout(
+                            checkpoint,
+                            next_stage,
+                            store=store,
+                            clock=clock,
+                            candidate_id=candidate_id,
+                        )
+                        _budget_stop_output(args, checkpoint)
+                        return
+                    if ablation_result.returncode != 0:
+                        raise SystemExit(
+                            f"ablate failed rc={ablation_result.returncode}"
+                        )
             if eligible_candidates:
                 inheritance_proof = _verify_candidate_success_inheritance(
                     state,

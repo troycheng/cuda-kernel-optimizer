@@ -2705,6 +2705,38 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(decision["stop_reason"], "short_pair_failed")
             self.assertIn("formal_paired", decision["skipped_expensive_stages"])
 
+    def test_stage_exception_records_terminal_reason_and_rolls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            self.controller.start_run(control, run_dir)
+            self.controller.register_change(control, run_dir, self._change())
+            config = project / "configs" / "value.json"
+            original = config.read_text("utf-8")
+            config.write_text('{"workers": 8}\n', encoding="utf-8")
+            evaluator = mock.Mock()
+            evaluator.evaluate_pairs.side_effect = RuntimeError(
+                "backend crashed with private detail"
+            )
+
+            with mock.patch.object(
+                self.controller, "_load_evaluate_module", return_value=evaluator
+            ):
+                decision = self.controller.evaluate_change(run_dir)
+
+            self.assertEqual(evaluator.evaluate_pairs.call_count, 1)
+            self.assertEqual(decision["status"], "rejected")
+            self.assertEqual(decision["reason"], "short_paired_action_failed")
+            self.assertEqual(decision["stop_reason"], "short_paired_action_failed")
+            self.assertEqual(config.read_text("utf-8"), original)
+            gate = json.loads((run_dir / "time_gate.json").read_text("utf-8"))
+            self.assertEqual(gate["failed_stage"], "short_paired")
+            self.assertEqual(gate["failure_type"], "RuntimeError")
+            self.assertIn("formal_paired", gate["skipped_expensive_stages"])
+            state = self.controller.read_run_state(run_dir)
+            self.assertEqual(state["status"], "completed")
+            self.assertEqual(state["next_action"], "done")
+
     def test_reject_only_positive_screen_is_rolled_back_and_never_promoted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

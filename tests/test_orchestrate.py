@@ -961,8 +961,14 @@ class BudgetedParserTests(unittest.TestCase):
             baseline_sha256 = self.orchestrate.sha256_file(champion)
             candidate_sha256 = self.orchestrate.sha256_file(candidate_file)
             state = {
+                "run_dir": str(iteration.parent),
+                "input_hash": "f" * 64,
                 "best_file": str(champion),
                 "effective_methods": [{"id": "fastsort.store", "iter": 124}],
+                "noise_threshold_pct": 2.0,
+                "confidence": 0.95,
+                "bootstrap_samples": 100,
+                "seed": 0,
             }
             candidate = {
                 "branch_index": 1,
@@ -998,16 +1004,61 @@ class BudgetedParserTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            pairs = [
+                {
+                    "order": "AB" if index % 2 == 0 else "BA",
+                    "baseline": 1.0,
+                    "candidate": 1.05,
+                    "valid": True,
+                    "invalid_reasons": [],
+                }
+                for index in range(4)
+            ]
+            classifier = {
+                "direction": "higher",
+                "min_effect_pct": 2.0,
+                "confidence": 0.95,
+                "bootstrap_samples": 100,
+                "seed": 0,
+            }
+            paired_samples = self.orchestrate.write_paired_samples(
+                ablation_dir / "paired_samples.jsonl",
+                pairs,
+                kind="kernel",
+                input_hash=state["input_hash"],
+                iteration=1,
+                candidate_id="fastsort.store",
+                candidate_file=ablated_kernel,
+                baseline_file=candidate_file,
+                classifier_config=classifier,
+            )
+            statistics = self.orchestrate.state_manager.paired_stats.classify_pairs(
+                pairs,
+                direction="higher",
+                min_effect_pct=2.0,
+                confidence=0.95,
+                bootstrap_samples=100,
+                seed=0,
+            )
             (iteration / "attribution.json").write_text(
                 json.dumps(
                     {
+                        "iter": 1,
                         "candidate_file": str(candidate_file),
                         "candidate_sha256": candidate_sha256,
+                        "noise_threshold_pct": 2.0,
+                        "minimum_effect_us": 1.0,
                         "attributions": [
                             {
                                 "method_id": "fastsort.store",
+                                "evidence_kind": "performance_attribution",
                                 "contributed": True,
-                                "attribution_ms": 0.003,
+                                "champion_ms": 1.0,
+                                "ablated_ms": 1.05,
+                                "attribution_ms": 0.05,
+                                "attribution_pct": 5.0,
+                                "minimum_effect_us": 1.0,
+                                "effective_min_effect_pct": 2.0,
                                 "ablated_kernel": str(ablated_kernel),
                                 "ablated_kernel_sha256": self.orchestrate.sha256_file(
                                     ablated_kernel
@@ -1016,7 +1067,8 @@ class BudgetedParserTests(unittest.TestCase):
                                 "ablated_bench_sha256": self.orchestrate.sha256_file(
                                     ablated_bench
                                 ),
-                                "ablated_ms": 1.003,
+                                "statistics": statistics,
+                                "paired_samples": paired_samples,
                             }
                         ],
                     }
@@ -1060,17 +1112,21 @@ class BudgetedParserTests(unittest.TestCase):
                 ["fastsort.store"],
             )
             self.assertEqual(
+                proof["verified_methods"][0]["paired_samples_sha256"],
+                paired_samples["sha256"],
+            )
+            self.assertEqual(
                 decision["inheritance_verification"]["candidate_sha256"],
                 candidate_sha256,
             )
             tampered = json.loads(
                 (iteration / "attribution.json").read_text("utf-8")
             )
-            tampered["attributions"][0]["ablated_kernel_sha256"] = "not-a-digest"
+            tampered["note"] = "changed after sanitizer checkpoint"
             (iteration / "attribution.json").write_text(
                 json.dumps(tampered), encoding="utf-8"
             )
-            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+            with self.assertRaisesRegex(ValueError, "drifted"):
                 self.orchestrate._verify_candidate_success_inheritance(
                     state, branch_payload, iteration, candidate
                 )
@@ -1078,7 +1134,8 @@ class BudgetedParserTests(unittest.TestCase):
                 json.dumps({"correctness": {"passed": False}}),
                 encoding="utf-8",
             )
-            essential = tampered
+            essential = copy.deepcopy(tampered)
+            essential.pop("note", None)
             essential_record = essential["attributions"][0]
             essential_record.update(
                 {
@@ -1096,13 +1153,26 @@ class BudgetedParserTests(unittest.TestCase):
             (iteration / "attribution.json").write_text(
                 json.dumps(essential), encoding="utf-8"
             )
-            essential_proof = self.orchestrate._verify_candidate_success_inheritance(
-                state, branch_payload, iteration, candidate
+            pending_payload = copy.deepcopy(branch_payload)
+            pending_payload["inheritance_verification"] = {
+                key: value
+                for key, value in pending_payload["inheritance_verification"].items()
+                if key
+                in {
+                    "proof",
+                    "baseline_file",
+                    "baseline_sha256",
+                    "required_method_ids",
+                    "verified_candidate_ids",
+                }
+            }
+            pending_payload["inheritance_verification"]["status"] = (
+                "pending_candidate_verification"
             )
-            self.assertEqual(
-                essential_proof["verified_methods"][0]["evidence_kind"],
-                "correctness_essential",
-            )
+            with self.assertRaisesRegex(ValueError, "correctness"):
+                self.orchestrate._verify_candidate_success_inheritance(
+                    state, pending_payload, iteration, candidate
+                )
             unsafe_state = {
                 **state,
                 "effective_methods": [{"id": str(iteration.parent / "escape")}],
@@ -1111,6 +1181,32 @@ class BudgetedParserTests(unittest.TestCase):
                 self.orchestrate._verify_candidate_success_inheritance(
                     unsafe_state, branch_payload, iteration, candidate
                 )
+
+    def test_sealed_inheritance_proof_is_reused_on_resume(self) -> None:
+        self.assertTrue(
+            self.orchestrate._inheritance_proof_is_sealed(
+                {
+                    "inheritance_verification": {
+                        "status": "passed",
+                        "evidence_kind": "candidate_ablation",
+                    }
+                }
+            )
+        )
+        self.assertFalse(
+            self.orchestrate._inheritance_proof_is_sealed(
+                {"inheritance_verification": {"status": "passed"}}
+            )
+        )
+        self.assertFalse(
+            self.orchestrate._inheritance_proof_is_sealed(
+                {
+                    "inheritance_verification": {
+                        "status": "pending_candidate_verification"
+                    }
+                }
+            )
+        )
 
     def test_one_ablation_directory_cannot_prove_colliding_method_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1136,6 +1232,8 @@ class BudgetedParserTests(unittest.TestCase):
             baseline_sha256 = self.orchestrate.sha256_file(champion)
             candidate_sha256 = self.orchestrate.sha256_file(candidate_file)
             state = {
+                "run_dir": str(iteration.parent),
+                "input_hash": "f" * 64,
                 "best_file": str(champion),
                 "effective_methods": [{"id": "a.b"}, {"id": "a_b"}],
             }
@@ -1157,6 +1255,7 @@ class BudgetedParserTests(unittest.TestCase):
                 }
             }
             record = {
+                "evidence_kind": "performance_attribution",
                 "contributed": True,
                 "attribution_ms": 0.003,
                 "ablated_kernel": str(ablated_kernel),
@@ -1171,7 +1270,11 @@ class BudgetedParserTests(unittest.TestCase):
             (iteration / "attribution.json").write_text(
                 json.dumps(
                     {
+                        "iter": 1,
+                        "candidate_file": str(candidate_file),
                         "candidate_sha256": candidate_sha256,
+                        "noise_threshold_pct": 2.0,
+                        "minimum_effect_us": 1.0,
                         "attributions": [
                             {**record, "method_id": "a.b"},
                             {**record, "method_id": "a_b"},

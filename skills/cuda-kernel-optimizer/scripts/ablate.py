@@ -19,9 +19,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import stat
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +34,8 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import artifact_store  # noqa: E402
+from paired_benchmark import run_paired as _run_paired  # noqa: E402
+from paired_stats import classify_pairs  # noqa: E402
 
 
 _BUNDLED_BENCHMARK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "benchmark.py")
@@ -151,7 +155,8 @@ def run(state_path: str, iteration: int, benchmark_py: str = None) -> dict:
     iter_dir = os.path.join(run_dir, f"iterv{iteration}")
     bench_py = benchmark_py or _BUNDLED_BENCHMARK
 
-    # Load champion timing
+    # The published candidate bench is only a correctness precondition.  Method
+    # contribution is measured later from same-run AB/BA pairs.
     champion_bench = os.path.join(iter_dir, "bench.json")
     if not os.path.isfile(champion_bench):
         sys.exit(f"Champion bench.json not found at {champion_bench}")
@@ -161,9 +166,8 @@ def run(state_path: str, iteration: int, benchmark_py: str = None) -> dict:
         champion_data = json.loads(champion_identity["bytes"].decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         sys.exit(f"Champion bench.json is unsafe or malformed: {error}")
-    champion_ms = (champion_data.get("kernel") or {}).get("average_ms")
-    if champion_ms is None:
-        sys.exit("Champion has no timing data")
+    if champion_data.get("correctness", {}).get("passed") is not True:
+        sys.exit("Selected candidate failed correctness validation")
     candidate_paths = [
         Path(iter_dir) / f"kernel{extension}" for extension in (".cu", ".py")
     ]
@@ -210,9 +214,44 @@ def run(state_path: str, iteration: int, benchmark_py: str = None) -> dict:
     dims = state.get("dims", {})
     ptr_size = state.get("ptr_size", 0)
     noise_threshold = state.get("noise_threshold_pct", 2.0)
+    minimum_effect_us = state.get("minimum_effect_us", 1.0)
+    if (
+        isinstance(minimum_effect_us, bool)
+        or not isinstance(minimum_effect_us, (int, float))
+        or not math.isfinite(float(minimum_effect_us))
+        or float(minimum_effect_us) <= 0.0
+    ):
+        raise ValueError("state minimum_effect_us must be a positive finite number")
+    minimum_effect_us = float(minimum_effect_us)
+    budget = state.get("budget") or {}
+    blocks = budget.get("min_pairs", 20)
+    if isinstance(blocks, bool) or not isinstance(blocks, int) or blocks < 2:
+        raise ValueError("state budget.min_pairs must be an integer of at least 2")
+    backend = state.get("backend", "auto")
+    env = state.get("env") or {}
+    arch = state.get("arch") or env.get("primary_sm_arch")
+    if not arch:
+        gpus = env.get("gpus") or []
+        if gpus and isinstance(gpus[0], dict):
+            arch = gpus[0].get("sm_arch")
+    if not isinstance(arch, str) or not arch.strip():
+        raise ValueError("state must provide arch or env.primary_sm_arch")
+    nvcc = env.get("nvcc") or {}
+    nvcc_bin = state.get("nvcc_bin") or nvcc.get("path") or "nvcc"
+    if not isinstance(nvcc_bin, str) or not nvcc_bin.strip():
+        raise ValueError("state nvcc_bin must be a non-empty string")
+    seed = state.get("seed", 0)
+    confidence = state.get("confidence", 0.95)
+    bootstrap_samples = state.get("bootstrap_samples", 10000)
+    max_temperature_delta_c = state.get("max_temperature_delta_c", 5)
+    max_clock_delta_pct = state.get("max_clock_delta_pct", 5)
+    input_hash = state.get("input_hash")
+    if not isinstance(input_hash, str) or not input_hash.strip():
+        raise ValueError("state input_hash must be non-empty")
 
     attributions = []
     ablation_dir = os.path.join(iter_dir, "ablations")
+    paired_champion_ms = None
 
     for m in methods_list:
         mid = m.get("id", "unknown")
@@ -221,43 +260,44 @@ def run(state_path: str, iteration: int, benchmark_py: str = None) -> dict:
         method_dir = os.path.join(ablation_dir, mid)
 
         # Find ablated kernel
-        ablated_kernel = None
+        ablated_identities = []
         for ext in (".cu", ".py"):
             candidate = os.path.join(method_dir, f"kernel{ext}")
             try:
-                _regular_identity(candidate)
+                identity = _regular_identity(candidate)
             except (OSError, ValueError):
                 continue
-            ablated_kernel = str(Path(candidate).absolute())
-            break
+            ablated_identities.append(identity)
 
-        if ablated_kernel is None:
+        if not ablated_identities:
             # No ablated kernel provided — skip, assume neutral
             attributions.append({
                 "method_id": mid,
                 "ablated_kernel": None,
                 "ablated_ms": None,
-                "champion_ms": champion_ms,
+                "champion_ms": None,
                 "attribution_ms": 0.0,
                 "attribution_pct": 0.0,
                 "contributed": False,
                 "note": "no_ablated_kernel_provided",
             })
             continue
+        if len(ablated_identities) != 1:
+            sys.exit(f"Method {mid} must contain exactly one ablated kernel")
+        kernel_before = ablated_identities[0]
+        ablated_kernel = kernel_before["path"]
 
         # Benchmark ablated kernel
         ablated_json_out = os.path.join(method_dir, "bench.json")
-        try:
-            kernel_before = _regular_identity(ablated_kernel)
-        except (OSError, ValueError) as error:
-            attributions.append({
-                "method_id": mid,
-                "contributed": False,
-                "note": f"unsafe_or_drifted_ablation_evidence: {error}",
-            })
-            continue
         result = _bench_kernel(
-            bench_py, ablated_kernel, ref_file, dims, ptr_size, ablated_json_out,
+            bench_py,
+            ablated_kernel,
+            ref_file,
+            dims,
+            ptr_size,
+            ablated_json_out,
+            1,
+            1,
         )
 
         if result is None:
@@ -286,31 +326,16 @@ def run(state_path: str, iteration: int, benchmark_py: str = None) -> dict:
                 continue
             attributions.append({
                 "method_id": mid,
-                "evidence_kind": "correctness_essential",
                 "ablated_kernel": kernel_before["path"],
                 "ablated_kernel_sha256": kernel_before["sha256"],
                 "ablated_bench": bench_identity["path"],
                 "ablated_bench_sha256": bench_identity["sha256"],
                 "ablated_ms": None,
-                "champion_ms": champion_ms,
+                "champion_ms": None,
                 "attribution_ms": None,
                 "attribution_pct": None,
-                "contributed": True,
-                "note": "ablated_kernel_failed_validation_method_essential",
-            })
-            continue
-
-        ablated_ms = (result.get("kernel") or {}).get("average_ms")
-        if ablated_ms is None:
-            attributions.append({
-                "method_id": mid,
-                "ablated_kernel": ablated_kernel,
-                "ablated_ms": None,
-                "champion_ms": champion_ms,
-                "attribution_ms": 0.0,
-                "attribution_pct": 0.0,
                 "contributed": False,
-                "note": "no_timing_in_ablated_bench",
+                "note": "ablated_kernel_failed_correctness",
             })
             continue
 
@@ -332,24 +357,101 @@ def run(state_path: str, iteration: int, benchmark_py: str = None) -> dict:
             })
             continue
 
-        # Compute attribution
-        attr_ms = ablated_ms - champion_ms
-        attr_pct = (attr_ms / champion_ms * 100) if champion_ms > 0 else 0.0
-        contributed = attr_pct > noise_threshold
+        try:
+            paired = _run_paired(
+                candidate_identity["path"],
+                ablated_kernel,
+                backend=backend,
+                dims=dims,
+                ptr_size=ptr_size,
+                arch=arch,
+                nvcc_bin=nvcc_bin,
+                seed=seed,
+                blocks=blocks,
+                warmup=1,
+                max_temperature_delta_c=max_temperature_delta_c,
+                max_clock_delta_pct=max_clock_delta_pct,
+            )
+            if _regular_identity(candidate_identity["path"]) != candidate_identity:
+                raise ValueError("selected candidate changed during paired attribution")
+            if _regular_identity(ablated_kernel) != kernel_before:
+                raise ValueError("ablated kernel changed during paired attribution")
+            raw_pairs = paired["pairs"]
+            valid_pairs = [
+                pair for pair in raw_pairs if pair.get("valid", True) is True
+            ]
+            if not valid_pairs:
+                raise ValueError("paired attribution produced no valid pairs")
+            champion_ms = statistics.median(
+                float(pair["baseline"]) for pair in valid_pairs
+            )
+            ablated_ms = statistics.median(
+                float(pair["candidate"]) for pair in valid_pairs
+            )
+            attr_ms = statistics.median(
+                float(pair["candidate"]) - float(pair["baseline"])
+                for pair in valid_pairs
+            )
+            effective_min_effect_pct = max(
+                float(noise_threshold),
+                minimum_effect_us / (champion_ms * 10.0),
+            )
+            statistics_payload = classify_pairs(
+                raw_pairs,
+                direction="higher",
+                min_effect_pct=effective_min_effect_pct,
+                confidence=confidence,
+                bootstrap_samples=bootstrap_samples,
+                seed=seed,
+            )
+            paired_samples = artifact_store.write_paired_samples(
+                os.path.join(method_dir, "paired_samples.jsonl"),
+                raw_pairs,
+                kind="kernel",
+                input_hash=input_hash,
+                iteration=iteration,
+                candidate_id=mid,
+                candidate_file=ablated_kernel,
+                baseline_file=candidate_identity["path"],
+                classifier_config={
+                    "direction": "higher",
+                    "min_effect_pct": effective_min_effect_pct,
+                    "confidence": confidence,
+                    "bootstrap_samples": bootstrap_samples,
+                    "seed": seed,
+                },
+            )
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            attributions.append({
+                "method_id": mid,
+                "contributed": False,
+                "note": f"paired_attribution_failed: {type(error).__name__}",
+            })
+            continue
+
+        if paired_champion_ms is None:
+            paired_champion_ms = champion_ms
+        attr_pct = statistics_payload["estimate_pct"]
+        contributed = statistics_payload["status"] == "confirmed_win"
 
         attributions.append({
             "method_id": mid,
+            "evidence_kind": "performance_attribution",
             "champion_bench": champion_bench,
             "champion_bench_sha256": champion_identity["sha256"],
             "ablated_kernel": kernel_before["path"],
             "ablated_kernel_sha256": kernel_before["sha256"],
             "ablated_bench": bench_identity["path"],
             "ablated_bench_sha256": bench_identity["sha256"],
-            "ablated_ms": round(ablated_ms, 4),
-            "champion_ms": round(champion_ms, 4),
-            "attribution_ms": round(attr_ms, 4),
-            "attribution_pct": round(attr_pct, 2),
+            "ablated_ms": ablated_ms,
+            "champion_ms": champion_ms,
+            "attribution_ms": attr_ms,
+            "attribution_pct": attr_pct,
             "contributed": contributed,
+            "minimum_effect_us": minimum_effect_us,
+            "effective_min_effect_pct": effective_min_effect_pct,
+            "statistics": statistics_payload,
+            "paired_samples": paired_samples,
         })
 
     try:
@@ -362,16 +464,16 @@ def run(state_path: str, iteration: int, benchmark_py: str = None) -> dict:
 
     output = {
         "iter": iteration,
-        "champion_ms": round(champion_ms, 4),
+        "champion_ms": paired_champion_ms,
         "candidate_file": candidate_identity["path"],
         "candidate_sha256": candidate_identity["sha256"],
         "noise_threshold_pct": noise_threshold,
+        "minimum_effect_us": minimum_effect_us,
         "attributions": attributions,
     }
 
     out_path = os.path.join(iter_dir, "attribution.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
+    artifact_store.atomic_write_json(out_path, output)
 
     print(json.dumps(output, indent=2))
     return output

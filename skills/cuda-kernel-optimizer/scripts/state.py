@@ -49,6 +49,7 @@ import os
 import re
 import shutil
 import stat
+import statistics as statistics_module
 import subprocess
 import sys
 import time
@@ -158,6 +159,7 @@ _STATISTIC_FIELDS = (
     "status",
 )
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
+_METHOD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
 def _resolved_path(path: str) -> str:
@@ -391,7 +393,8 @@ def _validate_paired_artifact(
     expected_bootstrap_samples: int,
     expected_seed: int,
     verify_file: bool,
-) -> dict:
+    expected_kernel_direction: str = "lower",
+) -> tuple[dict, list | None]:
     field = f"{kind}_paired_samples"
     if not isinstance(payload, Mapping):
         raise ValueError(f"{field} must be a mapping")
@@ -454,7 +457,7 @@ def _validate_paired_artifact(
     if not isinstance(classifier, Mapping):
         raise ValueError(f"{field}.classifier must be a mapping")
     if not verify_file:
-        return clean
+        return clean, None
 
     artifact = Path(clean["path"])
     artifact_bytes = read_regular_bytes(artifact)
@@ -519,7 +522,7 @@ def _validate_paired_artifact(
         }
         if set(classifier) != required_classifier:
             raise ValueError(f"{field}.classifier fields are invalid")
-        if classifier["direction"] != "lower":
+        if classifier["direction"] != expected_kernel_direction:
             raise ValueError(f"{field}.classifier direction does not match frozen state")
         if classifier["min_effect_pct"] != expected_kernel_min_effect:
             raise ValueError(f"{field}.classifier min_effect does not match frozen state")
@@ -589,7 +592,7 @@ def _validate_paired_artifact(
                 raise ValueError(f"{field} raw pairs do not recompute workload failure")
         else:
             raise ValueError(f"{field} terminal workload status is missing")
-    return clean
+    return clean, raw_pairs
 
 
 def _paired_count(statistics: Mapping | None) -> int | None:
@@ -829,7 +832,7 @@ def _validate_terminal_snapshot(
         if evidence is not None:
             if candidate_sha256 is None or type(candidate_id) is not str:
                 raise ValueError(f"{field} requires candidate binding")
-            clean[field] = _validate_paired_artifact(
+            clean[field], _raw_pairs = _validate_paired_artifact(
                 evidence,
                 kind=kind,
                 input_hash=state["input_hash"],
@@ -1007,8 +1010,305 @@ def _load_decision(
     return dict(decision), status, statistics, workload_statistics
 
 
+def validate_success_inheritance_artifacts(
+    state: Mapping,
+    *,
+    iteration: int,
+    candidate_sha256: str,
+    required_method_ids,
+    expected_attribution_sha256: str | None = None,
+) -> dict:
+    """Recompute candidate-bound ablation proof from durable paired samples."""
+    if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration <= 0:
+        raise ValueError("inheritance iteration must be positive")
+    if not isinstance(candidate_sha256, str) or _SHA256.fullmatch(candidate_sha256) is None:
+        raise ValueError("inheritance candidate sha256 is invalid")
+    required = sorted(set(required_method_ids))
+    if not required or any(
+        not isinstance(method_id, str) or _METHOD_ID.fullmatch(method_id) is None
+        for method_id in required
+    ):
+        raise ValueError("inheritance method ids are invalid")
+    run_dir = Path(str(state.get("run_dir", ""))).expanduser()
+    if not run_dir.is_absolute():
+        raise ValueError("state run_dir must be absolute for inheritance validation")
+    iteration_dir = run_dir / f"iterv{iteration}"
+    attribution_path = iteration_dir / "attribution.json"
+    attribution_bytes = read_regular_bytes(attribution_path)
+    attribution_sha256 = hashlib.sha256(attribution_bytes).hexdigest()
+    if expected_attribution_sha256 is not None and (
+        not isinstance(expected_attribution_sha256, str)
+        or _SHA256.fullmatch(expected_attribution_sha256) is None
+        or expected_attribution_sha256 != attribution_sha256
+    ):
+        raise ValueError("candidate inheritance attribution drifted after verification")
+    try:
+        attribution = _strict_json_value(
+            attribution_bytes.decode("utf-8"), "attribution.json"
+        )
+    except UnicodeDecodeError as error:
+        raise ValueError("attribution.json must be UTF-8") from error
+    if not isinstance(attribution, Mapping):
+        raise ValueError("attribution.json must contain a mapping")
+    if attribution.get("iter") != iteration:
+        raise ValueError("candidate inheritance attribution iteration is invalid")
+    if attribution.get("candidate_sha256") != candidate_sha256:
+        raise ValueError("candidate inheritance attribution does not bind candidate bytes")
+    candidate_file = Path(str(attribution.get("candidate_file", ""))).expanduser()
+    try:
+        candidate_resolved = candidate_file.resolve(strict=True)
+        iteration_resolved = iteration_dir.resolve(strict=True)
+    except OSError as error:
+        raise ValueError("candidate inheritance selected kernel is missing") from error
+    if (
+        candidate_file.is_symlink()
+        or not candidate_file.is_file()
+        or candidate_resolved.parent != iteration_resolved
+        or candidate_resolved.name not in {"kernel.cu", "kernel.py"}
+        or sha256_file(candidate_resolved) != candidate_sha256
+    ):
+        raise ValueError("candidate inheritance selected kernel is unsafe or drifted")
+    records = attribution.get("attributions")
+    if not isinstance(records, list):
+        raise ValueError("candidate inheritance attribution is malformed")
+    by_method = {}
+    for record in records:
+        if not isinstance(record, Mapping) or not isinstance(record.get("method_id"), str):
+            raise ValueError("candidate inheritance attribution record is malformed")
+        method_id = record["method_id"]
+        if method_id in by_method:
+            raise ValueError("candidate inheritance attribution has duplicate methods")
+        by_method[method_id] = record
+
+    input_hash = state.get("input_hash")
+    if not isinstance(input_hash, str) or not input_hash:
+        raise ValueError("state input_hash is required for inheritance validation")
+    noise_threshold = state.get("noise_threshold_pct", 2.0)
+    minimum_effect_us = state.get("minimum_effect_us", 1.0)
+    if (
+        isinstance(minimum_effect_us, bool)
+        or not isinstance(minimum_effect_us, (int, float))
+        or not math.isfinite(float(minimum_effect_us))
+        or float(minimum_effect_us) <= 0.0
+        or attribution.get("noise_threshold_pct") != noise_threshold
+        or attribution.get("minimum_effect_us") != float(minimum_effect_us)
+    ):
+        raise ValueError("candidate inheritance attribution thresholds are invalid")
+    minimum_effect_us = float(minimum_effect_us)
+    confidence = state.get("confidence", 0.95)
+    bootstrap_samples = state.get(
+        "bootstrap_samples", workload_evaluate.DEFAULT_BOOTSTRAP_SAMPLES
+    )
+    seed = state.get("seed", 0)
+    ablation_root = iteration_resolved / "ablations"
+    verified_methods = []
+    for method_id in required:
+        record = by_method.get(method_id)
+        if not isinstance(record, Mapping):
+            raise ValueError(
+                f"candidate inheritance attribution is missing {method_id}"
+            )
+        if (
+            record.get("evidence_kind") != "performance_attribution"
+            or record.get("contributed") is not True
+        ):
+            raise ValueError(
+                f"candidate inheritance correctness or contribution failed for {method_id}"
+            )
+        method_dir = ablation_root / method_id
+        try:
+            method_resolved = method_dir.resolve(strict=True)
+        except OSError as error:
+            raise ValueError(
+                f"candidate inheritance evidence path is invalid for {method_id}"
+            ) from error
+        if method_resolved.parent != ablation_root:
+            raise ValueError("candidate inheritance evidence escapes iteration")
+        kernel_path = Path(str(record.get("ablated_kernel", ""))).expanduser()
+        bench_path = Path(str(record.get("ablated_bench", ""))).expanduser()
+        paired = record.get("paired_samples")
+        declared_statistics = record.get("statistics")
+        if not isinstance(paired, Mapping) or not isinstance(declared_statistics, Mapping):
+            raise ValueError(
+                f"candidate inheritance paired evidence is missing for {method_id}"
+            )
+        declared_min_effect_pct = record.get("effective_min_effect_pct")
+        if (
+            record.get("minimum_effect_us") != minimum_effect_us
+            or isinstance(declared_min_effect_pct, bool)
+            or not isinstance(declared_min_effect_pct, (int, float))
+            or not math.isfinite(float(declared_min_effect_pct))
+        ):
+            raise ValueError(
+                f"candidate inheritance effect threshold is invalid for {method_id}"
+            )
+        expected_classifier = {
+            "direction": "higher",
+            "min_effect_pct": float(declared_min_effect_pct),
+            "confidence": confidence,
+            "bootstrap_samples": bootstrap_samples,
+            "seed": seed,
+        }
+        try:
+            kernel_resolved = kernel_path.resolve(strict=True)
+            bench_resolved = bench_path.resolve(strict=True)
+        except OSError as error:
+            raise ValueError(
+                f"candidate inheritance evidence path is invalid for {method_id}"
+            ) from error
+        available_kernels = [
+            path
+            for path in (method_resolved / "kernel.cu", method_resolved / "kernel.py")
+            if path.exists() or path.is_symlink()
+        ]
+        if (
+            len(available_kernels) != 1
+            or kernel_path.is_symlink()
+            or not kernel_path.is_file()
+            or kernel_resolved.parent != method_resolved
+            or kernel_resolved.name not in {"kernel.cu", "kernel.py"}
+            or bench_path.is_symlink()
+            or not bench_path.is_file()
+            or bench_resolved != method_resolved / "bench.json"
+        ):
+            raise ValueError(
+                f"candidate inheritance evidence path is invalid for {method_id}"
+            )
+        kernel_sha256 = sha256_file(kernel_resolved)
+        bench_sha256 = sha256_file(bench_resolved)
+        if (
+            record.get("ablated_kernel_sha256") != kernel_sha256
+            or record.get("ablated_bench_sha256") != bench_sha256
+        ):
+            raise ValueError(
+                f"candidate inheritance evidence digest mismatch for {method_id}"
+            )
+        try:
+            bench = _strict_json_value(
+                read_regular_bytes(bench_resolved).decode("utf-8"),
+                f"ablation bench {method_id}",
+            )
+        except UnicodeDecodeError as error:
+            raise ValueError(
+                f"candidate inheritance correctness evidence is invalid for {method_id}"
+            ) from error
+        if not isinstance(bench, Mapping) or (
+            not isinstance(bench.get("correctness"), Mapping)
+            or bench["correctness"].get("passed") is not True
+        ):
+            raise ValueError(
+                f"candidate inheritance correctness failed for {method_id}"
+            )
+
+        paired_path = Path(str(paired.get("path", ""))).expanduser()
+        try:
+            paired_resolved = paired_path.resolve(strict=True)
+        except OSError as error:
+            raise ValueError(
+                f"candidate inheritance paired evidence path is invalid for {method_id}"
+            ) from error
+        if paired_path.is_symlink() or paired_resolved != (
+            method_resolved / "paired_samples.jsonl"
+        ):
+            raise ValueError(
+                f"candidate inheritance paired evidence binding is invalid for {method_id}"
+            )
+        try:
+            clean_paired, raw_pairs = _validate_paired_artifact(
+                paired,
+                kind="kernel",
+                input_hash=input_hash,
+                iteration=iteration,
+                candidate_id=method_id,
+                candidate_sha256=kernel_sha256,
+                expected_pairs=_paired_count(declared_statistics),
+                expected_statistics=declared_statistics,
+                expected_constraints=None,
+                expected_objective=None,
+                expected_workload_status=None,
+                expected_workload_failure=None,
+                expected_confidence=confidence,
+                expected_kernel_min_effect=float(declared_min_effect_pct),
+                expected_bootstrap_samples=bootstrap_samples,
+                expected_seed=seed,
+                verify_file=True,
+                expected_kernel_direction="higher",
+            )
+        except (OSError, TypeError, ValueError) as error:
+            raise ValueError(
+                f"candidate inheritance paired evidence is invalid for {method_id}: {error}"
+            ) from error
+        if (
+            clean_paired.get("candidate_file") != str(kernel_resolved)
+            or clean_paired.get("baseline_file") != str(candidate_resolved)
+            or clean_paired.get("baseline_sha256") != candidate_sha256
+            or clean_paired.get("classifier") != expected_classifier
+            or raw_pairs is None
+            or declared_statistics.get("status") != "confirmed_win"
+        ):
+            raise ValueError(
+                f"candidate inheritance paired evidence binding is invalid for {method_id}"
+            )
+        valid_pairs = [pair for pair in raw_pairs if pair.get("valid", True) is True]
+        champion_ms = statistics_module.median(
+            float(pair["baseline"]) for pair in valid_pairs
+        )
+        ablated_ms = statistics_module.median(
+            float(pair["candidate"]) for pair in valid_pairs
+        )
+        attribution_ms = statistics_module.median(
+            float(pair["candidate"]) - float(pair["baseline"])
+            for pair in valid_pairs
+        )
+        effective_min_effect_pct = max(
+            float(noise_threshold), minimum_effect_us / (champion_ms * 10.0)
+        )
+        if not math.isclose(
+            float(declared_min_effect_pct),
+            effective_min_effect_pct,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                f"candidate inheritance effect threshold drifted for {method_id}"
+            )
+        expected_numbers = {
+            "champion_ms": champion_ms,
+            "ablated_ms": ablated_ms,
+            "attribution_ms": attribution_ms,
+            "attribution_pct": declared_statistics.get("estimate_pct"),
+        }
+        if any(
+            isinstance(record.get(field), bool)
+            or not isinstance(record.get(field), (int, float))
+            or not math.isclose(
+                float(record[field]), float(value), rel_tol=1e-12, abs_tol=1e-12
+            )
+            for field, value in expected_numbers.items()
+        ):
+            raise ValueError(
+                f"candidate inheritance attribution does not match pairs for {method_id}"
+            )
+        verified_methods.append(
+            {
+                "method_id": method_id,
+                "evidence_kind": "performance_attribution",
+                "attribution_ms": attribution_ms,
+                "ablated_kernel_sha256": kernel_sha256,
+                "ablated_bench_sha256": bench_sha256,
+                "paired_samples_sha256": clean_paired["sha256"],
+            }
+        )
+    return {
+        "attribution_sha256": attribution_sha256,
+        "candidate_file": str(candidate_resolved),
+        "candidate_sha256": candidate_sha256,
+        "verified_methods": verified_methods,
+    }
+
+
 def _validate_success_inheritance_decision(
-    decision: Mapping, state: Mapping
+    decision: Mapping, state: Mapping, *, iteration: int
 ) -> None:
     """Require winning descendants to prove they beat the current champion."""
     required = sorted(
@@ -1049,34 +1349,15 @@ def _validate_success_inheritance_decision(
         raise ValueError("winning candidate is not covered by inheritance proof")
     if proof.get("candidate_sha256") != decision.get("candidate_sha256"):
         raise ValueError("success inheritance is not bound to winning candidate bytes")
-    verified_methods = proof.get("verified_methods")
-    if not isinstance(verified_methods, list) or sorted(
-        item.get("method_id")
-        for item in verified_methods
-        if isinstance(item, Mapping)
-    ) != required:
-        raise ValueError("success inheritance candidate evidence is incomplete")
-    for item in verified_methods:
-        kind = item.get("evidence_kind")
-        attribution_ms = item.get("attribution_ms")
-        if (
-            kind not in {"performance_attribution", "correctness_essential"}
-            or not isinstance(item.get("ablated_kernel_sha256"), str)
-            or _SHA256.fullmatch(item["ablated_kernel_sha256"]) is None
-            or not isinstance(item.get("ablated_bench_sha256"), str)
-            or _SHA256.fullmatch(item["ablated_bench_sha256"]) is None
-            or (
-                kind == "performance_attribution"
-                and (
-                    isinstance(attribution_ms, bool)
-                    or not isinstance(attribution_ms, (int, float))
-                    or not math.isfinite(float(attribution_ms))
-                    or float(attribution_ms) <= 0.0
-                )
-            )
-            or (kind == "correctness_essential" and attribution_ms is not None)
-        ):
-            raise ValueError("success inheritance method evidence is malformed")
+    artifact_proof = validate_success_inheritance_artifacts(
+        state,
+        iteration=iteration,
+        candidate_sha256=decision.get("candidate_sha256"),
+        required_method_ids=required,
+        expected_attribution_sha256=proof.get("attribution_sha256"),
+    )
+    if proof.get("verified_methods") != artifact_proof["verified_methods"]:
+        raise ValueError("success inheritance method evidence is malformed")
     best_file = Path(state.get("best_file", "")).expanduser()
     if best_file.is_symlink() or not best_file.is_file():
         raise ValueError("current champion must be a regular non-symlink file")
@@ -1517,7 +1798,9 @@ def cmd_update(args: argparse.Namespace) -> None:
         decision_path, candidate_file=args.kernel
     )
     if decision_status in _WIN_STATUSES:
-        _validate_success_inheritance_decision(decision, state)
+        _validate_success_inheritance_decision(
+            decision, state, iteration=args.iter
+        )
     candidate_binding = _capture_candidate_binding(
         decision,
         status=decision_status,

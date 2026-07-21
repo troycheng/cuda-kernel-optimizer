@@ -377,7 +377,9 @@ class SanitizeTests(unittest.TestCase):
                     executable=str(executable),
                     tools=["memcheck"],
                     command=[sys.executable, "bench.py"],
-                    timeout_seconds=1.0,
+                    # Leave room for macOS to authorize a newly-created
+                    # temporary executable before it spawns the child.
+                    timeout_seconds=3.0,
                 )
                 child_pid = int(child_pid_path.read_text("utf-8"))
                 self.assertEqual(result["status"], "passed")

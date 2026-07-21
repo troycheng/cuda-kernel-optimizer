@@ -354,9 +354,24 @@ class CandidateGate:
                     stop_reason="hard_ceiling_admission_failed",
                     completed=completed,
                 )
-            outcome = action()
-            if not isinstance(outcome, Mapping):
-                raise ValueError(f"{stage} result must be a mapping")
+            try:
+                outcome = action()
+                if not isinstance(outcome, Mapping):
+                    raise ValueError(f"{stage} result must be a mapping")
+            except Exception as error:
+                result = self._result(
+                    started_at=started,
+                    decision="STOP",
+                    stop_reason=f"{stage}_action_failed",
+                    completed=completed,
+                )
+                result.update(
+                    {
+                        "failed_stage": stage,
+                        "failure_type": type(error).__name__,
+                    }
+                )
+                return result
             completed.append(stage)
             status = outcome.get("status")
             allowed_statuses = (

@@ -623,7 +623,10 @@ class ReadinessGateTests(unittest.TestCase):
             ).is_file()
         )
         self.assertGreater(result["duration_seconds"], 0.2)
-        self.assertLess(time.monotonic() - started, 1.0)
+        # Temporary shebang executables can incur macOS launch-policy overhead;
+        # the contract is that the soft checkpoint does not wait for the 2s
+        # readiness deadline, not that every host launches it within 1s.
+        self.assertLess(time.monotonic() - started, 1.8)
 
 
 if __name__ == "__main__":

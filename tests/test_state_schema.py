@@ -72,7 +72,210 @@ class StateSchemaTests(unittest.TestCase):
 
     def test_winning_descendant_must_bind_inheritance_to_current_champion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            champion = Path(tmp).resolve() / "champion.py"
+            root = Path(tmp).resolve()
+            run_dir = root / "run"
+            iteration_dir = run_dir / "iterv1"
+            ablation_dir = iteration_dir / "ablations" / "fastsort.store"
+            ablation_dir.mkdir(parents=True)
+            champion = root / "champion.py"
+            candidate = iteration_dir / "kernel.py"
+            ablated_kernel = ablation_dir / "kernel.py"
+            ablated_bench = ablation_dir / "bench.json"
+            champion.write_text("# champion\n", encoding="utf-8")
+            candidate.write_text("# candidate\n", encoding="utf-8")
+            ablated_kernel.write_text("# candidate without store\n", encoding="utf-8")
+            ablated_bench.write_text(
+                json.dumps({"correctness": {"passed": True}}), encoding="utf-8"
+            )
+            champion_sha = self.state.sha256_file(champion)
+            candidate_sha = self.state.sha256_file(candidate)
+            pairs = [
+                {
+                    "order": "AB" if index % 2 == 0 else "BA",
+                    "baseline": 1.0,
+                    "candidate": 1.05,
+                    "valid": True,
+                    "invalid_reasons": [],
+                }
+                for index in range(4)
+            ]
+            classifier = {
+                "direction": "higher",
+                "min_effect_pct": 2.0,
+                "confidence": 0.95,
+                "bootstrap_samples": 100,
+                "seed": 0,
+            }
+            pair_path = ablation_dir / "paired_samples.jsonl"
+            pair_records = [
+                {
+                    "schema_version": 2,
+                    "kind": "kernel",
+                    "input_hash": "f" * 64,
+                    "iteration": 1,
+                    "candidate_id": "fastsort.store",
+                    "candidate_file": str(ablated_kernel),
+                    "candidate_sha256": self.state.sha256_file(ablated_kernel),
+                    "baseline_file": str(candidate),
+                    "baseline_sha256": candidate_sha,
+                    "classifier": classifier,
+                    "pair_index": index,
+                    "pair": pair,
+                }
+                for index, pair in enumerate(pairs)
+            ]
+            pair_path.write_text(
+                "".join(
+                    json.dumps(record, separators=(",", ":")) + "\n"
+                    for record in pair_records
+                ),
+                encoding="utf-8",
+            )
+            paired_samples = {
+                "schema_version": 2,
+                "kind": "kernel",
+                "path": str(pair_path),
+                "sha256": self.state.sha256_file(pair_path),
+                "pairs": len(pairs),
+                "input_hash": "f" * 64,
+                "iteration": 1,
+                "candidate_id": "fastsort.store",
+                "candidate_file": str(ablated_kernel),
+                "candidate_sha256": self.state.sha256_file(ablated_kernel),
+                "baseline_file": str(candidate),
+                "baseline_sha256": candidate_sha,
+                "classifier": classifier,
+            }
+            statistics = self.state.paired_stats.classify_pairs(
+                pairs,
+                direction="higher",
+                min_effect_pct=2.0,
+                confidence=0.95,
+                bootstrap_samples=100,
+                seed=0,
+            )
+            attribution_ms = 1.05 - 1.0
+            attribution_path = iteration_dir / "attribution.json"
+            attribution = {
+                "iter": 1,
+                "candidate_file": str(candidate),
+                "candidate_sha256": candidate_sha,
+                "noise_threshold_pct": 2.0,
+                "minimum_effect_us": 1.0,
+                "attributions": [
+                    {
+                        "method_id": "fastsort.store",
+                        "evidence_kind": "performance_attribution",
+                        "contributed": True,
+                        "champion_ms": 1.0,
+                        "ablated_ms": 1.05,
+                        "attribution_ms": attribution_ms,
+                        "attribution_pct": 5.0,
+                        "minimum_effect_us": 1.0,
+                        "effective_min_effect_pct": 2.0,
+                        "ablated_kernel": str(ablated_kernel),
+                        "ablated_kernel_sha256": self.state.sha256_file(
+                            ablated_kernel
+                        ),
+                        "ablated_bench": str(ablated_bench),
+                        "ablated_bench_sha256": self.state.sha256_file(
+                            ablated_bench
+                        ),
+                        "statistics": statistics,
+                        "paired_samples": paired_samples,
+                    }
+                ],
+            }
+            attribution_path.write_text(json.dumps(attribution), encoding="utf-8")
+            proof = {
+                "status": "passed",
+                "proof": "confirmed_paired_win_vs_current_champion",
+                "evidence_kind": "candidate_ablation",
+                "baseline_file": str(champion),
+                "baseline_sha256": champion_sha,
+                "required_method_ids": ["fastsort.store"],
+                "verified_candidate_ids": ["2"],
+                "candidate_file": str(candidate),
+                "candidate_sha256": candidate_sha,
+                "attribution_sha256": self.state.sha256_file(attribution_path),
+                "verified_methods": [
+                    {
+                        "method_id": "fastsort.store",
+                        "evidence_kind": "performance_attribution",
+                        "attribution_ms": attribution_ms,
+                        "ablated_kernel_sha256": self.state.sha256_file(
+                            ablated_kernel
+                        ),
+                        "ablated_bench_sha256": self.state.sha256_file(
+                            ablated_bench
+                        ),
+                        "paired_samples_sha256": self.state.sha256_file(pair_path),
+                    }
+                ],
+            }
+            decision = {
+                "candidate_id": "2",
+                "candidate_file": str(candidate),
+                "candidate_sha256": candidate_sha,
+                "baseline_file": str(champion),
+                "baseline_sha256": champion_sha,
+                "inheritance_verification": proof,
+                "inheritance_verification_sha256": self.state._canonical_digest(
+                    proof
+                ),
+                "kernel_paired_samples": {
+                    "candidate_id": "2",
+                    "baseline_file": str(champion),
+                    "baseline_sha256": champion_sha,
+                },
+            }
+            state = {
+                "run_dir": str(run_dir),
+                "input_hash": "f" * 64,
+                "best_file": str(champion),
+                "effective_methods": [{"id": "fastsort.store"}],
+                "noise_threshold_pct": 2.0,
+                "confidence": 0.95,
+                "bootstrap_samples": 100,
+                "seed": 0,
+            }
+
+            self.state._validate_success_inheritance_decision(
+                decision, state, iteration=1
+            )
+
+            tampered = copy.deepcopy(decision)
+            tampered["inheritance_verification"]["verified_candidate_ids"] = ["1"]
+            tampered["inheritance_verification_sha256"] = self.state._canonical_digest(
+                tampered["inheritance_verification"]
+            )
+            with self.assertRaisesRegex(ValueError, "not covered"):
+                self.state._validate_success_inheritance_decision(
+                    tampered, state, iteration=1
+                )
+
+            malformed = copy.deepcopy(decision)
+            malformed["inheritance_verification"]["verified_methods"][0][
+                "ablated_kernel_sha256"
+            ] = "not-a-digest"
+            malformed["inheritance_verification_sha256"] = self.state._canonical_digest(
+                malformed["inheritance_verification"]
+            )
+            with self.assertRaisesRegex(ValueError, "malformed"):
+                self.state._validate_success_inheritance_decision(
+                    malformed, state, iteration=1
+                )
+
+            champion.write_text("# changed after comparison\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "current champion"):
+                self.state._validate_success_inheritance_decision(
+                    decision, state, iteration=1
+                )
+
+    def test_winning_inheritance_cannot_use_fabricated_artifact_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            champion = root / "champion.py"
             champion.write_text("# champion\n", encoding="utf-8")
             champion_sha = self.state.sha256_file(champion)
             proof = {
@@ -84,6 +287,7 @@ class StateSchemaTests(unittest.TestCase):
                 "required_method_ids": ["fastsort.store"],
                 "verified_candidate_ids": ["2"],
                 "candidate_sha256": "c" * 64,
+                "attribution_sha256": "d" * 64,
                 "verified_methods": [
                     {
                         "method_id": "fastsort.store",
@@ -91,6 +295,7 @@ class StateSchemaTests(unittest.TestCase):
                         "attribution_ms": 0.003,
                         "ablated_kernel_sha256": "a" * 64,
                         "ablated_bench_sha256": "b" * 64,
+                        "paired_samples_sha256": "e" * 64,
                     }
                 ],
             }
@@ -110,33 +315,16 @@ class StateSchemaTests(unittest.TestCase):
                 },
             }
             state = {
+                "run_dir": str(root / "run"),
+                "input_hash": "f" * 64,
                 "best_file": str(champion),
                 "effective_methods": [{"id": "fastsort.store"}],
             }
 
-            self.state._validate_success_inheritance_decision(decision, state)
-
-            tampered = copy.deepcopy(decision)
-            tampered["inheritance_verification"]["verified_candidate_ids"] = ["1"]
-            tampered["inheritance_verification_sha256"] = self.state._canonical_digest(
-                tampered["inheritance_verification"]
-            )
-            with self.assertRaisesRegex(ValueError, "not covered"):
-                self.state._validate_success_inheritance_decision(tampered, state)
-
-            malformed = copy.deepcopy(decision)
-            malformed["inheritance_verification"]["verified_methods"][0][
-                "ablated_kernel_sha256"
-            ] = "not-a-digest"
-            malformed["inheritance_verification_sha256"] = self.state._canonical_digest(
-                malformed["inheritance_verification"]
-            )
-            with self.assertRaisesRegex(ValueError, "malformed"):
-                self.state._validate_success_inheritance_decision(malformed, state)
-
-            champion.write_text("# changed after comparison\n", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "current champion"):
-                self.state._validate_success_inheritance_decision(decision, state)
+            with self.assertRaisesRegex(ValueError, "attribution|artifact"):
+                self.state._validate_success_inheritance_decision(
+                    decision, state, iteration=1
+                )
 
     def test_cmd_init_creates_v2_state_manifest_and_preserves_legacy_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
