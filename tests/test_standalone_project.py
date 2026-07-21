@@ -32,6 +32,10 @@ class StandaloneProjectTests(unittest.TestCase):
         self.assertIn("git.yukework.com/mlsys/cuda-optimized-skill", notice)
         self.assertIn("github.com/troycheng/cuda-optimized-skill", notice)
         self.assertIn("MIT", notice)
+        self.assertIn("Acknowledgements", notice)
+        self.assertIn("https://github.com/KernelFlow-ops", notice)
+        self.assertIn("Mark Liu", notice)
+        self.assertIn("https://github.com/mark-liu", notice)
 
     def test_public_tree_excludes_maintainer_history_and_dual_publisher(self) -> None:
         self.assertFalse((ROOT / "maintainers").exists())

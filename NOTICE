@@ -8,3 +8,13 @@ through the historical repositories below before its standalone V1.0.0 release:
 - https://git.yukework.com/mlsys/cuda-optimized-skill
 
 The historical repositories remain the source for pre-V1 development history.
+
+Acknowledgements
+
+CUDA Kernel Optimizer builds on the original cuda-optimized-skill created and
+published by KernelFlow-ops. We thank Mark Liu and all upstream contributors
+for the validation, benchmarking, profiling, and iterative optimization work
+that provided the foundation for this standalone project.
+
+- KernelFlow-ops: https://github.com/KernelFlow-ops
+- Mark Liu: https://github.com/mark-liu
