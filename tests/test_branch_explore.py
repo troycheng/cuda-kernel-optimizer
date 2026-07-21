@@ -246,7 +246,9 @@ class BranchExploreTests(unittest.TestCase):
                 hashlib.sha256(promoted.read_bytes()).hexdigest(),
             )
             inheritance = output["inheritance_verification"]
-            self.assertEqual(inheritance["status"], "passed")
+            self.assertEqual(
+                inheritance["status"], "pending_candidate_verification"
+            )
             self.assertEqual(
                 inheritance["required_method_ids"], ["fastsort.store"]
             )

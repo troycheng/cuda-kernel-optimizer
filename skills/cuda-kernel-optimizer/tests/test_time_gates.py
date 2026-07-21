@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 import sys
 import tempfile
@@ -310,6 +311,84 @@ class TimeGateTests(unittest.TestCase):
 
         self.assertEqual(result["decision"], "STOP")
         self.assertNotEqual(result.get("next_action"), "continue_next_round")
+
+    def test_nonfinite_performance_bounds_fail_closed(self) -> None:
+        for stage, field, value, expected_reason in (
+            ("short_paired", "upper_bound", math.nan, "short_pair_invalid_upper_bound"),
+            ("short_paired", "upper_bound", math.inf, "short_pair_invalid_upper_bound"),
+            ("formal_paired", "lower_bound", math.nan, "formal_paired_invalid_lower_bound"),
+            ("formal_paired", "lower_bound", math.inf, "formal_paired_invalid_lower_bound"),
+        ):
+            with self.subTest(stage=stage, value=value):
+                calls = []
+                actions = {
+                    "static_review": self.clock.action(
+                        calls, "static_review", {"status": "passed"}
+                    ),
+                    "build_correctness": self.clock.action(
+                        calls, "build_correctness", {"status": "passed"}
+                    ),
+                    "short_paired": self.clock.action(
+                        calls,
+                        "short_paired",
+                        {"status": "passed", "upper_bound": 2.0},
+                    ),
+                    "profiler": self.clock.action(
+                        calls, "profiler", {"status": "passed"}
+                    ),
+                    "formal_paired": self.clock.action(
+                        calls,
+                        "formal_paired",
+                        {"status": "passed", "lower_bound": 2.0},
+                    ),
+                }
+                actions[stage] = self.clock.action(
+                    calls, stage, {"status": "passed", field: value}
+                )
+
+                result = self._gate().run(actions)
+
+                self.assertEqual(result["decision"], "STOP")
+                self.assertEqual(result["stop_reason"], expected_reason)
+
+    def test_mandatory_stage_cannot_be_not_applicable(self) -> None:
+        for stage, expected_reason in (
+            ("static_review", "static_falsified"),
+            ("build_correctness", "correctness_failed"),
+            ("short_paired", "short_pair_failed"),
+            ("formal_paired", "formal_pair_failed"),
+        ):
+            with self.subTest(stage=stage):
+                calls = []
+                actions = {
+                    "static_review": self.clock.action(
+                        calls, "static_review", {"status": "passed"}
+                    ),
+                    "build_correctness": self.clock.action(
+                        calls, "build_correctness", {"status": "passed"}
+                    ),
+                    "short_paired": self.clock.action(
+                        calls,
+                        "short_paired",
+                        {"status": "passed", "upper_bound": 2.0},
+                    ),
+                    "profiler": self.clock.action(
+                        calls, "profiler", {"status": "not_applicable"}
+                    ),
+                    "formal_paired": self.clock.action(
+                        calls,
+                        "formal_paired",
+                        {"status": "passed", "lower_bound": 2.0},
+                    ),
+                }
+                actions[stage] = self.clock.action(
+                    calls, stage, {"status": "not_applicable"}
+                )
+
+                result = self._gate().run(actions)
+
+                self.assertEqual(result["decision"], "STOP")
+                self.assertEqual(result["stop_reason"], expected_reason)
 
     def test_soft_target_is_guidance_not_a_direction_timeout(self) -> None:
         self.contract["soft_target_seconds"] = 2.0

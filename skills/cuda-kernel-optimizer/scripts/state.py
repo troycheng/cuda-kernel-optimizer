@@ -44,6 +44,7 @@ import argparse
 import datetime as _dt
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -1034,6 +1035,8 @@ def _validate_success_inheritance_decision(
         "confirmed_paired_win_vs_current_champion"
     ):
         raise ValueError("success inheritance verification did not pass")
+    if proof.get("evidence_kind") != "candidate_ablation":
+        raise ValueError("success inheritance lacks candidate-specific evidence")
     if proof.get("required_method_ids") != required:
         raise ValueError("success inheritance method set does not match state")
     candidate_id = decision.get("candidate_id")
@@ -1044,6 +1047,36 @@ def _validate_success_inheritance_decision(
         or candidate_id not in verified_candidate_ids
     ):
         raise ValueError("winning candidate is not covered by inheritance proof")
+    if proof.get("candidate_sha256") != decision.get("candidate_sha256"):
+        raise ValueError("success inheritance is not bound to winning candidate bytes")
+    verified_methods = proof.get("verified_methods")
+    if not isinstance(verified_methods, list) or sorted(
+        item.get("method_id")
+        for item in verified_methods
+        if isinstance(item, Mapping)
+    ) != required:
+        raise ValueError("success inheritance candidate evidence is incomplete")
+    for item in verified_methods:
+        kind = item.get("evidence_kind")
+        attribution_ms = item.get("attribution_ms")
+        if (
+            kind not in {"performance_attribution", "correctness_essential"}
+            or not isinstance(item.get("ablated_kernel_sha256"), str)
+            or _SHA256.fullmatch(item["ablated_kernel_sha256"]) is None
+            or not isinstance(item.get("ablated_bench_sha256"), str)
+            or _SHA256.fullmatch(item["ablated_bench_sha256"]) is None
+            or (
+                kind == "performance_attribution"
+                and (
+                    isinstance(attribution_ms, bool)
+                    or not isinstance(attribution_ms, (int, float))
+                    or not math.isfinite(float(attribution_ms))
+                    or float(attribution_ms) <= 0.0
+                )
+            )
+            or (kind == "correctness_essential" and attribution_ms is not None)
+        ):
+            raise ValueError("success inheritance method evidence is malformed")
     best_file = Path(state.get("best_file", "")).expanduser()
     if best_file.is_symlink() or not best_file.is_file():
         raise ValueError("current champion must be a regular non-symlink file")

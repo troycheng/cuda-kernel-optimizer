@@ -37,7 +37,7 @@ The no-op check uses the production `run_paired`, `classify_pairs`, and
 
 ## Local and current-lane execution
 
-Without opt-in, eleven CPU helper regressions pass and all nine GPU tests are
+Without opt-in, twelve CPU helper regressions pass and all nine GPU tests are
 reported as skipped:
 
 ```bash

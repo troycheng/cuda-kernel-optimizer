@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -34,6 +35,7 @@ import artifact_store  # noqa: E402
 
 
 _BUNDLED_BENCHMARK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "benchmark.py")
+_METHOD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
 def _load_json(path: str) -> dict:
@@ -118,6 +120,14 @@ def _bench_kernel(
     ] + _ptr_size_argv(ptr_size) + _dims_argv(dims)
 
     Path(json_out).parent.mkdir(parents=True, exist_ok=True)
+    output = Path(json_out)
+    if output.is_symlink():
+        output.unlink()
+    elif output.exists():
+        if not output.is_file():
+            print(f"[ablate] benchmark output is not a regular file: {output}", file=sys.stderr)
+            return None
+        output.unlink()
 
     try:
         r = subprocess.run(
@@ -128,6 +138,8 @@ def _bench_kernel(
         print(f"[ablate] benchmark failed: {e}", file=sys.stderr)
         return None
 
+    if r.returncode != 0:
+        return None
     if os.path.isfile(json_out):
         return _load_json(json_out)
     return None
@@ -152,13 +164,47 @@ def run(state_path: str, iteration: int, benchmark_py: str = None) -> dict:
     champion_ms = (champion_data.get("kernel") or {}).get("average_ms")
     if champion_ms is None:
         sys.exit("Champion has no timing data")
+    candidate_paths = [
+        Path(iter_dir) / f"kernel{extension}" for extension in (".cu", ".py")
+    ]
+    candidate_identities = []
+    for candidate_path in candidate_paths:
+        try:
+            candidate_identities.append(_regular_identity(candidate_path))
+        except (OSError, ValueError):
+            continue
+    if len(candidate_identities) != 1:
+        sys.exit("Iteration must contain exactly one selected candidate kernel")
+    candidate_identity = candidate_identities[0]
 
     # Load methods
     methods_path = os.path.join(iter_dir, "methods.json")
     if not os.path.isfile(methods_path):
         sys.exit(f"methods.json not found at {methods_path}")
     methods_data = _load_json(methods_path)
-    methods_list = methods_data.get("methods", [])
+    methods_list = list(methods_data.get("methods", []))
+    inherited_methods = methods_data.get("inherited_methods", [])
+    if not isinstance(inherited_methods, list) or any(
+        not isinstance(method_id, str) or not method_id.strip()
+        for method_id in inherited_methods
+    ):
+        sys.exit("inherited_methods must be a string array")
+    all_method_ids = [
+        method.get("id") for method in methods_list if isinstance(method, dict)
+    ] + inherited_methods
+    if any(
+        not isinstance(method_id, str) or _METHOD_ID.fullmatch(method_id) is None
+        for method_id in all_method_ids
+    ):
+        sys.exit("method ids must be safe relative identifiers")
+    seen_method_ids = {
+        method.get("id") for method in methods_list if isinstance(method, dict)
+    }
+    methods_list.extend(
+        {"id": method_id}
+        for method_id in inherited_methods
+        if method_id not in seen_method_ids
+    )
 
     ref_file = state["ref_file"]
     dims = state.get("dims", {})
@@ -170,7 +216,9 @@ def run(state_path: str, iteration: int, benchmark_py: str = None) -> dict:
 
     for m in methods_list:
         mid = m.get("id", "unknown")
-        method_dir = os.path.join(ablation_dir, mid.replace(".", "_"))
+        # Safe method ids contain no path separators, so keeping the exact id is
+        # both path-safe and one-to-one (unlike replacing dots with underscores).
+        method_dir = os.path.join(ablation_dir, mid)
 
         # Find ablated kernel
         ablated_kernel = None
@@ -212,11 +260,37 @@ def run(state_path: str, iteration: int, benchmark_py: str = None) -> dict:
             bench_py, ablated_kernel, ref_file, dims, ptr_size, ablated_json_out,
         )
 
-        if result is None or not result.get("correctness", {}).get("passed", False):
-            # Ablated kernel failed validation — method is likely essential
+        if result is None:
             attributions.append({
                 "method_id": mid,
-                "ablated_kernel": ablated_kernel,
+                "contributed": False,
+                "note": "ablation_benchmark_failed",
+            })
+            continue
+
+        if not result.get("correctness", {}).get("passed", False):
+            try:
+                kernel_after = _regular_identity(ablated_kernel)
+                bench_identity = _regular_identity(ablated_json_out)
+                if (
+                    kernel_after != kernel_before
+                    or json.loads(bench_identity["bytes"].decode("utf-8")) != result
+                ):
+                    raise ValueError("correctness ablation evidence changed")
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                attributions.append({
+                    "method_id": mid,
+                    "contributed": False,
+                    "note": f"unsafe_or_drifted_ablation_evidence: {error}",
+                })
+                continue
+            attributions.append({
+                "method_id": mid,
+                "evidence_kind": "correctness_essential",
+                "ablated_kernel": kernel_before["path"],
+                "ablated_kernel_sha256": kernel_before["sha256"],
+                "ablated_bench": bench_identity["path"],
+                "ablated_bench_sha256": bench_identity["sha256"],
                 "ablated_ms": None,
                 "champion_ms": champion_ms,
                 "attribution_ms": None,
@@ -281,12 +355,16 @@ def run(state_path: str, iteration: int, benchmark_py: str = None) -> dict:
     try:
         if _regular_identity(champion_bench) != champion_identity:
             raise ValueError("champion bench identity drifted before attribution write")
+        if _regular_identity(candidate_identity["path"]) != candidate_identity:
+            raise ValueError("selected candidate changed before attribution write")
     except (OSError, ValueError) as error:
-        sys.exit(f"Champion bench.json changed before attribution write: {error}")
+        sys.exit(f"Candidate attribution inputs changed before write: {error}")
 
     output = {
         "iter": iteration,
         "champion_ms": round(champion_ms, 4),
+        "candidate_file": candidate_identity["path"],
+        "candidate_sha256": candidate_identity["sha256"],
         "noise_threshold_pct": noise_threshold,
         "attributions": attributions,
     }

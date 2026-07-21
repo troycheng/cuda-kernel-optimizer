@@ -17,6 +17,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -61,6 +62,7 @@ from workload_adapter import (  # noqa: E402
 import workload_evaluate  # noqa: E402
 
 _BRANCH_RESULT_STATUSES = {"shortlist_ready", "no_confirmed_kernel_win"}
+_METHOD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 STAGES = (
     "baseline",
@@ -319,6 +321,8 @@ def validate_success_inheritance(state: Mapping, methods_payload: Mapping) -> di
             and item.get("id").strip()
         }
     )
+    if any(_METHOD_ID.fullmatch(method_id) is None for method_id in required):
+        raise ValueError("effective method ids must be safe relative identifiers")
     declared = methods_payload.get("inherited_methods", [])
     if type(declared) is not list or any(
         type(item) is not str or not item.strip() for item in declared
@@ -344,6 +348,18 @@ def validate_success_inheritance(state: Mapping, methods_payload: Mapping) -> di
         "declared_method_ids": normalized,
         "base_file": state.get("best_file"),
     }
+
+
+def _inheritance_proof_sha256(proof: Mapping) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            proof,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _check_success_inheritance(
@@ -400,6 +416,10 @@ def _bind_branch_inheritance(
             and item.get("id").strip()
         }
     )
+    if any(
+        _METHOD_ID.fullmatch(method_id) is None for method_id in required_method_ids
+    ):
+        raise ValueError("effective method ids must be safe relative identifiers")
     proof = branch_payload.get("inheritance_verification")
     if not required_method_ids and proof is None:
         return _strict_json_copy(decision, "terminal decision")
@@ -412,6 +432,25 @@ def _bind_branch_inheritance(
         "verified_candidate_ids", []
     ):
         raise ValueError("selected candidate is not covered by inheritance evidence")
+    candidate_snapshot = _candidate_snapshot(candidate)
+    if required_method_ids:
+        if proof.get("evidence_kind") != "candidate_ablation":
+            raise ValueError(
+                "candidate-specific inheritance evidence is required"
+            )
+        if proof.get("candidate_sha256") != candidate_snapshot["sha256"]:
+            raise ValueError(
+                "candidate-specific inheritance evidence does not bind candidate bytes"
+            )
+        verified_methods = proof.get("verified_methods")
+        if not isinstance(verified_methods, list) or sorted(
+            item.get("method_id")
+            for item in verified_methods
+            if isinstance(item, Mapping)
+        ) != required_method_ids:
+            raise ValueError(
+                "candidate-specific inheritance evidence is incomplete"
+            )
     if (
         candidate.get("baseline_sha256") != proof.get("baseline_sha256")
         or candidate.get("baseline_file") != proof.get("baseline_file")
@@ -431,15 +470,9 @@ def _bind_branch_inheritance(
             "baseline_file": proof["baseline_file"],
             "baseline_sha256": proof["baseline_sha256"],
             "inheritance_verification": clean_proof,
-            "inheritance_verification_sha256": hashlib.sha256(
-                json.dumps(
-                    clean_proof,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                ).encode("utf-8")
-            ).hexdigest(),
+            "inheritance_verification_sha256": _inheritance_proof_sha256(
+                clean_proof
+            ),
         }
     )
     if isinstance(paired, Mapping):
@@ -447,6 +480,185 @@ def _bind_branch_inheritance(
             paired, "kernel paired samples"
         )
     return bound
+
+
+def _verify_candidate_success_inheritance(
+    state: Mapping,
+    branch_payload: Mapping,
+    iteration_dir: Path,
+    candidate: Mapping,
+) -> dict:
+    """Replace the baseline-only checklist with candidate-bound ablation proof."""
+    required_method_ids = sorted(
+        {
+            item.get("id")
+            for item in state.get("effective_methods", [])
+            if isinstance(item, Mapping)
+            and isinstance(item.get("id"), str)
+            and item.get("id").strip()
+        }
+    )
+    if any(
+        _METHOD_ID.fullmatch(method_id) is None for method_id in required_method_ids
+    ):
+        raise ValueError("effective method ids must be safe relative identifiers")
+    if not required_method_ids:
+        proof = branch_payload.get("inheritance_verification")
+        return (
+            dict(proof)
+            if isinstance(proof, Mapping)
+            else {"status": "not_required", "required_method_ids": []}
+        )
+    attribution = _load_iteration_json(iteration_dir, "attribution.json")
+    candidate_snapshot = _candidate_snapshot(candidate)
+    if attribution.get("candidate_sha256") != candidate_snapshot["sha256"]:
+        raise ValueError("candidate inheritance attribution does not bind candidate bytes")
+    records = attribution.get("attributions")
+    if not isinstance(records, list):
+        raise ValueError("candidate inheritance attribution is malformed")
+    by_method = {
+        item.get("method_id"): item
+        for item in records
+        if isinstance(item, Mapping) and isinstance(item.get("method_id"), str)
+    }
+    try:
+        ablation_root = (iteration_dir / "ablations").resolve(strict=True)
+    except OSError as error:
+        raise ValueError("candidate inheritance ablation directory is missing") from error
+    verified_methods = []
+    for method_id in required_method_ids:
+        record = by_method.get(method_id)
+        if not isinstance(record, Mapping) or record.get("contributed") is not True:
+            raise ValueError(
+                f"candidate-specific inheritance verification failed for {method_id}"
+            )
+        try:
+            method_dir = (ablation_root / method_id).resolve(strict=True)
+        except OSError as error:
+            raise ValueError(
+                f"candidate inheritance evidence path is invalid for {method_id}"
+            ) from error
+        if method_dir.parent != ablation_root:
+            raise ValueError("candidate inheritance evidence escapes iteration")
+        kernel_path = Path(str(record.get("ablated_kernel", ""))).expanduser()
+        bench_path = Path(str(record.get("ablated_bench", ""))).expanduser()
+        if (
+            kernel_path.is_symlink()
+            or not kernel_path.is_file()
+            or kernel_path.resolve(strict=True).parent != method_dir
+            or kernel_path.name not in {"kernel.cu", "kernel.py"}
+            or bench_path.is_symlink()
+            or not bench_path.is_file()
+            or bench_path.resolve(strict=True) != method_dir / "bench.json"
+        ):
+            raise ValueError(
+                f"candidate inheritance evidence path is invalid for {method_id}"
+            )
+        kernel_sha256 = sha256_file(kernel_path)
+        bench_sha256 = sha256_file(bench_path)
+        if (
+            record.get("ablated_kernel_sha256") != kernel_sha256
+            or record.get("ablated_bench_sha256") != bench_sha256
+        ):
+            raise ValueError(
+                f"candidate inheritance evidence digest mismatch for {method_id}"
+            )
+        bench = _read(bench_path)
+        correctness_passed = bool(
+            bench.get("correctness", {}).get("passed", False)
+        )
+        evidence_kind = record.get("evidence_kind", "performance_attribution")
+        attribution_ms = record.get("attribution_ms")
+        if evidence_kind == "correctness_essential":
+            if correctness_passed or record.get("note") != (
+                "ablated_kernel_failed_validation_method_essential"
+            ):
+                raise ValueError(
+                    f"candidate correctness inheritance evidence is invalid for {method_id}"
+                )
+            clean_attribution = None
+        elif (
+            evidence_kind != "performance_attribution"
+            or not correctness_passed
+            or isinstance(attribution_ms, bool)
+            or not isinstance(attribution_ms, (int, float))
+            or not math.isfinite(float(attribution_ms))
+            or float(attribution_ms) <= 0.0
+        ):
+            raise ValueError(
+                f"candidate performance inheritance evidence is invalid for {method_id}"
+            )
+        else:
+            clean_attribution = float(attribution_ms)
+        verified_methods.append(
+            {
+                "method_id": method_id,
+                "evidence_kind": evidence_kind,
+                "attribution_ms": clean_attribution,
+                "ablated_kernel_sha256": kernel_sha256,
+                "ablated_bench_sha256": bench_sha256,
+            }
+        )
+    baseline_proof = branch_payload.get("inheritance_verification")
+    if not isinstance(baseline_proof, Mapping):
+        raise ValueError("branch inheritance baseline binding is missing")
+    expected_base = Path(state.get("best_file", "")).expanduser().resolve(strict=True)
+    if (
+        baseline_proof.get("proof") != "confirmed_paired_win_vs_current_champion"
+        or baseline_proof.get("baseline_file") != str(expected_base)
+        or baseline_proof.get("baseline_sha256") != sha256_file(expected_base)
+        or baseline_proof.get("required_method_ids") != required_method_ids
+    ):
+        raise ValueError("branch inheritance baseline binding is invalid")
+    candidate_id = _candidate_checkpoint_id(candidate)
+    proof = {
+        **dict(baseline_proof),
+        "status": "passed",
+        "evidence_kind": "candidate_ablation",
+        "verified_candidate_ids": [candidate_id],
+        "candidate_file": candidate_snapshot["path"],
+        "candidate_sha256": candidate_snapshot["sha256"],
+        "attribution_sha256": sha256_file(iteration_dir / "attribution.json"),
+        "verified_methods": verified_methods,
+    }
+    updated_payload = _strict_json_copy(branch_payload, "branch results")
+    updated_payload["inheritance_verification"] = proof
+    atomic_write_json(iteration_dir / "branch_results.json", updated_payload)
+    return proof
+
+
+def _inheritance_verified_candidates(
+    state: Mapping,
+    branch_payload: Mapping,
+    candidates: Sequence[Mapping],
+    iteration_dir: Path,
+) -> list[Mapping]:
+    required = {
+        item.get("id")
+        for item in state.get("effective_methods", [])
+        if isinstance(item, Mapping)
+        and isinstance(item.get("id"), str)
+        and item.get("id").strip()
+    }
+    if not required:
+        return list(candidates)
+    verified = []
+    for candidate in candidates:
+        try:
+            proof = _verify_candidate_success_inheritance(
+                state, branch_payload, iteration_dir, candidate
+            )
+        except (OSError, ValueError):
+            continue
+        candidate_id = _candidate_checkpoint_id(candidate)
+        if (
+            proof.get("status") == "passed"
+            and proof.get("verified_candidate_ids") == [candidate_id]
+            and proof.get("candidate_sha256")
+            == _candidate_snapshot(candidate)["sha256"]
+        ):
+            verified.append(candidate)
+    return verified
 
 
 def _budget_payload(policy: BudgetPolicy) -> dict:
@@ -3836,8 +4048,18 @@ def _cmd_close_iter_lifecycle(args, state, state_path, iter_dir, methods_json):
             else:
                 selection_changed = False
                 reprofile_returncode = None
+            inheritance_proof_digest = None
             ablation_dir = iteration_dir / "ablations"
-            if eligible_candidates and ablation_dir.is_dir():
+            inherited_method_ids = {
+                item.get("id")
+                for item in state.get("effective_methods", [])
+                if isinstance(item, Mapping)
+                and isinstance(item.get("id"), str)
+                and item.get("id").strip()
+            }
+            if eligible_candidates and (
+                ablation_dir.is_dir() or inherited_method_ids
+            ):
                 if not clock.can_start(
                     now=time.monotonic(),
                     estimated_seconds=_STAGE_ESTIMATES_SECONDS["ablation"],
@@ -3852,6 +4074,13 @@ def _cmd_close_iter_lifecycle(args, state, state_path, iter_dir, methods_json):
                     )
                     _budget_stop_output(args, denied)
                     return
+                attribution_artifact = iteration_dir / "attribution.json"
+                if attribution_artifact.is_symlink():
+                    raise ValueError("attribution.json must not be a symlink")
+                if attribution_artifact.exists():
+                    if not attribution_artifact.is_file():
+                        raise ValueError("attribution.json must be a regular file")
+                    attribution_artifact.unlink()
                 ablation_result = _run(
                     [
                         sys.executable,
@@ -3875,6 +4104,21 @@ def _cmd_close_iter_lifecycle(args, state, state_path, iter_dir, methods_json):
                     )
                     _budget_stop_output(args, checkpoint)
                     return
+                if ablation_result.returncode != 0:
+                    raise SystemExit(
+                        f"ablate failed rc={ablation_result.returncode}"
+                    )
+            if eligible_candidates:
+                inheritance_proof = _verify_candidate_success_inheritance(
+                    state,
+                    branch_payload,
+                    iteration_dir,
+                    selected_candidate,
+                )
+                if inherited_method_ids:
+                    inheritance_proof_digest = _inheritance_proof_sha256(
+                        inheritance_proof
+                    )
             if eligible_candidates and not clock.can_start(
                 now=time.monotonic(),
                 estimated_seconds=_STAGE_ESTIMATES_SECONDS[next_stage],
@@ -3932,6 +4176,7 @@ def _cmd_close_iter_lifecycle(args, state, state_path, iter_dir, methods_json):
                     "sass_status": sass_status,
                     "selection_changed": selection_changed,
                     "reprofile_returncode": reprofile_returncode,
+                    "inheritance_verification_sha256": inheritance_proof_digest,
                     "reason": (
                         "no selected method matched sanitizer policy"
                         if sanitizer_result["status"] == "not_applicable"
@@ -3973,6 +4218,34 @@ def _cmd_close_iter_lifecycle(args, state, state_path, iter_dir, methods_json):
                     sanitizer_result, outer_candidates, mode=mode
                 )
             )
+            if any(
+                isinstance(item, Mapping)
+                and isinstance(item.get("id"), str)
+                and item.get("id").strip()
+                for item in state.get("effective_methods", [])
+            ):
+                proof = branch_payload.get("inheritance_verification")
+                expected_proof_digest = checkpoint.get("stage_evidence", {}).get(
+                    "candidate_sanitizer", {}
+                ).get("inheritance_verification_sha256")
+                if (
+                    not isinstance(proof, Mapping)
+                    or expected_proof_digest != _inheritance_proof_sha256(proof)
+                ):
+                    raise ValueError(
+                        "candidate inheritance proof drifted after sanitizer"
+                    )
+            outer_candidates = _inheritance_verified_candidates(
+                state, branch_payload, outer_candidates, iteration_dir
+            )
+            eligible_candidates = _inheritance_verified_candidates(
+                state, branch_payload, eligible_candidates, iteration_dir
+            )
+            if not outer_candidates:
+                raise ValueError(
+                    "no outer candidate has candidate-bound inheritance evidence"
+                )
+            branch_payload = _load_lifecycle_branch_results(iteration_dir)
             if eligible_candidates:
                 selected_candidate = eligible_candidates[0]
             else:
@@ -4261,6 +4534,17 @@ def _cmd_close_iter_lifecycle(args, state, state_path, iter_dir, methods_json):
 
         raise ValueError(f"unsupported lifecycle stage: {next_stage}")
 
+def _is_current_schema_run(state: Mapping, run_dir: str | os.PathLike) -> bool:
+    if state.get("schema_version") == CURRENT_SCHEMA_VERSION:
+        return True
+    manifest_path = Path(run_dir) / "manifest.json"
+    if not manifest_path.exists() and not manifest_path.is_symlink():
+        return False
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError("manifest.json must be a non-symlink regular file")
+    return _read(manifest_path).get("schema_version") == CURRENT_SCHEMA_VERSION
+
+
 def cmd_close_iter(args):
     state_path = os.path.join(args.run_dir, "state.json")
     if not os.path.isfile(state_path):
@@ -4271,13 +4555,11 @@ def cmd_close_iter(args):
     methods_json = os.path.join(iter_dir, "methods.json")
 
     checkpoint_path = Path(args.run_dir) / "checkpoint.json"
-    if (
-        state.get("schema_version") == CURRENT_SCHEMA_VERSION
-        and isinstance(state.get("budget"), Mapping)
-        and isinstance(state.get("input_hash"), str)
-        and checkpoint_path.is_file()
-        and not checkpoint_path.is_symlink()
-    ):
+    if _is_current_schema_run(state, args.run_dir):
+        if checkpoint_path.is_symlink() or not checkpoint_path.is_file():
+            raise ValueError(
+                "current-schema run requires a non-symlink checkpoint.json"
+            )
         return _cmd_close_iter_lifecycle(
             args, state, state_path, iter_dir, methods_json
         )
@@ -4326,7 +4608,7 @@ def cmd_close_iter(args):
     decision_path = os.path.join(iter_dir, "decision.json")
     terminal_decision = None
     budgeted_run = (
-        state.get("schema_version") == CURRENT_SCHEMA_VERSION
+        _is_current_schema_run(state, args.run_dir)
         and isinstance(state.get("budget"), Mapping)
         and isinstance(state.get("input_hash"), str)
     )
@@ -4542,8 +4824,15 @@ def cmd_finalize(args):
     summary_path = os.path.join(args.run_dir, "summary.md")
     checkpoint_path = Path(args.run_dir) / "checkpoint.json"
     complete_checkpoint = None
+    if not os.path.isfile(state_path):
+        raise ValueError(f"state.json missing: {state_path}")
+    state = _read(state_path)
     if checkpoint_path.is_symlink():
         raise ValueError("checkpoint.json must not be a symlink")
+    if _is_current_schema_run(state, args.run_dir) and not checkpoint_path.is_file():
+        raise ValueError(
+            "current-schema run requires checkpoint.json before finalize"
+        )
     if checkpoint_path.is_file():
         current = _validate_checkpoint(_read(str(checkpoint_path)))
         if current["stage"] == "complete":

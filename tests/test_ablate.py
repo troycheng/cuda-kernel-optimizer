@@ -27,7 +27,7 @@ class AblateEvidenceTests(unittest.TestCase):
     def _fixture(root: Path):
         run = root / "run"
         iteration = run / "iterv1"
-        ablation = iteration / "ablations" / "memory_coalesce"
+        ablation = iteration / "ablations" / "memory.coalesce"
         ablation.mkdir(parents=True)
         ref = root / "ref.py"
         ref.write_text("# ref\n", encoding="utf-8")
@@ -36,6 +36,8 @@ class AblateEvidenceTests(unittest.TestCase):
             "correctness": {"passed": True},
             "kernel": {"average_ms": 10.123456},
         }), encoding="utf-8")
+        selected = iteration / "kernel.py"
+        selected.write_text("# selected candidate\n", encoding="utf-8")
         kernel = ablation / "kernel.py"
         kernel.write_text("# ablated-a\n", encoding="utf-8")
         (iteration / "methods.json").write_text(
@@ -82,6 +84,88 @@ class AblateEvidenceTests(unittest.TestCase):
                 round((12.654321 - 10.123456) / 10.123456 * 100.0, 2),
             )
 
+    def test_failed_benchmark_cannot_reuse_stale_json(self) -> None:
+        module = _load_ablate()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            output = root / "bench.json"
+            output.write_text(
+                json.dumps(
+                    {
+                        "correctness": {"passed": True},
+                        "kernel": {"average_ms": 99.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                module.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=1),
+            ):
+                result = module._bench_kernel(
+                    "benchmark.py",
+                    "kernel.py",
+                    "ref.py",
+                    {},
+                    0,
+                    str(output),
+                )
+
+            self.assertIsNone(result)
+            self.assertFalse(output.exists())
+
+    def test_method_id_cannot_escape_the_iteration(self) -> None:
+        module = _load_ablate()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            iteration, _ablation, _champion, _kernel, state = self._fixture(root)
+            (iteration / "methods.json").write_text(
+                json.dumps({"methods": [], "inherited_methods": [str(root / "escape")]}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(SystemExit, "safe relative"):
+                module.run(str(state), 1)
+
+    def test_distinct_method_ids_use_distinct_ablation_directories(self) -> None:
+        module = _load_ablate()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            iteration, _ablation, _champion, _kernel, state = self._fixture(root)
+            methods = ["a.b", "a_b"]
+            (iteration / "methods.json").write_text(
+                json.dumps({"methods": [], "inherited_methods": methods}),
+                encoding="utf-8",
+            )
+            expected = {}
+            for index, method_id in enumerate(methods, start=1):
+                method_dir = iteration / "ablations" / method_id
+                method_dir.mkdir(parents=True, exist_ok=True)
+                kernel = method_dir / "kernel.py"
+                kernel.write_text(f"# ablated-{index}\n", encoding="utf-8")
+                expected[method_id] = str(kernel.resolve())
+
+            result = {
+                "correctness": {"passed": True},
+                "kernel": {"average_ms": 12.0},
+            }
+
+            def fake_bench(*args):
+                Path(args[5]).write_text(json.dumps(result), encoding="utf-8")
+                return result
+
+            with mock.patch.object(module, "_bench_kernel", side_effect=fake_bench):
+                output = module.run(str(state), 1)
+
+            self.assertEqual(
+                {
+                    item["method_id"]: item["ablated_kernel"]
+                    for item in output["attributions"]
+                },
+                expected,
+            )
+
     def test_kernel_replacement_during_benchmark_never_binds_performance(self) -> None:
         module = _load_ablate()
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,6 +192,79 @@ class AblateEvidenceTests(unittest.TestCase):
             self.assertIn("drift", item["note"])
             self.assertNotIn("attribution_ms", item)
             self.assertNotIn("ablated_kernel_sha256", item)
+
+    def test_inherited_method_is_ablated_and_output_binds_selected_candidate(self) -> None:
+        module = _load_ablate()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            iteration, ablation, _champion, kernel, state = self._fixture(root)
+            (iteration / "methods.json").write_text(
+                json.dumps(
+                    {
+                        "methods": [],
+                        "inherited_methods": ["memory.coalesce"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = {
+                "correctness": {"passed": True},
+                "kernel": {"average_ms": 12.654321},
+            }
+
+            def fake_bench(*_args):
+                (ablation / "bench.json").write_text(
+                    json.dumps(result), encoding="utf-8"
+                )
+                return result
+
+            with mock.patch.object(module, "_bench_kernel", side_effect=fake_bench):
+                output = module.run(str(state), 1)
+
+            selected = iteration / "kernel.py"
+            self.assertEqual(
+                [item["method_id"] for item in output["attributions"]],
+                ["memory.coalesce"],
+            )
+            self.assertEqual(output["candidate_file"], str(selected.resolve()))
+            self.assertEqual(
+                output["candidate_sha256"],
+                hashlib.sha256(selected.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(
+                output["attributions"][0]["ablated_kernel_sha256"],
+                hashlib.sha256(kernel.read_bytes()).hexdigest(),
+            )
+
+    def test_correctness_failure_is_bound_as_essential_method_evidence(self) -> None:
+        module = _load_ablate()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _iteration, ablation, _champion, kernel, state = self._fixture(root)
+            result = {
+                "correctness": {"passed": False},
+                "kernel": {"average_ms": None},
+            }
+
+            def fake_bench(*_args):
+                bench = ablation / "bench.json"
+                bench.write_text(json.dumps(result), encoding="utf-8")
+                return result
+
+            with mock.patch.object(module, "_bench_kernel", side_effect=fake_bench):
+                output = module.run(str(state), 1)
+
+            item = output["attributions"][0]
+            self.assertTrue(item["contributed"])
+            self.assertEqual(item["evidence_kind"], "correctness_essential")
+            self.assertEqual(
+                item["ablated_kernel_sha256"],
+                hashlib.sha256(kernel.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(
+                item["ablated_bench_sha256"],
+                hashlib.sha256((ablation / "bench.json").read_bytes()).hexdigest(),
+            )
 
 
 if __name__ == "__main__":

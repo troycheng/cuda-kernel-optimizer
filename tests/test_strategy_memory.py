@@ -465,7 +465,7 @@ class StrategyMemoryTests(unittest.TestCase):
         }), encoding="utf-8")
         attribution_path = None
         if with_ablation:
-            ablation = iteration / "ablations" / method_id.replace(".", "_")
+            ablation = iteration / "ablations" / method_id
             ablation.mkdir(parents=True)
             ablated_kernel = ablation / "kernel.py"
             ablated_kernel.write_text("# ablated\n", encoding="utf-8")

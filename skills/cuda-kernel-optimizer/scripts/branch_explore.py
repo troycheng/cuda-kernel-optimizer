@@ -737,7 +737,13 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
         for result in results
     )
     inheritance_verification = {
-        "status": "passed" if shortlist else "not_promoted",
+        "status": (
+            "pending_candidate_verification"
+            if shortlist and required_method_ids
+            else "passed"
+            if shortlist
+            else "not_promoted"
+        ),
         "proof": "confirmed_paired_win_vs_current_champion",
         "baseline_file": baseline_file,
         "baseline_sha256": baseline_sha256,

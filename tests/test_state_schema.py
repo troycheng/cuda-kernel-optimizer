@@ -78,13 +78,25 @@ class StateSchemaTests(unittest.TestCase):
             proof = {
                 "status": "passed",
                 "proof": "confirmed_paired_win_vs_current_champion",
+                "evidence_kind": "candidate_ablation",
                 "baseline_file": str(champion),
                 "baseline_sha256": champion_sha,
                 "required_method_ids": ["fastsort.store"],
                 "verified_candidate_ids": ["2"],
+                "candidate_sha256": "c" * 64,
+                "verified_methods": [
+                    {
+                        "method_id": "fastsort.store",
+                        "evidence_kind": "performance_attribution",
+                        "attribution_ms": 0.003,
+                        "ablated_kernel_sha256": "a" * 64,
+                        "ablated_bench_sha256": "b" * 64,
+                    }
+                ],
             }
             decision = {
                 "candidate_id": "2",
+                "candidate_sha256": "c" * 64,
                 "baseline_file": str(champion),
                 "baseline_sha256": champion_sha,
                 "inheritance_verification": proof,
@@ -111,6 +123,16 @@ class StateSchemaTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "not covered"):
                 self.state._validate_success_inheritance_decision(tampered, state)
+
+            malformed = copy.deepcopy(decision)
+            malformed["inheritance_verification"]["verified_methods"][0][
+                "ablated_kernel_sha256"
+            ] = "not-a-digest"
+            malformed["inheritance_verification_sha256"] = self.state._canonical_digest(
+                malformed["inheritance_verification"]
+            )
+            with self.assertRaisesRegex(ValueError, "malformed"):
+                self.state._validate_success_inheritance_decision(malformed, state)
 
             champion.write_text("# changed after comparison\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "current champion"):

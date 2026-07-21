@@ -1171,7 +1171,7 @@ def _method_evidence(
         method_id = item.get("method_id")
         if method_id not in method_ids:
             continue
-        method_dir = iter_dir / "ablations" / method_id.replace(".", "_")
+        method_dir = iter_dir / "ablations" / method_id
         try:
             ablated_kernel = Path(item["ablated_kernel"]).absolute()
             ablated_bench_path = Path(item["ablated_bench"]).absolute()

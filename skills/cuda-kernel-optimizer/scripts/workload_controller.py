@@ -1716,8 +1716,6 @@ def _static_review_changed_files(
     status = "passed"
     if any(check["status"] == "failed" for check in checks):
         status = "failed"
-    elif any(check["status"] == "not_applicable" for check in checks):
-        status = "not_applicable"
     return {
         "status": status,
         "candidate_digest": candidate_binding.get("candidate_digest"),
@@ -1802,6 +1800,18 @@ def _normalize_frozen_workload(control: Mapping[str, Any]):
         )
     except (OSError, ValueError) as error:
         raise ValidationError(f"workload identity validation failed: {error}") from error
+
+
+def _validate_workload_candidate_minimum_effect(
+    change: Mapping[str, Any], workload: Any
+) -> None:
+    project_minimum = max(0.5, float(workload.objective["min_effect_pct"]))
+    candidate_minimum = float(change["candidate"]["minimum_effect"]["value"])
+    if candidate_minimum < project_minimum:
+        raise ValidationError(
+            "candidate minimum_effect is below the project contract "
+            f"({candidate_minimum:g}% < {project_minimum:g}%)"
+        )
 
 
 def _check_deadline(state: Mapping[str, Any]) -> None:
@@ -3654,6 +3664,10 @@ def register_change(
         raise ValidationError("control manifest drifted before ChangeSet registration")
     _load_frozen_control(run_root, state)
     change = validate_change_set(change_set, normalized)
+    workload = _normalize_frozen_workload(normalized)
+    if workload.source_hash != state["workload_source_hash"]:
+        raise ValidationError("workload identity drifted before ChangeSet registration")
+    _validate_workload_candidate_minimum_effect(change, workload)
     change_digest = _canonical_digest(change)
     pending_path = run_root / "registration_pending.json"
     if state["next_action"] == "edit_then_evaluate":
@@ -3982,6 +3996,17 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         if decision["status"] == "manual_recovery_required":
             return decision
         raise ValidationError("workload identity drifted before evaluation")
+    try:
+        _validate_workload_candidate_minimum_effect(change, workload)
+    except ValidationError:
+        return _finish_rejected(
+            run_root,
+            state,
+            control,
+            scope=change["scope"],
+            reason="candidate_below_project_contract",
+            primary_status=None,
+        )
     try:
         before = _validated_identity_artifact(
             load_json_object(

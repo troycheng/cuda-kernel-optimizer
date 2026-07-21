@@ -359,7 +359,12 @@ class CandidateGate:
                 raise ValueError(f"{stage} result must be a mapping")
             completed.append(stage)
             status = outcome.get("status")
-            if status not in {"passed", "not_applicable"}:
+            allowed_statuses = (
+                {"passed", "not_applicable"}
+                if stage == "profiler"
+                else {"passed"}
+            )
+            if status not in allowed_statuses:
                 reason = {
                     "static_review": "static_falsified",
                     "build_correctness": "correctness_failed",
@@ -383,6 +388,13 @@ class CandidateGate:
                         stop_reason="short_pair_missing_upper_bound",
                         completed=completed,
                     )
+                if not math.isfinite(float(upper)):
+                    return self._result(
+                        started_at=started,
+                        decision="STOP",
+                        stop_reason="short_pair_invalid_upper_bound",
+                        completed=completed,
+                    )
                 if float(upper) < threshold:
                     return self._result(
                         started_at=started,
@@ -397,6 +409,13 @@ class CandidateGate:
                         started_at=started,
                         decision="STOP",
                         stop_reason=f"{stage}_missing_lower_bound",
+                        completed=completed,
+                    )
+                if not math.isfinite(float(lower)):
+                    return self._result(
+                        started_at=started,
+                        decision="STOP",
+                        stop_reason=f"{stage}_invalid_lower_bound",
                         completed=completed,
                     )
                 if float(lower) < threshold:

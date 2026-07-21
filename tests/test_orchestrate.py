@@ -322,7 +322,7 @@ class CloseIterationDecisionTests(unittest.TestCase):
         self.assertEqual(runner.call_count, 1)
         self.assertEqual(output["status"], "all_branches_failed")
 
-    def test_budgeted_full_close_routes_only_confirmed_shortlist_through_outer_loop(self) -> None:
+    def test_current_schema_full_close_without_checkpoint_stops_before_outer_loop(self) -> None:
         orchestrate = _load_orchestrate()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -432,22 +432,13 @@ class CloseIterationDecisionTests(unittest.TestCase):
                     mock.patch.object(orchestrate.workload_evaluate, "evaluate_pairs", workload_pairs), \
                     mock.patch.object(orchestrate, "apply_decision", apply), \
                     contextlib.redirect_stdout(io.StringIO()):
-                orchestrate.cmd_close_iter(args)
-            persisted_workload_samples = Path(
-                apply.call_args.args[0]["workload_paired_samples"]["path"]
-            ).is_file()
+                with self.assertRaisesRegex(ValueError, "checkpoint"):
+                    orchestrate.cmd_close_iter(args)
+            runner.assert_not_called()
+            workload_pairs.assert_not_called()
+            apply.assert_not_called()
 
-        self.assertEqual(workload_pairs.call_count, 1)
-        self.assertEqual(workload_pairs.call_args.args[1], str(baseline))
-        self.assertEqual(workload_pairs.call_args.args[2], str(confirmed.resolve()))
-        self.assertEqual(apply.call_count, 1)
-        self.assertEqual(apply.call_args.args[0]["status"], "end_to_end_win")
-        evidence = apply.call_args.args[0]["workload_paired_samples"]
-        self.assertEqual(evidence["input_hash"], "frozen")
-        self.assertEqual(evidence["iteration"], 1)
-        self.assertTrue(persisted_workload_samples)
-
-    def test_budgeted_kernel_only_close_never_calls_workload_and_builds_terminal_win(self) -> None:
+    def test_current_schema_kernel_close_without_checkpoint_stops_before_work(self) -> None:
         orchestrate = _load_orchestrate()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -519,10 +510,11 @@ class CloseIterationDecisionTests(unittest.TestCase):
                     mock.patch.object(orchestrate.workload_evaluate, "evaluate_pairs", workload_pairs), \
                     mock.patch.object(orchestrate, "apply_decision", apply), \
                     contextlib.redirect_stdout(io.StringIO()):
-                orchestrate.cmd_close_iter(args)
-
-        workload_pairs.assert_not_called()
-        self.assertEqual(apply.call_args.args[0]["status"], "kernel_only_win")
+                with self.assertRaisesRegex(ValueError, "checkpoint"):
+                    orchestrate.cmd_close_iter(args)
+            runner.assert_not_called()
+            workload_pairs.assert_not_called()
+            apply.assert_not_called()
 
 
 class BudgetedParserTests(unittest.TestCase):
@@ -918,6 +910,280 @@ class BudgetedParserTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "current champion"):
                 self.orchestrate._check_success_inheritance(
                     state, methods, iteration
+                )
+
+    def test_paired_win_and_declaration_do_not_prove_candidate_inheritance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            champion = root / "champion.py"
+            candidate_file = root / "candidate.py"
+            champion.write_text("# fastsort store optimization\n", encoding="utf-8")
+            candidate_file.write_text("# mechanism accidentally removed\n", encoding="utf-8")
+            baseline_sha256 = self.orchestrate.sha256_file(champion)
+            state = {
+                "best_file": str(champion),
+                "effective_methods": [{"id": "fastsort.store", "iter": 124}],
+            }
+            candidate = {
+                "branch_index": 1,
+                "candidate_file": str(candidate_file),
+                "candidate_sha256": self.orchestrate.sha256_file(candidate_file),
+                "baseline_file": str(champion),
+                "baseline_sha256": baseline_sha256,
+            }
+            branch_payload = {
+                "inheritance_verification": {
+                    "status": "passed",
+                    "proof": "confirmed_paired_win_vs_current_champion",
+                    "baseline_file": str(champion),
+                    "baseline_sha256": baseline_sha256,
+                    "required_method_ids": ["fastsort.store"],
+                    "verified_candidate_ids": ["1"],
+                }
+            }
+
+            with self.assertRaisesRegex(ValueError, "candidate-specific"):
+                self.orchestrate._bind_branch_inheritance(
+                    {"status": "kernel_only_win"},
+                    branch_payload,
+                    candidate,
+                    state,
+                )
+
+    def test_candidate_bound_ablation_proves_inherited_mechanism(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            iteration = Path(tmp).resolve() / "iterv1"
+            iteration.mkdir()
+            champion = iteration.parent / "champion.py"
+            candidate_file = iteration / "kernel.py"
+            champion.write_text("# champion\n", encoding="utf-8")
+            candidate_file.write_text("# candidate\n", encoding="utf-8")
+            baseline_sha256 = self.orchestrate.sha256_file(champion)
+            candidate_sha256 = self.orchestrate.sha256_file(candidate_file)
+            state = {
+                "best_file": str(champion),
+                "effective_methods": [{"id": "fastsort.store", "iter": 124}],
+            }
+            candidate = {
+                "branch_index": 1,
+                "candidate_file": str(candidate_file),
+                "candidate_sha256": candidate_sha256,
+                "baseline_file": str(champion),
+                "baseline_sha256": baseline_sha256,
+            }
+            branch_payload = {
+                "inheritance_verification": {
+                    "status": "pending_candidate_verification",
+                    "proof": "confirmed_paired_win_vs_current_champion",
+                    "baseline_file": str(champion),
+                    "baseline_sha256": baseline_sha256,
+                    "required_method_ids": ["fastsort.store"],
+                    "verified_candidate_ids": ["1"],
+                }
+            }
+            (iteration / "branch_results.json").write_text(
+                json.dumps(branch_payload), encoding="utf-8"
+            )
+            ablation_dir = iteration / "ablations" / "fastsort.store"
+            ablation_dir.mkdir(parents=True)
+            ablated_kernel = ablation_dir / "kernel.py"
+            ablated_bench = ablation_dir / "bench.json"
+            ablated_kernel.write_text("# candidate without store\n", encoding="utf-8")
+            ablated_bench.write_text(
+                json.dumps(
+                    {
+                        "correctness": {"passed": True},
+                        "kernel": {"average_ms": 1.003},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (iteration / "attribution.json").write_text(
+                json.dumps(
+                    {
+                        "candidate_file": str(candidate_file),
+                        "candidate_sha256": candidate_sha256,
+                        "attributions": [
+                            {
+                                "method_id": "fastsort.store",
+                                "contributed": True,
+                                "attribution_ms": 0.003,
+                                "ablated_kernel": str(ablated_kernel),
+                                "ablated_kernel_sha256": self.orchestrate.sha256_file(
+                                    ablated_kernel
+                                ),
+                                "ablated_bench": str(ablated_bench),
+                                "ablated_bench_sha256": self.orchestrate.sha256_file(
+                                    ablated_bench
+                                ),
+                                "ablated_ms": 1.003,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            proof = self.orchestrate._verify_candidate_success_inheritance(
+                state, branch_payload, iteration, candidate
+            )
+            branch_payload["inheritance_verification"] = proof
+            other_file = iteration / "other.py"
+            other_file.write_text("# unverified candidate\n", encoding="utf-8")
+            verified_candidates = self.orchestrate._inheritance_verified_candidates(
+                state,
+                branch_payload,
+                [
+                    candidate,
+                    {
+                        **candidate,
+                        "branch_index": 2,
+                        "candidate_file": str(other_file),
+                        "candidate_sha256": self.orchestrate.sha256_file(other_file),
+                    },
+                ],
+                iteration,
+            )
+            decision = self.orchestrate._bind_branch_inheritance(
+                {"status": "kernel_only_win"},
+                branch_payload,
+                candidate,
+                state,
+            )
+
+            self.assertEqual(proof["status"], "passed")
+            self.assertEqual(proof["evidence_kind"], "candidate_ablation")
+            self.assertEqual(proof["candidate_sha256"], candidate_sha256)
+            self.assertEqual(verified_candidates, [candidate])
+            self.assertEqual(
+                [item["method_id"] for item in proof["verified_methods"]],
+                ["fastsort.store"],
+            )
+            self.assertEqual(
+                decision["inheritance_verification"]["candidate_sha256"],
+                candidate_sha256,
+            )
+            tampered = json.loads(
+                (iteration / "attribution.json").read_text("utf-8")
+            )
+            tampered["attributions"][0]["ablated_kernel_sha256"] = "not-a-digest"
+            (iteration / "attribution.json").write_text(
+                json.dumps(tampered), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                self.orchestrate._verify_candidate_success_inheritance(
+                    state, branch_payload, iteration, candidate
+                )
+            ablated_bench.write_text(
+                json.dumps({"correctness": {"passed": False}}),
+                encoding="utf-8",
+            )
+            essential = tampered
+            essential_record = essential["attributions"][0]
+            essential_record.update(
+                {
+                    "evidence_kind": "correctness_essential",
+                    "attribution_ms": None,
+                    "ablated_kernel_sha256": self.orchestrate.sha256_file(
+                        ablated_kernel
+                    ),
+                    "ablated_bench_sha256": self.orchestrate.sha256_file(
+                        ablated_bench
+                    ),
+                    "note": "ablated_kernel_failed_validation_method_essential",
+                }
+            )
+            (iteration / "attribution.json").write_text(
+                json.dumps(essential), encoding="utf-8"
+            )
+            essential_proof = self.orchestrate._verify_candidate_success_inheritance(
+                state, branch_payload, iteration, candidate
+            )
+            self.assertEqual(
+                essential_proof["verified_methods"][0]["evidence_kind"],
+                "correctness_essential",
+            )
+            unsafe_state = {
+                **state,
+                "effective_methods": [{"id": str(iteration.parent / "escape")}],
+            }
+            with self.assertRaisesRegex(ValueError, "safe relative"):
+                self.orchestrate._verify_candidate_success_inheritance(
+                    unsafe_state, branch_payload, iteration, candidate
+                )
+
+    def test_one_ablation_directory_cannot_prove_colliding_method_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            iteration = Path(tmp).resolve() / "iterv1"
+            shared = iteration / "ablations" / "a_b"
+            shared.mkdir(parents=True)
+            champion = iteration.parent / "champion.py"
+            candidate_file = iteration / "kernel.py"
+            ablated_kernel = shared / "kernel.py"
+            ablated_bench = shared / "bench.json"
+            champion.write_text("# champion\n", encoding="utf-8")
+            candidate_file.write_text("# candidate\n", encoding="utf-8")
+            ablated_kernel.write_text("# ablated\n", encoding="utf-8")
+            ablated_bench.write_text(
+                json.dumps(
+                    {
+                        "correctness": {"passed": True},
+                        "kernel": {"average_ms": 1.003},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            baseline_sha256 = self.orchestrate.sha256_file(champion)
+            candidate_sha256 = self.orchestrate.sha256_file(candidate_file)
+            state = {
+                "best_file": str(champion),
+                "effective_methods": [{"id": "a.b"}, {"id": "a_b"}],
+            }
+            candidate = {
+                "branch_index": 1,
+                "candidate_file": str(candidate_file),
+                "candidate_sha256": candidate_sha256,
+                "baseline_file": str(champion),
+                "baseline_sha256": baseline_sha256,
+            }
+            branch_payload = {
+                "inheritance_verification": {
+                    "status": "pending_candidate_verification",
+                    "proof": "confirmed_paired_win_vs_current_champion",
+                    "baseline_file": str(champion),
+                    "baseline_sha256": baseline_sha256,
+                    "required_method_ids": ["a.b", "a_b"],
+                    "verified_candidate_ids": ["1"],
+                }
+            }
+            record = {
+                "contributed": True,
+                "attribution_ms": 0.003,
+                "ablated_kernel": str(ablated_kernel),
+                "ablated_kernel_sha256": self.orchestrate.sha256_file(
+                    ablated_kernel
+                ),
+                "ablated_bench": str(ablated_bench),
+                "ablated_bench_sha256": self.orchestrate.sha256_file(
+                    ablated_bench
+                ),
+            }
+            (iteration / "attribution.json").write_text(
+                json.dumps(
+                    {
+                        "candidate_sha256": candidate_sha256,
+                        "attributions": [
+                            {**record, "method_id": "a.b"},
+                            {**record, "method_id": "a_b"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "path is invalid"):
+                self.orchestrate._verify_candidate_success_inheritance(
+                    state, branch_payload, iteration, candidate
                 )
 
     def test_open_iteration_rejects_a_preexisting_unseeded_branch(self) -> None:
@@ -1519,6 +1785,52 @@ class LifecycleIntegrationTests(unittest.TestCase):
             run_dir=str(run_dir), iter=1, benchmark="benchmark.py",
             warmup=1, repeat=1, retries=0,
         )
+
+    def test_current_schema_close_requires_checkpoint_before_any_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir, _state_path = self._setup(Path(tmp))
+            (run_dir / "checkpoint.json").unlink()
+            runner = mock.Mock()
+
+            with mock.patch.object(self.orchestrate, "_run", runner), \
+                    self.assertRaisesRegex(ValueError, "checkpoint"):
+                self.orchestrate.cmd_close_iter(self._close_args(run_dir))
+
+            runner.assert_not_called()
+
+    def test_current_schema_finalize_requires_checkpoint_before_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir, _state_path = self._setup(Path(tmp))
+            (run_dir / "checkpoint.json").unlink()
+            runner = mock.Mock()
+
+            with mock.patch.object(self.orchestrate, "_run", runner), \
+                    self.assertRaisesRegex(ValueError, "checkpoint"):
+                self.orchestrate.cmd_finalize(
+                    SimpleNamespace(run_dir=str(run_dir))
+                )
+
+            runner.assert_not_called()
+
+    def test_current_manifest_prevents_schema_downgrade_from_bypassing_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir, state_path = self._setup(Path(tmp))
+            (run_dir / "checkpoint.json").unlink()
+            state = json.loads(state_path.read_text("utf-8"))
+            state["schema_version"] = self.orchestrate.CURRENT_SCHEMA_VERSION - 1
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            runner = mock.Mock()
+
+            with mock.patch.object(self.orchestrate, "_run", runner), \
+                    self.assertRaisesRegex(ValueError, "checkpoint"):
+                self.orchestrate.cmd_close_iter(self._close_args(run_dir))
+            with mock.patch.object(self.orchestrate, "_run", runner), \
+                    self.assertRaisesRegex(ValueError, "checkpoint"):
+                self.orchestrate.cmd_finalize(
+                    SimpleNamespace(run_dir=str(run_dir))
+                )
+
+            runner.assert_not_called()
 
     def _write_mock_ncu_top(self, command, run_dir: Path) -> None:
         if Path(command[1]).name != "profile_ncu.py":

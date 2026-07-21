@@ -736,7 +736,7 @@ class WorkloadControllerContractTests(unittest.TestCase):
             with self.assertRaisesRegex(self.controller.ValidationError, "object"):
                 self.controller.load_json_object(array)
 
-    def test_cuda_without_a_static_checker_is_explicitly_not_applicable(self) -> None:
+    def test_cuda_without_a_static_checker_passes_binding_gate_and_records_gap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             project = root / "project"
@@ -763,7 +763,7 @@ class WorkloadControllerContractTests(unittest.TestCase):
                 after_identity_digest="b" * 64,
             )
 
-            self.assertEqual(artifact["status"], "not_applicable")
+            self.assertEqual(artifact["status"], "passed")
             self.assertIn(
                 {
                     "kind": "source_syntax",
@@ -773,6 +773,25 @@ class WorkloadControllerContractTests(unittest.TestCase):
                 },
                 artifact["checks"],
             )
+            gate = self.controller._load_budget_module().CandidateGate(
+                {
+                    "soft_target_seconds": 30,
+                    "hard_ceiling_seconds": 300,
+                    "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
+                },
+                _candidate_declaration("candidate", "worktree"),
+            )
+            result = gate.run(
+                {
+                    "static_review": lambda: artifact,
+                    "build_correctness": lambda: {"status": "failed"},
+                }
+            )
+            self.assertEqual(
+                result["completed_stages"],
+                ["static_review", "build_correctness"],
+            )
+            self.assertEqual(result["stop_reason"], "correctness_failed")
 
     def test_validate_cli_returns_zero_for_valid_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2484,6 +2503,31 @@ class WorkloadRoundTests(unittest.TestCase):
             )
             self.assertEqual(artifact["status"], "failed")
             self.assertEqual(artifact["checks"][0]["kind"], "json_parse")
+
+    def test_registration_rejects_candidate_below_workload_threshold_before_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            manifest_path = project / "workload.json"
+            manifest = json.loads(manifest_path.read_text("utf-8"))
+            manifest["objective"]["min_effect_pct"] = 2.0
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            adapter_path = project / "adapter.py"
+            adapter_path.write_text(
+                adapter_path.read_text("utf-8").replace(
+                    '"min_effect_pct": 1.0', '"min_effect_pct": 2.0'
+                ),
+                encoding="utf-8",
+            )
+            self.controller.start_run(control, run_dir)
+
+            with self.assertRaisesRegex(ValueError, "project contract"):
+                self.controller.register_change(control, run_dir, self._change())
+
+            state = self.controller.read_run_state(run_dir)
+            self.assertEqual(state["next_action"], "register_change")
+            self.assertFalse((run_dir / "registration_pending.json").exists())
+            self.assertFalse((run_dir / "snapshot").exists())
 
     def test_live_uncertainty_without_a_profiler_action_stops_before_formal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
