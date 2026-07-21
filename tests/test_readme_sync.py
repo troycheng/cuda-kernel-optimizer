@@ -58,7 +58,7 @@ class ReadmeSyncTests(unittest.TestCase):
             opening = text[: text.index("\n## ")]
             self.assertIn("asset/logo-wordmark-dark.svg", opening)
             self.assertIn("asset/logo-wordmark.svg", opening)
-            self.assertIn('width="640"', opening)
+            self.assertIn('width="520"', opening)
             self.assertIn("CUDA", opening)
             self.assertIn("CUTLASS", opening)
             self.assertIn("Triton", opening)
@@ -71,10 +71,10 @@ class ReadmeSyncTests(unittest.TestCase):
             ):
                 self.assertIn(target, opening)
         self.assertIn(
-            "Evidence-driven CUDA, CUTLASS and Triton optimization for Codex",
+            "Evidence-driven CUDA, CUTLASS and Triton optimization for ChatGPT",
             self.english,
         )
-        self.assertIn("以证据驱动 Codex 优化 CUDA、CUTLASS 与 Triton", self.chinese)
+        self.assertIn("以证据驱动 ChatGPT 优化 CUDA、CUTLASS 与 Triton", self.chinese)
 
     def test_quick_start_precedes_protocol_detail(self) -> None:
         self.assertLess(
@@ -85,8 +85,10 @@ class ReadmeSyncTests(unittest.TestCase):
             self.chinese.index("## 快速开始"),
             self.chinese.index("evidence_integrity"),
         )
-        self.assertIn("Installation is performed by Codex", self.english)
-        self.assertIn("安装由 Codex 完成", self.chinese)
+        self.assertIn(
+            "Installation is performed by ChatGPT's coding agent", self.english
+        )
+        self.assertIn("安装由 ChatGPT 的编程代理完成", self.chinese)
         for text in (self.english, self.chinese):
             self.assertIn("github.com/troycheng/cuda-kernel-optimizer", text)
             self.assertIn("skills/cuda-kernel-optimizer", text)

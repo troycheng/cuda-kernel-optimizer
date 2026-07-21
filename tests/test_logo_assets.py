@@ -143,7 +143,7 @@ class LogoAssetTests(unittest.TestCase):
         }
         for name, (foreground, accent) in expected.items():
             root = parse_svg(name)
-            self.assertEqual(root.attrib["viewBox"], "0 0 720 152")
+            self.assertEqual(root.attrib["viewBox"], "0 0 506 152")
             self.assertNotIn("width", root.attrib)
             self.assertNotIn("height", root.attrib)
             self.assertEqual(root.attrib["role"], "img")

@@ -1,5 +1,5 @@
 site_name: CUDA Kernel Optimizer
-site_description: Evidence-driven CUDA, CUTLASS and Triton optimization for Codex
+site_description: Evidence-driven CUDA, CUTLASS and Triton optimization for ChatGPT
 repo_name: troycheng/cuda-kernel-optimizer
 repo_url: https://github.com/troycheng/cuda-kernel-optimizer
 docs_dir: docs

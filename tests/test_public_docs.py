@@ -63,7 +63,7 @@ class PublicDocsTests(unittest.TestCase):
     def test_getting_started_defines_inputs_and_installation(self) -> None:
         text = (ROOT / "docs/getting-started.md").read_text(encoding="utf-8")
         for marker in (
-            "Codex",
+            "ChatGPT",
             "skills/cuda-kernel-optimizer",
             "runnable target",
             "correctness reference",

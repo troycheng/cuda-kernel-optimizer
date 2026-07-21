@@ -1,11 +1,11 @@
 # CUDA Kernel Optimizer
 
-**Evidence-driven CUDA, CUTLASS and Triton optimization for Codex.**
+**Evidence-driven CUDA, CUTLASS and Triton optimization for ChatGPT.**
 
-`cuda-kernel-optimizer` is a reusable Codex skill that connects profiling,
-bounded code changes, correctness checks, and paired performance evaluation. It
-supports a single kernel, a complete GPU workload, a serving experiment, or
-read-only analysis of an existing Nsight Compute report.
+`cuda-kernel-optimizer` is a reusable GPU optimization skill for ChatGPT's coding
+agent. It connects profiling, bounded code changes, correctness checks, and paired
+performance evaluation. It supports a single kernel, a complete GPU workload, a
+serving experiment, or read-only analysis of an existing Nsight Compute report.
 
 ## Start here
 
@@ -24,7 +24,7 @@ read-only analysis of an existing Nsight Compute report.
 - [Knowledge and research](knowledge-and-research.md) — understand offline
   knowledge, current-source search, and independent model challenge.
 - [Agent Protocol](https://github.com/troycheng/cuda-kernel-optimizer/blob/main/skills/cuda-kernel-optimizer/SKILL.md)
-  — read the canonical Codex execution instructions.
+  — read the canonical ChatGPT agent instructions.
 
 ## What makes a result usable
 

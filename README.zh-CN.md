@@ -1,11 +1,11 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="asset/logo-wordmark-dark.svg">
-    <img src="asset/logo-wordmark.svg" width="640" alt="CUDA Kernel Optimizer">
+    <img src="asset/logo-wordmark.svg" width="520" alt="CUDA Kernel Optimizer">
   </picture>
 </p>
 
-<p align="center"><strong>以证据驱动 Codex 优化 CUDA、CUTLASS 与 Triton</strong></p>
+<p align="center"><strong>以证据驱动 ChatGPT 优化 CUDA、CUTLASS 与 Triton</strong></p>
 
 <p align="center">
   <a href="docs/getting-started.md">快速开始</a> ·
@@ -18,9 +18,9 @@
 
 ## 项目简介
 
-`cuda-kernel-optimizer` 是一个供 Codex 使用的 GPU 性能优化 skill。它可以优化
-CUDA、CUTLASS 或 Triton kernel，排查完整 workload 的瓶颈，验证修改能否改善
-serving 指标，也可以在不重新运行原程序的情况下分析已有 Nsight Compute report。
+`cuda-kernel-optimizer` 是一个面向 ChatGPT 编程代理的 GPU 性能优化 skill。
+它可以优化 CUDA、CUTLASS 或 Triton kernel，排查完整 workload 的瓶颈，验证修改
+能否改善 serving 指标，也可以在不重新运行原程序的情况下分析已有 Nsight Compute report。
 
 Skill 会在真实目标上做 profiling，只修改限定的项目路径，先检查正确性，再比较成对
 性能数据。瓶颈不在 kernel 时，它还会检查框架调度、CPU 和数据处理、传输、通信、I/O、
@@ -39,7 +39,7 @@ Skill 不会自动修改宿主机配置。驱动、counter 权限、频率、功
 
 ## 快速开始
 
-安装由 Codex 完成。让 Codex 从
+安装由 ChatGPT 的编程代理完成。让它从
 [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer)
 按最新发布标签安装或更新 `skills/cuda-kernel-optimizer`。只有需要试用尚未发布的修改时，
 才使用持续变化的 `main` 分支。安装完成后开启新会话，让新指令生效。

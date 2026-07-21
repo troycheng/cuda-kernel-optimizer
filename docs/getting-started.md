@@ -1,13 +1,13 @@
 # Getting Started
 
-## Install with Codex
+## Install with ChatGPT
 
-Installation is performed by Codex. Ask Codex to install or update
+Installation is performed by ChatGPT's coding agent. Ask it to install or update
 `skills/cuda-kernel-optimizer` from
 [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer)
 at the latest published release tag. Use the moving `main` branch only when
 deliberately testing unreleased changes. Start a new session after installation
-so Codex reloads the skill instructions.
+so the agent reloads the skill instructions.
 
 ## Prepare the task
 

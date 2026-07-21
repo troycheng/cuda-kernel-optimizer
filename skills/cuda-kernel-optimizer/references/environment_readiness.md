@@ -43,7 +43,7 @@ When the foundation is incomplete, help the user create project-local pieces:
 - a remote-run checklist when the target GPU is elsewhere.
 
 The user owns workload representativeness, business objectives, and acceptable
-quality loss. Codex may propose a scaffold, but must ask the user to validate
+quality loss. The agent may propose a scaffold, but must ask the user to validate
 those facts before making an end-to-end claim.
 
 Do not change drivers, counter permissions, clocks, power limits, services, or

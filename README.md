@@ -1,11 +1,11 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="asset/logo-wordmark-dark.svg">
-    <img src="asset/logo-wordmark.svg" width="640" alt="CUDA Kernel Optimizer">
+    <img src="asset/logo-wordmark.svg" width="520" alt="CUDA Kernel Optimizer">
   </picture>
 </p>
 
-<p align="center"><strong>Evidence-driven CUDA, CUTLASS and Triton optimization for Codex</strong></p>
+<p align="center"><strong>Evidence-driven CUDA, CUTLASS and Triton optimization for ChatGPT</strong></p>
 
 <p align="center">
   <a href="docs/getting-started.md">Get Started</a> ·
@@ -18,10 +18,11 @@
 
 ## About
 
-`cuda-kernel-optimizer` is a Codex skill for improving CUDA, CUTLASS, Triton,
-and the GPU workloads around them. It can optimize a kernel, find a bottleneck
-across a complete workload, validate a change against a serving objective, or
-analyze an existing Nsight Compute report without rerunning its program.
+`cuda-kernel-optimizer` is a GPU performance optimization skill for ChatGPT's
+coding agent. It can improve CUDA, CUTLASS, Triton, and the GPU workloads around
+them; find a bottleneck across a complete workload; validate a change against a
+serving objective; or analyze an existing Nsight Compute report without
+rerunning its program.
 
 The skill profiles the real target, makes bounded project changes, checks
 correctness, and compares paired measurements. It also checks framework
@@ -46,7 +47,7 @@ recommendations unless the user separately authorizes them.
 
 ## Quick start
 
-Installation is performed by Codex. Ask Codex to install or update
+Installation is performed by ChatGPT's coding agent. Ask it to install or update
 `skills/cuda-kernel-optimizer` from
 [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer),
 using the latest published release tag. Use the moving `main` branch only when
