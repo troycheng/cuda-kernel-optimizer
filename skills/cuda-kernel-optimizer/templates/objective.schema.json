@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kernel-flow.local/schemas/cuda-optimizer-objective-v1.json",
+  "title": "CUDA optimizer user workload objective",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["primary_metric", "min_effect_pct", "constraints"],
+  "properties": {
+    "primary_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "direction"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": ".*\\S.*"
+        },
+        "direction": {"enum": ["lower", "higher"]}
+      }
+    },
+    "min_effect_pct": {"type": "number", "minimum": 0},
+    "constraints": {
+      "type": "array",
+      "uniqueItems": true,
+      "x-unique-by": "name",
+      "$comment": "Standard uniqueItems rejects identical objects. Runtime validation additionally enforces unique constraint names using x-unique-by=name.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "max_regression_pct"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*"
+          },
+          "max_regression_pct": {"type": "number", "minimum": 0}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+.claude
+.vscode
+example
+.codex
+env.json
+tree.py
+.worktrees/
+__pycache__/
+*.py[cod]
+.pytest_cache/

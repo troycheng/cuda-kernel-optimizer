@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/troycheng/cuda-optimized-skill/schema/v2.6/performance-iteration.json",
+  "title": "Performance-first iteration record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "round_id",
+    "round_index",
+    "anchor_sha256",
+    "previous_decision_sha256",
+    "hypothesis",
+    "budget",
+    "measurement_path",
+    "candidate_declared",
+    "evidence_manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "cuda-optimizer/performance-iteration-v1"},
+    "round_id": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+    "round_index": {"type": "integer", "minimum": 1},
+    "anchor_sha256": {"$ref": "#/$defs/sha256"},
+    "previous_decision_sha256": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]
+    },
+    "hypothesis": {"$ref": "#/$defs/hypothesis"},
+    "budget": {"$ref": "#/$defs/budget"},
+    "measurement_path": {"$ref": "#/$defs/pathIdentity"},
+    "candidate_declared": {"type": "boolean"},
+    "evidence_manifest_sha256": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"round_index": {"const": 1}}},
+      "then": {"properties": {"previous_decision_sha256": {"type": "null"}}},
+      "else": {"properties": {"previous_decision_sha256": {"$ref": "#/$defs/sha256"}}}
+    },
+    {
+      "if": {"properties": {"candidate_declared": {"const": false}}},
+      "then": {"properties": {"evidence_manifest_sha256": {"type": "null"}}}
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonempty": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+    "safePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\).+$"
+    },
+    "pathIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "definition_sha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonempty"},
+        "version": {"$ref": "#/$defs/nonempty"},
+        "definition_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "hypothesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "statement",
+        "mechanism",
+        "target_metric",
+        "direction",
+        "minimum_effect_pct",
+        "mutation_scope"
+      ],
+      "properties": {
+        "statement": {"type": "string", "minLength": 12, "pattern": ".*\\S.*"},
+        "mechanism": {"$ref": "#/$defs/nonempty"},
+        "target_metric": {"$ref": "#/$defs/nonempty"},
+        "direction": {"enum": ["lower", "higher"]},
+        "minimum_effect_pct": {"type": "number", "exclusiveMinimum": 0},
+        "mutation_scope": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/safePath"}
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["round_seconds", "infrastructure_seconds", "infrastructure_repairs"],
+      "properties": {
+        "round_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "infrastructure_seconds": {"type": "number", "minimum": 0},
+        "infrastructure_repairs": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

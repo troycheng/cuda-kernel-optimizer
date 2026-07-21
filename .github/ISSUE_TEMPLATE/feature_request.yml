@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose a focused capability or workflow improvement
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What optimization or diagnosis task cannot be completed reliably today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the observable behavior and how it could be verified.
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload context
+      description: Note the relevant CUDA, CUTLASS, Triton, framework, serving, or profiling path.

@@ -1,0 +1,787 @@
+from __future__ import annotations
+
+import contextlib
+import copy
+import hashlib
+import importlib.util
+import io
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts"
+BRANCH_EXPLORE_PATH = SCRIPTS / "branch_explore.py"
+RUN_ITERATION_PATH = SCRIPTS / "run_iteration.py"
+STATE_PATH = SCRIPTS / "state.py"
+
+
+def _load(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_branch_explore():
+    return _load(BRANCH_EXPLORE_PATH, "cuda_optimizer_branch_explore")
+
+
+def _load_run_iteration():
+    return _load(RUN_ITERATION_PATH, "cuda_optimizer_run_iteration")
+
+
+def _bench(passed: bool = True, average: float = 1.0) -> dict:
+    return {
+        "correctness": {"passed": passed},
+        "kernel": {
+            "average_ms": average,
+            "median_ms": average,
+            "p95_ms": average,
+            "cv_pct": 1.0,
+        },
+    }
+
+
+def _statistics(status: str, estimate: float | None) -> dict:
+    return {
+        "statistic": "median_paired_improvement_pct",
+        "estimate_pct": estimate,
+        "ci_low_pct": None if estimate is None else estimate - 0.25,
+        "ci_high_pct": None if estimate is None else estimate + 0.25,
+        "status": status,
+    }
+
+
+class BranchExploreTests(unittest.TestCase):
+    def _state(self, root: Path, branches: int = 2) -> tuple[Path, dict]:
+        run_dir = root / "run"
+        baseline = root / "best.py"
+        baseline.write_text("# best\n", encoding="utf-8")
+        ref = root / "reference.py"
+        ref.write_text("# ref\n", encoding="utf-8")
+        for branch in range(1, branches + 1):
+            branch_dir = run_dir / "iterv1" / "branches" / f"b{branch}"
+            branch_dir.mkdir(parents=True)
+            (branch_dir / "kernel.py").write_text(
+                f"# branch {branch}\n", encoding="utf-8"
+            )
+        payload = {
+            "run_dir": str(run_dir),
+            "ref_file": str(ref),
+            "best_file": str(baseline),
+            "dims": {"n": 128, "nested": {"tile": 16}},
+            "ptr_size": 0,
+            "branches": branches,
+            "backend": "triton",
+            "env": {
+                "primary_sm_arch": "sm_120",
+                "nvcc": {"path": "/opt/cuda/bin/nvcc"},
+            },
+            "seed": 17,
+            "budget": {"max_pairs": 24},
+            "min_effect_pct": 0.5,
+            "effective_methods": [
+                {"id": "fastsort.store", "iter": 124}
+            ],
+        }
+        state_path = root / "state.json"
+        state_path.write_text(json.dumps(payload), encoding="utf-8")
+        return state_path, payload
+
+    def test_failed_benchmark_cannot_reuse_a_stale_passing_result(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            json_out = root / "bench.json"
+            json_out.write_text(
+                json.dumps({"correctness": {"passed": True}}), encoding="utf-8"
+            )
+            failed = mock.Mock(returncode=17, stdout="", stderr="compile failed")
+
+            with mock.patch.object(
+                branch_explore.subprocess, "run", return_value=failed
+            ):
+                result = branch_explore._bench_kernel(
+                    "benchmark.py",
+                    "kernel.py",
+                    "reference.py",
+                    {},
+                    0,
+                    str(json_out),
+                    warmup=1,
+                    repeat=1,
+                )
+
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["error"], "benchmark_failed")
+            self.assertFalse(json_out.exists())
+
+    def test_paired_candidate_atomically_persists_bound_raw_pairs(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            baseline = root / "baseline.py"
+            candidate = root / "kernel.py"
+            baseline.write_text("# baseline\n", encoding="utf-8")
+            candidate.write_text("# candidate\n", encoding="utf-8")
+            artifact = root / "paired_samples.jsonl"
+            pairs = [
+                {"block": 0, "baseline": 2.0, "candidate": 1.0, "valid": True},
+                {"block": 1, "baseline": 2.2, "candidate": 1.1, "valid": True},
+            ]
+            with mock.patch.object(
+                branch_explore,
+                "run_paired",
+                return_value={"pairs": copy.deepcopy(pairs)},
+            ):
+                result = branch_explore._paired_candidate(
+                    str(baseline),
+                    str(candidate),
+                    backend="triton",
+                    dims={},
+                    ptr_size=0,
+                    arch="sm_120",
+                    nvcc_bin="nvcc",
+                    seed=7,
+                    blocks=2,
+                    warmup=0,
+                    min_effect_pct=0.5,
+                    bootstrap_samples=100,
+                    artifact_path=artifact,
+                    input_hash="a" * 64,
+                    iteration=3,
+                    candidate_id="b2",
+                )
+
+            records = [
+                json.loads(line) for line in artifact.read_text("utf-8").splitlines()
+            ]
+            baseline_sha256 = hashlib.sha256(baseline.read_bytes()).hexdigest()
+
+        self.assertEqual(result["paired_samples"]["path"], str(artifact.resolve()))
+        self.assertEqual(result["paired_samples"]["pairs"], 2)
+        self.assertEqual(result["statistics"]["valid_pairs"], 2)
+        self.assertEqual([record["pair"] for record in records], pairs)
+        for index, record in enumerate(records):
+            self.assertEqual(record["pair_index"], index)
+            self.assertEqual(record["input_hash"], "a" * 64)
+            self.assertEqual(record["iteration"], 3)
+            self.assertEqual(record["candidate_id"], "b2")
+            self.assertEqual(record["candidate_sha256"], result["paired_samples"]["candidate_sha256"])
+            self.assertEqual(
+                record["baseline_sha256"],
+                baseline_sha256,
+            )
+
+    def test_paired_candidate_rejects_a_baseline_changed_during_measurement(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            baseline = root / "baseline.py"
+            candidate = root / "kernel.py"
+            baseline.write_text("# baseline\n", encoding="utf-8")
+            candidate.write_text("# candidate\n", encoding="utf-8")
+
+            def mutate_baseline(*_args, **_kwargs):
+                baseline.write_text("# drifted\n", encoding="utf-8")
+                return {"pairs": []}
+
+            with mock.patch.object(
+                branch_explore, "run_paired", side_effect=mutate_baseline
+            ), self.assertRaisesRegex(ValueError, "baseline changed"):
+                branch_explore._paired_candidate(
+                    str(baseline),
+                    str(candidate),
+                    backend="triton",
+                    dims={},
+                    ptr_size=0,
+                    arch="sm_120",
+                    nvcc_bin="nvcc",
+                    seed=7,
+                    blocks=2,
+                    warmup=0,
+                    min_effect_pct=0.5,
+                )
+
+    def test_only_confirmed_win_enters_shortlist_and_writes_decision(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, _payload = self._state(root)
+            with mock.patch.object(
+                branch_explore, "_bench_kernel", side_effect=[_bench(), _bench()]
+            ), mock.patch.object(
+                branch_explore,
+                "_paired_candidate",
+                side_effect=[
+                    _statistics("inconclusive", 0.2),
+                    _statistics("inconclusive", 0.2),
+                    _statistics("inconclusive", 3.0),
+                    _statistics("confirmed_win", 3.0),
+                ],
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+            self.assertEqual(output["status"], "shortlist_ready")
+            self.assertEqual([item["branch_index"] for item in output["shortlist"]], [2])
+            self.assertEqual(output["champion"], output["shortlist"][0])
+            self.assertEqual(output["champion"]["status"], "confirmed_win")
+            promoted = root / "run" / "iterv1" / "kernel.py"
+            self.assertEqual(promoted.read_text("utf-8"), "# branch 2\n")
+            decision = json.loads(
+                (root / "run" / "iterv1" / "decision.json").read_text("utf-8")
+            )
+            self.assertEqual(decision["status"], "confirmed_win")
+            self.assertEqual(Path(decision["candidate_file"]), promoted)
+            self.assertEqual(decision["statistics"], output["champion"]["statistics"])
+            self.assertEqual(
+                decision["candidate_sha256"],
+                hashlib.sha256(promoted.read_bytes()).hexdigest(),
+            )
+            inheritance = output["inheritance_verification"]
+            self.assertEqual(inheritance["status"], "passed")
+            self.assertEqual(
+                inheritance["required_method_ids"], ["fastsort.store"]
+            )
+            self.assertEqual(
+                inheritance["baseline_sha256"],
+                hashlib.sha256((root / "best.py").read_bytes()).hexdigest(),
+            )
+            self.assertEqual(
+                output["champion"]["baseline_sha256"],
+                inheritance["baseline_sha256"],
+            )
+            self.assertEqual(
+                decision["inheritance_verification_sha256"],
+                hashlib.sha256(
+                    json.dumps(
+                        inheritance,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            )
+
+    def test_short_screen_below_minimum_skips_formal_pairing(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, _payload = self._state(root, branches=1)
+            paired = mock.Mock(
+                return_value={
+                    "statistics": _statistics("inconclusive", -0.20),
+                    "baseline_median_ms": 1.0,
+                }
+            )
+            with mock.patch.object(
+                branch_explore, "_bench_kernel", return_value=_bench()
+            ), mock.patch.object(branch_explore, "_paired_candidate", paired):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+            self.assertEqual(paired.call_count, 1)
+            self.assertEqual(paired.call_args.kwargs["blocks"], 2)
+            branch = output["branches"][0]
+            self.assertEqual(
+                branch["candidate_gate"]["stop_reason"],
+                "effect_upper_bound_below_minimum",
+            )
+            self.assertIn(
+                "formal_paired",
+                branch["candidate_gate"]["skipped_expensive_stages"],
+            )
+            self.assertEqual(output["status"], "no_confirmed_kernel_win")
+
+    def test_candidate_gate_orders_short_profile_decision_before_formal_pairing(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, _payload = self._state(root, branches=1)
+            paired = mock.Mock(
+                side_effect=[
+                    {
+                        "statistics": _statistics("inconclusive", 3.0),
+                        "baseline_median_ms": 1.0,
+                    },
+                    {
+                        "statistics": _statistics("confirmed_win", 3.0),
+                        "baseline_median_ms": 1.0,
+                    },
+                ]
+            )
+            with mock.patch.object(
+                branch_explore, "_bench_kernel", return_value=_bench()
+            ), mock.patch.object(branch_explore, "_paired_candidate", paired):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+            self.assertEqual(
+                [call.kwargs["blocks"] for call in paired.call_args_list], [2, 24]
+            )
+            gate = output["champion"]["candidate_gate"]
+            self.assertEqual(
+                gate["completed_stages"],
+                [
+                    "static_review",
+                    "build_correctness",
+                    "short_paired",
+                    "profiler",
+                    "formal_paired",
+                ],
+            )
+            self.assertEqual(
+                output["champion"]["profiler"]["status"], "not_applicable"
+            )
+
+    def test_candidate_exception_is_isolated_and_later_winner_survives(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, _payload = self._state(root)
+            with mock.patch.object(
+                branch_explore, "_bench_kernel", side_effect=[_bench(), _bench()]
+            ), mock.patch.object(
+                branch_explore,
+                "_paired_candidate",
+                side_effect=[
+                    RuntimeError("CUDA prepare failed " + "x" * 4000),
+                    _statistics("inconclusive", 3.0),
+                    _statistics("confirmed_win", 3.0),
+                ],
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+            by_branch = {item["branch_index"]: item for item in output["branches"]}
+            self.assertEqual(by_branch[1]["status"], "invalid")
+            self.assertIn("RuntimeError", by_branch[1]["error"])
+            self.assertIn("CUDA prepare failed", by_branch[1]["error"])
+            self.assertLessEqual(len(by_branch[1]["error"]), 600)
+            self.assertEqual(output["champion"]["branch_index"], 2)
+            self.assertTrue((root / "run" / "iterv1" / "branch_results.json").is_file())
+            self.assertTrue((root / "run" / "iterv1" / "decision.json").is_file())
+
+    def test_malformed_benchmark_payload_rejects_only_that_candidate(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, _payload = self._state(root)
+            with mock.patch.object(
+                branch_explore,
+                "_bench_kernel",
+                side_effect=[{"correctness": []}, _bench()],
+            ), mock.patch.object(
+                branch_explore,
+                "_paired_candidate",
+                side_effect=[
+                    _statistics("inconclusive", 3.0),
+                    _statistics("confirmed_win", 3.0),
+                ],
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+            by_branch = {item["branch_index"]: item for item in output["branches"]}
+            self.assertEqual(by_branch[1]["status"], "rejected_correctness")
+            self.assertIn("invalid_benchmark_output", by_branch[1]["error"])
+            self.assertEqual(output["champion"]["branch_index"], 2)
+
+    def test_control_flow_exceptions_are_never_swallowed(self) -> None:
+        branch_explore = _load_branch_explore()
+        for error in (KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as tmp:
+                state_path, _payload = self._state(Path(tmp))
+                with mock.patch.object(
+                    branch_explore, "_bench_kernel", side_effect=[_bench(), _bench()]
+                ), mock.patch.object(
+                    branch_explore, "_paired_candidate", side_effect=error
+                ), self.assertRaises(type(error)):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        branch_explore.run(str(state_path), iteration=1)
+
+    def test_no_confirmed_win_keeps_existing_best_and_does_not_copy_candidate(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, payload = self._state(root)
+            before_state = state_path.read_bytes()
+            before_best = Path(payload["best_file"]).read_bytes()
+            with mock.patch.object(
+                branch_explore, "_bench_kernel", side_effect=[_bench(), _bench()]
+            ), mock.patch.object(
+                branch_explore,
+                "_paired_candidate",
+                side_effect=[
+                    _statistics("inconclusive", 0.1),
+                    _statistics("confirmed_loss", -2.0),
+                ],
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+            self.assertEqual(output["status"], "no_confirmed_kernel_win")
+            self.assertIsNone(output["champion"])
+            self.assertEqual(output["shortlist"], [])
+            self.assertFalse((root / "run" / "iterv1" / "kernel.py").exists())
+            self.assertEqual(Path(payload["best_file"]).read_bytes(), before_best)
+            self.assertEqual(state_path.read_bytes(), before_state)
+            decision_path = root / "run" / "iterv1" / "decision.json"
+            state_module = _load(STATE_PATH, "cuda_optimizer_state_consumer")
+            decision, status, statistics, workload_statistics = (
+                state_module._load_decision(
+                    str(decision_path.resolve()), candidate_file=None
+                )
+            )
+            self.assertEqual(status, "no_confirmed_kernel_win")
+            self.assertIsNone(decision["candidate_file"])
+            self.assertIsNone(statistics)
+            self.assertIsNone(workload_statistics)
+            self.assertEqual(
+                state_module._promotion_for(status, "kernel-only"),
+                ("no_confirmed_kernel_win", False),
+            )
+
+    def test_confirmed_winners_are_stably_sorted_by_estimate(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, _payload = self._state(root, branches=5)
+            stats = [
+                _statistics("inconclusive", 2.0),
+                _statistics("confirmed_win", 2.0),
+                _statistics("confirmed_loss", -3.0),
+                _statistics("inconclusive", 4.0),
+                _statistics("confirmed_win", 4.0),
+                _statistics("inconclusive", 2.0),
+                _statistics("confirmed_win", 2.0),
+                _statistics("inconclusive", 8.0),
+                _statistics("inconclusive", 8.0),
+            ]
+            with mock.patch.object(
+                branch_explore, "_bench_kernel", side_effect=[_bench()] * 5
+            ), mock.patch.object(branch_explore, "_paired_candidate", side_effect=stats):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+        self.assertEqual(
+            [item["branch_index"] for item in output["shortlist"]], [3, 1, 4]
+        )
+
+    def test_failed_correctness_and_malformed_statistics_are_safely_excluded(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, _payload = self._state(root, branches=3)
+            paired = mock.Mock(
+                side_effect=[
+                    {"status": "confirmed_win", "estimate_pct": True},
+                    _statistics("inconclusive", 3.0),
+                    _statistics("invalid", 99.0),
+                ]
+            )
+            with mock.patch.object(
+                branch_explore,
+                "_bench_kernel",
+                side_effect=[_bench(False), _bench(), _bench()],
+            ), mock.patch.object(branch_explore, "_paired_candidate", paired):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+        self.assertEqual(output["status"], "no_confirmed_kernel_win")
+        self.assertEqual(paired.call_count, 3)
+        by_branch = {item["branch_index"]: item for item in output["branches"]}
+        self.assertEqual(by_branch[1]["correctness"], "failed")
+        self.assertEqual(by_branch[2]["status"], "invalid")
+        self.assertIn("invalid_statistics", by_branch[2]["error"])
+        self.assertNotIn(1, [item["branch_index"] for item in output["shortlist"]])
+
+    def test_paired_seam_receives_frozen_state_inputs_and_budget(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, payload = self._state(root)
+            original = copy.deepcopy(payload)
+            bench = mock.Mock(side_effect=[_bench(), _bench()])
+            paired = mock.Mock(side_effect=[
+                _statistics("inconclusive", None),
+                _statistics("inconclusive", None),
+            ])
+            with mock.patch.object(
+                branch_explore, "_bench_kernel", bench
+            ), mock.patch.object(branch_explore, "_paired_candidate", paired):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    branch_explore.run(str(state_path), iteration=1, warmup=3, repeat=7)
+
+            self.assertEqual(bench.call_args_list[0].args[-2:], (1, 1))
+            args, kwargs = paired.call_args_list[0]
+            self.assertEqual(args[0], payload["best_file"])
+            self.assertTrue(args[1].endswith("branches/b1/kernel.py"))
+            self.assertEqual(kwargs["backend"], "triton")
+            self.assertEqual(kwargs["dims"], payload["dims"])
+            self.assertEqual(kwargs["ptr_size"], 0)
+            self.assertEqual(kwargs["arch"], "sm_120")
+            self.assertEqual(kwargs["nvcc_bin"], "/opt/cuda/bin/nvcc")
+            self.assertEqual(kwargs["seed"], 17)
+            self.assertEqual(kwargs["blocks"], 2)
+            self.assertEqual(kwargs["warmup"], 3)
+            self.assertEqual(kwargs["min_effect_pct"], 0.5)
+            self.assertEqual(payload, original)
+            self.assertEqual(json.loads(state_path.read_text("utf-8")), original)
+
+    def test_cli_treats_completed_but_unconfirmed_comparison_as_normal(self) -> None:
+        branch_explore = _load_branch_explore()
+        argv = ["branch_explore.py", "--state", "state.json", "--iter", "1"]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(
+            branch_explore,
+            "run",
+            return_value={
+                "status": "no_confirmed_kernel_win",
+                "valid_branches": 2,
+                "completed_comparisons": 2,
+            },
+        ):
+            branch_explore.main()
+
+    def test_cli_treats_passed_but_failed_measurements_as_no_confirmed(self) -> None:
+        branch_explore = _load_branch_explore()
+        argv = ["branch_explore.py", "--state", "state.json", "--iter", "1"]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(
+            branch_explore,
+            "run",
+            return_value={
+                "status": "no_confirmed_kernel_win",
+                "valid_branches": 2,
+                "completed_comparisons": 0,
+                "measurement_failures": 2,
+            },
+        ):
+            branch_explore.main()
+
+    def test_promoting_python_removes_stale_cuda_with_atomic_replace(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, _payload = self._state(root)
+            iter_dir = root / "run" / "iterv1"
+            stale = iter_dir / "kernel.cu"
+            stale.write_text("// stale\n", encoding="utf-8")
+            with mock.patch.object(
+                branch_explore, "_bench_kernel", side_effect=[_bench(), _bench()]
+            ), mock.patch.object(
+                branch_explore,
+                "_paired_candidate",
+                side_effect=[
+                    _statistics("inconclusive", 3.0),
+                    _statistics("confirmed_win", 3.0),
+                    _statistics("inconclusive", 0.0),
+                ],
+            ), mock.patch.object(
+                branch_explore.os, "replace", wraps=branch_explore.os.replace
+            ) as replace:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+            selected = Path(output["selected_kernel"])
+            self.assertEqual(selected.name, "kernel.py")
+            self.assertEqual(selected.read_text("utf-8"), "# branch 1\n")
+            self.assertFalse(stale.exists())
+            temporary, target = map(Path, replace.call_args.args)
+            self.assertEqual(temporary.parent, iter_dir)
+            self.assertEqual(target, selected)
+
+    def test_cli_keeps_nonzero_exit_when_all_branches_fail(self) -> None:
+        branch_explore = _load_branch_explore()
+        argv = ["branch_explore.py", "--state", "state.json", "--iter", "1"]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(
+            branch_explore,
+            "run",
+            return_value={
+                "status": "no_confirmed_kernel_win",
+                "valid_branches": 0,
+                "completed_comparisons": 0,
+            },
+        ), self.assertRaises(SystemExit) as caught:
+            branch_explore.main()
+
+        self.assertEqual(caught.exception.code, 2)
+
+
+class RunIterationDecisionSummaryTests(unittest.TestCase):
+    def test_decision_summary_requires_terminal_status_and_candidate_path(self) -> None:
+        run_iteration = _load_run_iteration()
+        statistics = _statistics("confirmed_win", 3.0)
+        invalid = (
+            ({"candidate_file": "kernel.py", "statistics": statistics}, "status"),
+            (
+                {
+                    "status": True,
+                    "candidate_file": "kernel.py",
+                    "statistics": statistics,
+                },
+                "status",
+            ),
+            (
+                {
+                    "status": "surprise_win",
+                    "candidate_file": "kernel.py",
+                    "statistics": statistics,
+                },
+                "status",
+            ),
+            ({"status": "confirmed_win", "statistics": statistics}, "candidate_file"),
+        )
+        for decision, field in invalid:
+            with self.subTest(field=field, decision=decision), self.assertRaisesRegex(
+                ValueError, field
+            ):
+                run_iteration._decision_summary(decision)
+
+    def test_decision_summary_rejects_unknown_or_non_string_evidence_status(self) -> None:
+        run_iteration = _load_run_iteration()
+        for status in (True, 1, "surprise_win"):
+            with self.subTest(status=status), self.assertRaisesRegex(
+                ValueError, "statistics.status"
+            ):
+                run_iteration._decision_summary(
+                    {
+                        "status": "confirmed_win",
+                        "candidate_file": "kernel.py",
+                        "statistics": _statistics(status, 3.0),
+                    }
+                )
+
+    def test_benchmark_summary_uses_unified_decision_statistics(self) -> None:
+        run_iteration = _load_run_iteration()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            iter_dir = run_dir / "iterv1"
+            iter_dir.mkdir(parents=True)
+            kernel = iter_dir / "kernel.py"
+            kernel.write_text("# kernel\n", encoding="utf-8")
+            state_path = root / "state.json"
+            state_path.write_text(
+                json.dumps({"run_dir": str(run_dir), "ref_file": str(root / "ref.py")}),
+                encoding="utf-8",
+            )
+            stats = _statistics("confirmed_win", 3.0)
+            (iter_dir / "decision.json").write_text(
+                json.dumps(
+                    {
+                        "status": "confirmed_win",
+                        "candidate_file": str(kernel),
+                        "statistics": stats,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bench_payload = _bench(average=0.5)
+
+            def fake_bench(**kwargs):
+                Path(kwargs["json_out"]).write_text(
+                    json.dumps(bench_payload), encoding="utf-8"
+                )
+                return 0
+
+            args = type(
+                "Args",
+                (),
+                {
+                    "state": str(state_path),
+                    "iter": 1,
+                    "benchmark": str(ROOT / "fake_benchmark.py"),
+                    "warmup": 1,
+                    "repeat": 2,
+                },
+            )()
+            with mock.patch.object(run_iteration, "_run_bench", side_effect=fake_bench):
+                with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    run_iteration.cmd_benchmark(args)
+
+            summary = json.loads(stdout.getvalue())
+            expected = {
+                "statistic": "median_paired_improvement_pct",
+                "estimate_pct": 3.0,
+                "ci_low_pct": 2.75,
+                "ci_high_pct": 3.25,
+                "status": "confirmed_win",
+            }
+            self.assertEqual(
+                {field: summary[field] for field in expected}, expected
+            )
+            self.assertEqual(summary["decision"], expected)
+            self.assertNotIn("improved", summary)
+
+    def test_candidate_benchmark_requires_decision_before_running(self) -> None:
+        run_iteration = _load_run_iteration()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            iter_dir = run_dir / "iterv1"
+            iter_dir.mkdir(parents=True)
+            (iter_dir / "kernel.py").write_text("# kernel\n", encoding="utf-8")
+            state_path = root / "state.json"
+            state_path.write_text(
+                json.dumps({"run_dir": str(run_dir), "ref_file": str(root / "ref.py")}),
+                encoding="utf-8",
+            )
+            args = type(
+                "Args",
+                (),
+                {
+                    "state": str(state_path),
+                    "iter": 1,
+                    "benchmark": str(ROOT / "fake_benchmark.py"),
+                    "warmup": 1,
+                    "repeat": 2,
+                },
+            )()
+            bench = mock.Mock()
+            with mock.patch.object(run_iteration, "_run_bench", bench):
+                with self.assertRaisesRegex(ValueError, "decision.json.*missing"):
+                    run_iteration.cmd_benchmark(args)
+
+            bench.assert_not_called()
+
+    def test_candidate_benchmark_rejects_malformed_decision_before_running(self) -> None:
+        run_iteration = _load_run_iteration()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            iter_dir = run_dir / "iterv1"
+            iter_dir.mkdir(parents=True)
+            (iter_dir / "kernel.py").write_text("# kernel\n", encoding="utf-8")
+            (iter_dir / "decision.json").write_text("{", encoding="utf-8")
+            state_path = root / "state.json"
+            state_path.write_text(
+                json.dumps({"run_dir": str(run_dir), "ref_file": str(root / "ref.py")}),
+                encoding="utf-8",
+            )
+            args = type(
+                "Args",
+                (),
+                {
+                    "state": str(state_path),
+                    "iter": 1,
+                    "benchmark": str(ROOT / "fake_benchmark.py"),
+                    "warmup": 1,
+                    "repeat": 2,
+                },
+            )()
+            bench = mock.Mock()
+            with mock.patch.object(run_iteration, "_run_bench", bench):
+                with self.assertRaisesRegex(ValueError, "decision.json.*malformed"):
+                    run_iteration.cmd_benchmark(args)
+
+            bench.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
