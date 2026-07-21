@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/troycheng/cuda-optimized-skill/diagnostic_measurement.schema.json",
+  "$id": "https://github.com/troycheng/cuda-kernel-optimizer/diagnostic_measurement.schema.json",
   "title": "CUDA optimizer diagnostic adapter measurement v1",
   "$comment": "The Controller supplies the diagnostic kind. Runtime validation enforces the kind-specific subset of this closed signal vocabulary.",
   "type": "object",

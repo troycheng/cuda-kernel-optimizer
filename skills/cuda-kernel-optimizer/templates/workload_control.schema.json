@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/troycheng/cuda-optimized-skill/workload_control.schema.json",
+  "$id": "https://github.com/troycheng/cuda-kernel-optimizer/workload_control.schema.json",
   "title": "CUDA Workload Optimizer Control Manifest v1/v2",
   "type": "object",
   "additionalProperties": false,

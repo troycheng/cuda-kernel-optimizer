@@ -20,10 +20,10 @@ set. It covers:
   eight real identical-kernel pairs, binds the calibration to source,
   environment, and contract identities, and refuses to leave `CALIBRATING`
   when noise or minimum detectable effect is too high;
-- a V3.1 readiness round that inventories required and diagnostic capabilities,
+- a protocol-generation 3.1 readiness round that inventories required and diagnostic capabilities,
   runs a user-workload smoke test, and blocks baseline collection when a
   required check, dependency identity, or time budget fails;
-- a V3.1 active-diagnosis round that runs a real PyTorch CPU/CUDA profile action,
+- a protocol-generation 3.1 active-diagnosis round that runs a real PyTorch CPU/CUDA profile action,
   seals its trace and outcome, and returns to the next hypothesis round;
 - a target-bounded Nsight Compute attempt. It must either collect real metrics
   with readable counters or record exactly `ERR_NVGPUCTRPERM`; no other
@@ -44,26 +44,26 @@ reported as skipped:
 python3 -m unittest tests.gpu.sm120.test_sm120_acceptance -v
 ```
 
-On the isolated checkout, a current host environment can run the same suite
-directly:
+On an isolated checkout, a current host environment can run the same suite
+directly. The example locations are placeholders owned by the operator:
 
 ```bash
-cd /data/tcheng/cuda-skill-e2e/v3.1/repo
+cd /srv/cuda-skill-e2e/repo
 CUDA_VISIBLE_DEVICES=7 \
 CUDA_SM120_E2E=1 \
-CUDA_E2E_ARTIFACTS=/data/tcheng/cuda-skill-e2e/v3.1/artifacts/current-host \
-CUTLASS_PATH=/data/tcheng/cuda-skill-e2e/deps/cutlass \
+CUDA_E2E_ARTIFACTS=/srv/cuda-skill-e2e/artifacts/current-host \
+CUTLASS_PATH=/opt/cutlass-4.6.1 \
 python3 -m unittest tests.gpu.sm120.test_sm120_acceptance -v
 ```
 
 ## Disposable current and compatibility containers
 
-`remote/run_lane.sh` accepts `current` or `compat` (default). It requires the
-exact repository path `/data/tcheng/cuda-skill-e2e/v3.1/repo`, an artifact lane
-below `/data/tcheng/cuda-skill-e2e/v3.1/artifacts`, and the physical CUTLASS
-checkout `/data/tcheng/cuda-skill-e2e/deps/cutlass` with both
+`remote/run_lane.sh` accepts `current` or `compat` (default). Set
+`CUDA_E2E_ROOT` to an isolated root containing the repository, put each artifact
+lane below `$CUDA_E2E_ROOT/artifacts`, and set `CUTLASS_PATH` to a dedicated
+physical CUTLASS checkout with both
 `include/cutlass/cutlass.h` and `include/cutlass/version.h`. CUTLASS must not
-overlap the repository or `/data/vllm-opt`, and the version header must report
+overlap the repository or a `vllm-opt` tree, and the version header must report
 the validated `4.6.1` release. The artifact lane must be fresh; only a regular
 `run.log` created by an outer `tee` is allowed to pre-exist.
 
@@ -76,15 +76,17 @@ remain available while compiler binaries and evidence stay out of the
 repository.
 
 ```bash
-cd /data/tcheng/cuda-skill-e2e/v3.1/repo
+cd /srv/cuda-skill-e2e/repo
 CUDA_E2E_GPU=7 \
-CUDA_E2E_ARTIFACTS=/data/tcheng/cuda-skill-e2e/v3.1/artifacts/current \
-CUTLASS_PATH=/data/tcheng/cuda-skill-e2e/deps/cutlass \
+CUDA_E2E_ROOT=/srv/cuda-skill-e2e \
+CUDA_E2E_ARTIFACTS=/srv/cuda-skill-e2e/artifacts/current \
+CUTLASS_PATH=/opt/cutlass-4.6.1 \
 tests/gpu/sm120/remote/run_lane.sh current
 
 CUDA_E2E_GPU=7 \
-CUDA_E2E_ARTIFACTS=/data/tcheng/cuda-skill-e2e/v3.1/artifacts/compatibility \
-CUTLASS_PATH=/data/tcheng/cuda-skill-e2e/deps/cutlass \
+CUDA_E2E_ROOT=/srv/cuda-skill-e2e \
+CUDA_E2E_ARTIFACTS=/srv/cuda-skill-e2e/artifacts/compatibility \
+CUTLASS_PATH=/opt/cutlass-4.6.1 \
 tests/gpu/sm120/remote/run_lane.sh compat
 ```
 
@@ -160,7 +162,7 @@ controller detected that the environment could not support the requested
 claim and did not begin candidate exploration. NCU again returned
 `ERR_NVGPUCTRPERM`; no host permission or driver policy was changed.
 
-The V3.1 readiness lane ran on an idle physical RTX 5090 on
+The protocol-generation 3.1 readiness lane ran on an idle physical RTX 5090 on
 2026-07-20. A fresh lane passed 18/18 checks in 52.141 seconds with the same
 immutable image. Readiness took 8.793 seconds and the first baseline artifact
 appeared after 9.297 seconds. CUDA 13.3 target compilation, SM120 execution and
@@ -168,10 +170,10 @@ SASS, Compute Sanitizer, and the user-workload smoke passed. Nsys was absent and
 NCU returned `ERR_NVGPUCTRPERM`; both were recorded as diagnostic limitations,
 with no package, host-policy, or driver change. Injected timeout, workload
 failure, and requirements-identity drift each blocked the baseline as designed.
-The historical V3.0 path had no readiness stage, so this run proves admission
+The historical protocol-generation 3.0 path had no readiness stage, so this run proves admission
 behavior, not faster diagnosis or optimization.
 
-The V3.1 completion lane ran on 2026-07-20 using the same immutable image and
+The protocol-generation 3.1 completion lane ran on 2026-07-20 using the same immutable image and
 passed 20/20 checks in 58.876 seconds. Its new active-diagnosis check executed a
 real PyTorch CPU/CUDA profile action on the RTX 5090, sealed a 14,341-byte Chrome
 trace and an observed outcome, bound the outcome as support for the framework-gap

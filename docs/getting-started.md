@@ -4,8 +4,10 @@
 
 Installation is performed by Codex. Ask Codex to install or update
 `skills/cuda-kernel-optimizer` from
-[troycheng/cuda-optimized-skill](https://github.com/troycheng/cuda-kernel-optimizer),
-then start a new session so Codex reloads the skill instructions.
+[troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer)
+at the latest published release tag. Use the moving `main` branch only when
+deliberately testing unreleased changes. Start a new session after installation
+so Codex reloads the skill instructions.
 
 ## Prepare the task
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/troycheng/cuda-optimized-skill/observation_summary.schema.json",
+  "$id": "https://github.com/troycheng/cuda-kernel-optimizer/observation_summary.schema.json",
   "title": "CUDA optimizer bounded observation summary v1",
   "type": "object",
   "additionalProperties": false,

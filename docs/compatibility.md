@@ -1,7 +1,13 @@
 # Compatibility
 
-Kernel optimization needs Python 3.10+, a working CUDA GPU and driver, and the
-toolchain required by the target implementation.
+The CPU/static suite is tested with Python 3.10 and 3.12 on Linux CI. Core
+Controller scripts use POSIX facilities such as file locks, resource limits,
+signals, and process groups. Linux is the supported GPU execution environment;
+macOS can run CPU/static checks, while native Windows is not supported. Windows
+users should use a Linux or WSL environment.
+
+Kernel optimization also needs a working CUDA GPU and driver and the toolchain
+required by the target implementation.
 
 | Path | Requirement | Boundary |
 |---|---|---|
@@ -29,3 +35,12 @@ routing, and primary upstream sources are maintained in the
 
 The physical GPU fixture and opt-in commands are documented in the
 [RTX 5090 test guide](https://github.com/troycheng/cuda-kernel-optimizer/blob/main/tests/gpu/sm120/README.md).
+
+## Schema identities
+
+New unversioned schemas use the standalone repository namespace. Existing
+versioned pre-V1 schema IDs under the archived `cuda-optimized-skill/schema/v*` and
+`cuda-optimized-skill/schemas/v*` namespaces remain unchanged because they are
+stable protocol identifiers, not installation URLs. Future incompatible schemas
+must use a new versioned namespace in this repository instead of rewriting those
+legacy IDs.

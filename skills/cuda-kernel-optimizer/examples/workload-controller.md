@@ -1,6 +1,8 @@
 # Workload Controller example
 
-This page shows what the AI and Controller exchange during a V3.1 workload run.
+This page shows what the AI and Controller exchange during an active-diagnosis
+workload run. The underlying 3.1 label is a pre-V1 protocol generation, not the
+project release version.
 It is not a command list for the user. The user supplies the runnable workload,
 reference, target environment, objective, constraints, and allowed project paths;
 the AI prepares and operates the contracts.

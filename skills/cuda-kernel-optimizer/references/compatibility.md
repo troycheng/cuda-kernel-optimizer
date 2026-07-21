@@ -12,7 +12,7 @@ Probe the installed environment before selecting an optimization path.
 
 ## Observed RTX 5090 lanes
 
-Both isolated lanes passed the same V2.2 SM120 acceptance matrix on 2026-07-17:
+Both isolated lanes passed the same pre-V1 SM120 acceptance matrix on 2026-07-17:
 seven safety/helper tests and four real-GPU tests for Triton, native CUDA,
 CUTLASS, randomized identical paired timing, the production outer-workload
 evaluator, and target-bounded NCU.
@@ -48,10 +48,9 @@ degradation. The adapter compared prebuilt baseline/optimized binaries; the
 captured dispatch headers were byte-identical, so the result is binary A/B
 evidence rather than source-level promotion proof. No source tree was modified.
 
-Durable evidence is under
-`/data/tcheng/cuda-skill-e2e/v2.2/artifacts/{current,compatibility,real}`. The
-real run directory is
-`real/orchestrator/run_20260717_043610_569950525`.
+The validation records were captured in an isolated artifact lane. Maintainer
+filesystem paths are intentionally omitted because they are not part of the
+portable evidence contract.
 
 ## Architecture capability rules
 

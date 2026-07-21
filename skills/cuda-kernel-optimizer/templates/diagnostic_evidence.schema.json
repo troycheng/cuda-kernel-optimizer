@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/troycheng/cuda-optimized-skill/diagnostic_evidence.schema.json",
+  "$id": "https://github.com/troycheng/cuda-kernel-optimizer/diagnostic_evidence.schema.json",
   "title": "CUDA optimizer Controller-derived diagnostic evidence v1",
   "$comment": "Runtime validation additionally enforces the exact producer and signal vocabulary for each diagnostic kind.",
   "type": "object",

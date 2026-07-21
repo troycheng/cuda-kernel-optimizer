@@ -1,8 +1,8 @@
-# V2.2 dual-loop walkthrough
+# Dual-loop walkthrough
 
 This example optimizes `gemm.cu` against `ref.py` and then validates the
 shortlisted kernel on a user-provided inference workload. Values are illustrative;
-the verdict rules and artifact names match V2.2.
+the verdict rules and artifact names follow the retained pre-V1 protocol.
 
 Commands run from the installed skill root:
 

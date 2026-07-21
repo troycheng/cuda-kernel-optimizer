@@ -36,6 +36,51 @@ def _load_orchestrate():
     return module
 
 
+def _open_iter_lifecycle_fixture(orchestrate, root: Path, *, elapsed_seconds: float):
+    run_dir = root / "run"
+    run_dir.mkdir()
+    champion = root / "champion.py"
+    champion.write_text("# champion\n", encoding="utf-8")
+    policy = orchestrate.resolve_budget("quick")
+    input_hash = "a" * 64
+    state = {
+        "schema_version": orchestrate.CURRENT_SCHEMA_VERSION,
+        "run_dir": str(run_dir),
+        "input_hash": input_hash,
+        "budget": orchestrate._budget_payload(policy),
+        "best_file": str(champion),
+        "branches": 1,
+        "effective_methods": [],
+    }
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    store = orchestrate.ArtifactStore(run_dir)
+    store.write_checkpoint(
+        {
+            "schema_version": orchestrate.CURRENT_SCHEMA_VERSION,
+            "input_hash": input_hash,
+            "run_dir": str(run_dir),
+            "iteration": 0,
+            "stage": "baseline",
+            "stage_index": 0,
+            "status": "stage_complete",
+            "candidate_id": None,
+            "candidate_status": None,
+            "budget": {
+                "elapsed_seconds": elapsed_seconds,
+                "remaining_seconds": max(
+                    0.0, policy.max_seconds - elapsed_seconds
+                ),
+            },
+            "updated_at": 1.0,
+            "stage_evidence": {"baseline": {"status": "passed"}},
+        }
+    )
+    args = SimpleNamespace(
+        run_dir=str(run_dir), iter=1, benchmark="benchmark.py"
+    )
+    return args, store, input_hash, policy
+
+
 class CloseIterationDecisionTests(unittest.TestCase):
     def _fixture(self, root: Path) -> tuple[SimpleNamespace, Path, Path]:
         run_dir = root / "run"
@@ -903,6 +948,197 @@ class BudgetedParserTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "not seeded"):
                     self.orchestrate.cmd_open_iter(args)
+
+    def test_open_iteration_timeout_stops_before_roofline_and_branch_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            champion = root / "champion.py"
+            champion.write_text("# champion\n", encoding="utf-8")
+            (run_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "best_file": str(champion),
+                        "branches": 1,
+                        "effective_methods": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                run_dir=str(run_dir), iter=1, benchmark="benchmark.py"
+            )
+            timed_out = SimpleNamespace(
+                returncode=-15,
+                stdout="",
+                stderr="",
+                timed_out=True,
+                elapsed_seconds=0.2,
+            )
+            runner = mock.Mock(return_value=timed_out)
+
+            with mock.patch.object(self.orchestrate, "_run", runner):
+                with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    self.orchestrate.cmd_open_iter(args)
+
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(runner.call_count, 1)
+            self.assertGreater(runner.call_args.kwargs["hard_timeout"], 0.0)
+            self.assertEqual(output["status"], "budget_exhausted")
+            self.assertEqual(output["stop_reason"], "hard_execution_deadline")
+            self.assertFalse((run_dir / "iterv1" / "branches").exists())
+            terminal = json.loads(
+                (run_dir / "iterv1" / "open_iter_terminal.json").read_text("utf-8")
+            )
+            self.assertEqual(terminal["stop_reason"], "hard_execution_deadline")
+
+    def test_open_iteration_charges_elapsed_time_to_the_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, store, input_hash, _policy = _open_iter_lifecycle_fixture(
+                self.orchestrate, root, elapsed_seconds=10.0
+            )
+            completed = SimpleNamespace(
+                returncode=0, stdout="", stderr="", timed_out=False
+            )
+
+            with mock.patch.object(
+                self.orchestrate, "_run", return_value=completed
+            ):
+                self.orchestrate.cmd_open_iter(args)
+
+            checkpoint = store.load_checkpoint(expected_input_hash=input_hash)
+            self.assertGreater(checkpoint["budget"]["elapsed_seconds"], 10.0)
+            self.assertEqual(checkpoint["stage"], "baseline")
+            self.assertEqual(checkpoint["status"], "stage_complete")
+
+    def test_open_iteration_preexhausted_budget_stops_before_spawning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy_limit = 2400.0
+            args, store, input_hash, policy = _open_iter_lifecycle_fixture(
+                self.orchestrate,
+                root,
+                elapsed_seconds=policy_limit,
+            )
+            self.assertEqual(
+                policy_limit, policy.max_seconds - policy.reserve_seconds
+            )
+            runner = mock.Mock()
+
+            with mock.patch.object(self.orchestrate, "_run", runner):
+                with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    self.orchestrate.cmd_open_iter(args)
+
+            output = json.loads(stdout.getvalue())
+            checkpoint = store.load_checkpoint(expected_input_hash=input_hash)
+            runner.assert_not_called()
+            self.assertEqual(output["stop_reason"], "hard_execution_deadline")
+            self.assertEqual(checkpoint["status"], "budget_exhausted")
+            self.assertEqual(checkpoint["candidate_status"], "inconclusive")
+
+    def test_open_iteration_timeout_is_terminal_in_the_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, store, input_hash, _policy = _open_iter_lifecycle_fixture(
+                self.orchestrate, root, elapsed_seconds=10.0
+            )
+            timed_out = SimpleNamespace(
+                returncode=-15,
+                stdout="",
+                stderr="",
+                timed_out=True,
+                elapsed_seconds=0.2,
+            )
+
+            with mock.patch.object(
+                self.orchestrate, "_run", return_value=timed_out
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.orchestrate.cmd_open_iter(args)
+
+            checkpoint = store.load_checkpoint(expected_input_hash=input_hash)
+            self.assertEqual(checkpoint["stage"], "candidate_correctness")
+            self.assertEqual(checkpoint["status"], "budget_exhausted")
+            self.assertEqual(checkpoint["candidate_status"], "inconclusive")
+            self.assertEqual(
+                checkpoint["stage_evidence"]["candidate_correctness"]["reason"],
+                "hard execution deadline expired",
+            )
+
+    def test_open_iteration_roofline_timeout_reports_only_unstarted_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            champion = root / "champion.py"
+            champion.write_text("# champion\n", encoding="utf-8")
+            (run_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "best_file": str(champion),
+                        "branches": 1,
+                        "effective_methods": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                run_dir=str(run_dir), iter=1, benchmark="benchmark.py"
+            )
+            completed = SimpleNamespace(
+                returncode=0, stdout="", stderr="", timed_out=False
+            )
+            timed_out = SimpleNamespace(
+                returncode=-15,
+                stdout="",
+                stderr="",
+                timed_out=True,
+                elapsed_seconds=0.2,
+            )
+
+            with mock.patch.object(
+                self.orchestrate,
+                "_run",
+                side_effect=(completed, timed_out),
+            ) as runner:
+                with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    self.orchestrate.cmd_open_iter(args)
+
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(runner.call_count, 2)
+            self.assertEqual(output["command"], "roofline")
+            self.assertEqual(output["skipped_expensive_stages"], ["branch_seed"])
+
+    def test_open_iteration_rejects_a_dangling_checkpoint_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            champion = root / "champion.py"
+            champion.write_text("# champion\n", encoding="utf-8")
+            (run_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "input_hash": "a" * 64,
+                        "best_file": str(champion),
+                        "branches": 1,
+                        "effective_methods": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            try:
+                (run_dir / "checkpoint.json").symlink_to(root / "missing.json")
+            except OSError:
+                self.skipTest("symlinks are unavailable")
+            args = SimpleNamespace(
+                run_dir=str(run_dir), iter=1, benchmark="benchmark.py"
+            )
+
+            with self.assertRaisesRegex(ValueError, "symlink|unsafe|missing|escapes"):
+                self.orchestrate.cmd_open_iter(args)
 
     def test_setup_keeps_secret_workload_snapshot_out_of_argv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

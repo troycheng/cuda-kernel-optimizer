@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/troycheng/cuda-optimized-skill/candidate_proposal.schema.json",
+  "$id": "https://github.com/troycheng/cuda-kernel-optimizer/candidate_proposal.schema.json",
   "title": "CUDA optimizer candidate proposal v1",
   "type": "object",
   "additionalProperties": false,

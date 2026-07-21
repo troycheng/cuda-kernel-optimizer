@@ -194,6 +194,10 @@ class PublicDocsTests(unittest.TestCase):
             "Nsight Compute",
             "references/compatibility.md",
             "ERR_NVGPUCTRPERM",
+            "Python 3.10 and 3.12",
+            "POSIX",
+            "native Windows",
+            "Schema identities",
         ):
             self.assertIn(marker, text)
 
@@ -206,9 +210,22 @@ class PublicDocsTests(unittest.TestCase):
             "9.297",
             "Nsys",
             "ERR_NVGPUCTRPERM",
-            "not evidence that V3.1 finds a useful direction faster",
+            "not evidence that protocol generation 3.1 finds a useful direction faster",
         ):
             self.assertIn(marker, text)
+
+    def test_public_docs_distinguish_release_and_protocol_versions(self) -> None:
+        getting_started = (ROOT / "docs/getting-started.md").read_text("utf-8")
+        self.assertIn("troycheng/cuda-kernel-optimizer", getting_started)
+        self.assertNotIn("[troycheng/cuda-optimized-skill]", getting_started)
+        self.assertIn("published release tag", getting_started)
+        self.assertIn("moving `main` branch", getting_started)
+
+        long_running = (ROOT / "docs/long-running-optimization.md").read_text("utf-8")
+        self.assertIn("project release", long_running)
+        self.assertIn("protocol generation", long_running)
+        self.assertNotIn("Version 3.0 is designed", long_running)
+        self.assertNotIn("V3.1 adds", long_running)
 
     def test_internal_history_is_not_shipped_as_public_documentation(self) -> None:
         self.assertFalse((ROOT / "maintainers").exists())

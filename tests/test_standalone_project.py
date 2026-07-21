@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
@@ -10,14 +11,12 @@ OLD_PUBLIC_REPOSITORY = "github.com/troycheng/cuda-optimized-skill"
 
 
 class StandaloneProjectTests(unittest.TestCase):
-    def test_public_version_starts_at_v1(self) -> None:
-        self.assertEqual((ROOT / "VERSION").read_text("utf-8").strip(), "1.0.0")
-        for name, heading in (
-            ("README.md", "### V1.0.0"),
-            ("README.zh-CN.md", "### V1.0.0"),
-        ):
+    def test_public_version_uses_the_v1_release_line(self) -> None:
+        self.assertEqual((ROOT / "VERSION").read_text("utf-8").strip(), "1.0.1")
+        for name in ("README.md", "README.zh-CN.md"):
             text = (ROOT / name).read_text("utf-8")
-            self.assertIn(heading, text)
+            self.assertIn("### V1.0.1", text)
+            self.assertIn("### V1.0.0", text)
             self.assertNotRegex(text, r"(?m)^### V(?:2|3)\.")
 
     def test_readmes_install_from_the_standalone_repository(self) -> None:
@@ -36,6 +35,39 @@ class StandaloneProjectTests(unittest.TestCase):
         self.assertIn("https://github.com/KernelFlow-ops", notice)
         self.assertIn("Mark Liu", notice)
         self.assertIn("https://github.com/mark-liu", notice)
+
+    def test_installed_skill_carries_license_and_notice(self) -> None:
+        skill = ROOT / "skills" / "cuda-kernel-optimizer"
+        for name in ("LICENSE", "NOTICE"):
+            distributed = skill / name
+            self.assertTrue(distributed.is_file(), name)
+            self.assertEqual(
+                distributed.read_text("utf-8"),
+                (ROOT / name).read_text("utf-8"),
+            )
+
+    def test_public_files_do_not_expose_maintainer_storage_paths(self) -> None:
+        paths = (
+            ROOT / "skills" / "cuda-kernel-optimizer" / "references" / "compatibility.md",
+            ROOT / "tests" / "gpu" / "sm120" / "README.md",
+            ROOT / "tests" / "gpu" / "sm120" / "remote" / "run_lane.sh",
+        )
+        for path in paths:
+            self.assertNotIn("/data/tcheng", path.read_text("utf-8"), str(path))
+
+    def test_schema_identity_policy_keeps_only_versioned_legacy_ids(self) -> None:
+        old_prefix = "https://github.com/troycheng/cuda-optimized-skill/"
+        versioned_prefixes = (old_prefix + "schema/v", old_prefix + "schemas/v")
+        legacy_ids = []
+        for path in sorted((ROOT / "skills/cuda-kernel-optimizer/templates").glob("*.schema.json")):
+            schema_id = json.loads(path.read_text("utf-8")).get("$id", "")
+            if schema_id.startswith(old_prefix):
+                self.assertTrue(schema_id.startswith(versioned_prefixes), path.name)
+                legacy_ids.append(schema_id)
+        self.assertTrue(legacy_ids)
+        compatibility = (ROOT / "docs" / "compatibility.md").read_text("utf-8")
+        self.assertIn("Schema identities", compatibility)
+        self.assertIn("versioned pre-V1", compatibility)
 
     def test_public_tree_excludes_maintainer_history_and_dual_publisher(self) -> None:
         self.assertFalse((ROOT / "maintainers").exists())
@@ -72,8 +104,8 @@ class StandaloneProjectTests(unittest.TestCase):
 
     def test_validation_count_matches_the_release_gate(self) -> None:
         validation = (ROOT / "docs" / "validation.md").read_text("utf-8")
-        self.assertIn("1,111 tests", validation)
-        self.assertIn("1,102 passed", validation)
+        self.assertIn("1,122 tests", validation)
+        self.assertIn("1,113 passed", validation)
         self.assertIn("nine physical RTX 5090 opt-in tests were skipped", validation)
 
 

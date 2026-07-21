@@ -252,14 +252,50 @@ class Sm120AcceptanceHelperTests(unittest.TestCase):
     def test_runner_restricts_cutlass_to_the_dedicated_checkout(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
 
-        self.assertIn(
-            '/data/tcheng/cuda-skill-e2e/deps/cutlass', source
-        )
+        self.assertIn("CUDA_E2E_ROOT", source)
+        self.assertIn("CUTLASS_PATH", source)
+        self.assertNotIn("/data/tcheng", source)
         self.assertIn("include/cutlass/cutlass.h", source)
         self.assertIn("include/cutlass/version.h", source)
         self.assertIn('expected_cutlass_version="4.6.1"', source)
         self.assertIn("vllm-opt", source)
         self.assertIn('-v "$repo_root:$repo_root:ro"', source)
+
+    def test_runner_rejects_a_writable_artifact_mount_inside_the_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "artifacts" / "repo"
+            runner = repository / "tests" / "gpu" / "sm120" / "remote" / "run_lane.sh"
+            runner.parent.mkdir(parents=True)
+            shutil.copy2(RUNNER, runner)
+            cutlass = root / "cutlass"
+            include = cutlass / "include" / "cutlass"
+            include.mkdir(parents=True)
+            (include / "cutlass.h").write_text("// fixture\n", encoding="utf-8")
+            (include / "version.h").write_text(
+                "#define CUTLASS_MAJOR 4\n"
+                "#define CUTLASS_MINOR 6\n"
+                "#define CUTLASS_PATCH 1\n",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "CUDA_E2E_ROOT": str(root),
+                    "CUDA_E2E_ARTIFACTS": str(repository / "writable"),
+                    "CUTLASS_PATH": str(cutlass),
+                }
+            )
+
+            completed = subprocess.run(
+                [str(runner), "compat"],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertIn("must not overlap", completed.stderr)
 
     def test_v2_4_lane_uses_the_production_workload_controller(self) -> None:
         source = inspect.getsource(
