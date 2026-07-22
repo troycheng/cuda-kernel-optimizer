@@ -2367,6 +2367,568 @@ def _append_active_diagnosis_event(
     return event
 
 
+def _prepare_active_diagnosis_event(
+    run_root: Path,
+    event_type: str,
+    payload: Mapping[str, Any],
+    *,
+    created_at_epoch: float,
+) -> tuple[str, dict]:
+    event_type = _identifier(event_type, "active diagnosis event_type")
+    payload_sha = _canonical_digest(_json_copy(payload, "active diagnosis payload"))
+    events = _verify_active_diagnosis_ledger(run_root)
+    if events and events[-1]["event_type"] == event_type and events[-1][
+        "payload_sha256"
+    ] == payload_sha:
+        event = copy.deepcopy(events[-1])
+    else:
+        event = {
+            "schema_version": "cuda-optimizer/active-diagnosis-event-v1",
+            "sequence": len(events) + 1,
+            "event_type": event_type,
+            "previous_event_sha256": (
+                None if not events else _canonical_digest(events[-1])
+            ),
+            "payload_sha256": payload_sha,
+            "created_at_epoch": float(created_at_epoch),
+        }
+    relative = (
+        Path("active_diagnosis")
+        / "ledger"
+        / f"{event['sequence']:06d}-{event_type}.json"
+    )
+    return relative.as_posix(), event
+
+
+def _active_transition_path(run_root: Path, relative: str) -> Path:
+    if type(relative) is not str:
+        raise ValidationError("active transition path is invalid")
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts or not candidate.parts:
+        raise ValidationError("active transition path escapes the run directory")
+    resolved = (run_root / candidate).resolve(strict=False)
+    try:
+        resolved.relative_to(run_root)
+    except ValueError as error:
+        raise ValidationError("active transition path escapes the run directory") from error
+    return resolved
+
+
+def _validate_active_diagnosis_transition_contract(
+    run_root: Path,
+    draft: Mapping[str, Any],
+) -> None:
+    kind = draft["kind"]
+    expected_event_types = {
+        "candidate-proposal": "candidate-proposal",
+        "candidate-failure": "candidate",
+        "candidate-proposal-stale": "candidate-proposal-archive",
+    }
+    if kind not in expected_event_types:
+        raise ValidationError("active diagnosis transition kind is unsupported")
+    base_digest = draft["base_state_sha256"]
+    base_state = load_json_object(
+        run_root / "state_generations" / f"{base_digest}.json"
+    )
+    if _canonical_digest(base_state) != base_digest:
+        raise ValidationError("active diagnosis transition base state drifted")
+    target_state = _object(draft["target_state"], "active diagnosis target state")
+    ledger_event = _object(
+        draft["ledger_event"], "active diagnosis transition ledger event"
+    )
+    ledger_fields = {
+        "schema_version",
+        "sequence",
+        "event_type",
+        "previous_event_sha256",
+        "payload_sha256",
+        "created_at_epoch",
+    }
+    _closed(ledger_event, ledger_fields, "active diagnosis transition ledger event")
+    _required(ledger_event, ledger_fields, "active diagnosis transition ledger event")
+    if (
+        ledger_event["schema_version"]
+        != "cuda-optimizer/active-diagnosis-event-v1"
+        or ledger_event["event_type"] != expected_event_types[kind]
+    ):
+        raise ValidationError("active diagnosis transition ledger event type drifted")
+    expected_sequence = int(base_state["active_diagnosis_ledger_sequence"]) + 1
+    if (
+        ledger_event["sequence"] != expected_sequence
+        or ledger_event["previous_event_sha256"]
+        != base_state["active_diagnosis_ledger_head_sha256"]
+    ):
+        raise ValidationError("active diagnosis transition ledger ancestry drifted")
+    _sha256(
+        ledger_event["payload_sha256"],
+        "active diagnosis transition ledger payload",
+    )
+    created_at = ledger_event["created_at_epoch"]
+    if type(created_at) not in {int, float} or not math.isfinite(float(created_at)):
+        raise ValidationError("active diagnosis transition ledger time is invalid")
+    expected_ledger_path = (
+        Path("active_diagnosis")
+        / "ledger"
+        / f"{expected_sequence:06d}-{expected_event_types[kind]}.json"
+    ).as_posix()
+    if draft["ledger_path"] != expected_ledger_path:
+        raise ValidationError("active diagnosis transition ledger path drifted")
+    if (
+        target_state.get("active_diagnosis_ledger_sequence") != expected_sequence
+        or target_state.get("active_diagnosis_ledger_head_sha256")
+        != _canonical_digest(ledger_event)
+    ):
+        raise ValidationError("active diagnosis transition target ledger binding drifted")
+
+    writes = draft["writes"]
+    if type(writes) is not list:
+        raise ValidationError("active diagnosis transition writes are invalid")
+    write_values = {}
+    for index, raw_write in enumerate(writes):
+        write = _object(raw_write, f"active diagnosis transition writes[{index}]")
+        _closed(
+            write,
+            {"path", "value"},
+            f"active diagnosis transition writes[{index}]",
+        )
+        _required(
+            write,
+            {"path", "value"},
+            f"active diagnosis transition writes[{index}]",
+        )
+        path = write["path"]
+        _active_transition_path(run_root, path)
+        if Path(path).as_posix() != path or path in write_values:
+            raise ValidationError("active diagnosis transition repeats an output path")
+        write_values[path] = _object(
+            write["value"], f"active diagnosis transition writes[{index}].value"
+        )
+    removals = draft["removals"]
+    if type(removals) is not list or len(removals) != len(set(removals)):
+        raise ValidationError("active diagnosis transition removals are invalid")
+    for relative in removals:
+        _active_transition_path(run_root, relative)
+        if Path(relative).as_posix() != relative:
+            raise ValidationError("active diagnosis transition removal path is invalid")
+
+    common_state_changes = {
+        "updated_at_epoch",
+        "active_diagnosis_ledger_sequence",
+        "active_diagnosis_ledger_head_sha256",
+    }
+    if kind in {"candidate-proposal", "candidate-proposal-stale"}:
+        allowed_state_changes = common_state_changes | {
+            "status",
+            "stage",
+            "next_action",
+            "terminal_reason",
+            "diagnosis_context_sha256",
+            "diagnostic_decision_sha256",
+            "investment_brief_sha256",
+            "investment_summary",
+        }
+    else:
+        allowed_state_changes = common_state_changes | {
+            "status",
+            "stage",
+            "next_action",
+            "decision_digest",
+            "diagnosis_context_sha256",
+            "active_diagnosis_round",
+            "completed_stages",
+            "before_identity_digest",
+            "change_set_digest",
+            "change_scope",
+            "candidate_hypothesis_id",
+            "candidate_identity_digest",
+            "candidate_digest",
+            "candidate_started_at_epoch",
+            "candidate_proposal_id",
+            "candidate_proposal_digest",
+        }
+    missing = object()
+    changed_state_keys = {
+        key
+        for key in set(base_state) | set(target_state)
+        if base_state.get(key, missing) != target_state.get(key, missing)
+    }
+    unexpected_changes = sorted(changed_state_keys - allowed_state_changes)
+    if unexpected_changes:
+        raise ValidationError(
+            "active diagnosis transition kind does not permit state changes: "
+            + ", ".join(unexpected_changes)
+        )
+    updated_at = target_state.get("updated_at_epoch")
+    if type(updated_at) not in {int, float} or not math.isfinite(float(updated_at)):
+        raise ValidationError("active diagnosis transition target time is invalid")
+
+    context = write_values.get("diagnosis_context.json")
+    if context is None or target_state.get("diagnosis_context_sha256") != _canonical_digest(
+        context
+    ):
+        raise ValidationError("active diagnosis transition target context drifted")
+    if kind == "candidate-proposal":
+        proposal_paths = [
+            path
+            for path in write_values
+            if path.startswith("active_diagnosis/candidate_proposals/")
+        ]
+        expected_paths = {
+            "diagnosis_context.json",
+            "active_diagnosis/decision.json",
+            "active_diagnosis/investment_brief.json",
+            *proposal_paths,
+        }
+        if len(proposal_paths) != 1 or set(write_values) != expected_paths:
+            raise ValidationError("candidate proposal transition writes are invalid")
+        proposal = _validate_candidate_proposal_record(
+            write_values[proposal_paths[0]], "candidate proposal transition proposal"
+        )
+        if proposal_paths[0] != (
+            f"active_diagnosis/candidate_proposals/{proposal['proposal_id']}.json"
+        ):
+            raise ValidationError("candidate proposal transition path drifted")
+        if proposal not in context.get("candidate_proposals", []):
+            raise ValidationError("candidate proposal transition context is incomplete")
+        decision = write_values["active_diagnosis/decision.json"]
+        brief = write_values["active_diagnosis/investment_brief.json"]
+        if (
+            decision.get("decision") != "PURSUE"
+            or decision.get("investment_brief") != brief
+            or target_state.get("next_action") != "register_change"
+            or target_state.get("stage") != "active_diagnosis"
+            or target_state.get("diagnostic_decision_sha256")
+            != _canonical_digest(decision)
+            or target_state.get("investment_brief_sha256")
+            != _canonical_digest(brief)
+            or removals
+            or draft["restore"] is not None
+        ):
+            raise ValidationError("candidate proposal transition target is invalid")
+    elif kind == "candidate-proposal-stale":
+        expected_paths = {
+            "diagnosis_context.json",
+            "active_diagnosis/decision.json",
+            "active_diagnosis/investment_brief.json",
+        }
+        if set(write_values) != expected_paths or len(removals) != 1:
+            raise ValidationError("stale candidate proposal transition writes are invalid")
+        decision = write_values["active_diagnosis/decision.json"]
+        brief = write_values["active_diagnosis/investment_brief.json"]
+        if (
+            decision.get("decision") != "REVIEW_REQUIRED"
+            or decision.get("terminal_reason") != "proposal_stale"
+            or decision.get("investment_brief") != brief
+            or target_state.get("next_action") != "review_required"
+            or target_state.get("terminal_reason") != "proposal_stale"
+            or target_state.get("diagnostic_decision_sha256")
+            != _canonical_digest(decision)
+            or target_state.get("investment_brief_sha256")
+            != _canonical_digest(brief)
+            or draft["restore"] is not None
+        ):
+            raise ValidationError("stale candidate proposal transition target is invalid")
+        removed_id = Path(removals[0]).stem
+        if removals[0] != f"active_diagnosis/candidate_proposals/{removed_id}.json":
+            raise ValidationError("stale candidate proposal removal path is invalid")
+        archived = context.get("candidate_proposal_archive", [])
+        if not any(
+            item.get("proposal", {}).get("proposal_id") == removed_id
+            and item.get("archive_reason") == "proposal_stale"
+            for item in archived
+            if isinstance(item, Mapping)
+        ):
+            raise ValidationError("stale candidate proposal archive is incomplete")
+    else:
+        expected_paths = {"decision.json", "diagnosis_context.json"}
+        decision = write_values.get("decision.json", {})
+        proposal_id = base_state.get("candidate_proposal_id")
+        scope = base_state.get("change_scope")
+        snapshot_name = "project" if scope == "project" else "environment"
+        expected_removals = {
+            f"snapshot/{snapshot_name}",
+            "rounds/round-1",
+            "registration_pending.json",
+            "change_set.json",
+            "candidate_binding.json",
+            "candidate.diff",
+            "static_review.json",
+            "evaluation.json",
+            "time_gate.json",
+            "review.json",
+            f"active_diagnosis/candidate_proposals/{proposal_id}.json",
+        }
+        restore = _object(draft["restore"], "candidate failure transition restore")
+        if (
+            set(write_values) != expected_paths
+            or set(removals) != expected_removals
+            or restore
+            != {
+                "scope": scope,
+                "expected_identity_digest": base_state.get("before_identity_digest"),
+            }
+            or decision.get("status") != "rejected"
+            or decision.get("rolled_back") is not True
+            or target_state.get("next_action") != "propose_hypotheses"
+            or target_state.get("stage") != "active_diagnosis"
+            or target_state.get("decision_digest") != _canonical_digest(decision)
+        ):
+            raise ValidationError("candidate failure transition target is invalid")
+        if any(
+            proposal.get("proposal_id") == proposal_id
+            for proposal in context.get("candidate_proposals", [])
+        ) or not any(
+            item.get("proposal", {}).get("proposal_id") == proposal_id
+            and item.get("archive_reason") == "candidate_failed"
+            for item in context.get("candidate_proposal_archive", [])
+            if isinstance(item, Mapping)
+        ):
+            raise ValidationError("candidate failure proposal archive is incomplete")
+
+
+def _active_diagnosis_transition_commit(intent: Mapping[str, Any]) -> dict:
+    return {
+        "schema_version": "cuda-optimizer/active-transition-commit-v1",
+        "base_state_sha256": intent["base_state_sha256"],
+        "intent_sha256": _canonical_digest(intent),
+    }
+
+
+def _prepared_active_diagnosis_transition_state(
+    base_state: Mapping[str, Any], intent: Mapping[str, Any]
+) -> dict:
+    prepared = copy.deepcopy(dict(base_state))
+    prepared.update(
+        {
+            "active_diagnosis_pending_transition_sha256": _canonical_digest(
+                intent
+            ),
+            "active_diagnosis_pending_base_state_sha256": intent[
+                "base_state_sha256"
+            ],
+        }
+    )
+    return prepared
+
+
+def _apply_active_diagnosis_transition(
+    run_root: Path,
+    control: Mapping[str, Any],
+    intent: Mapping[str, Any],
+) -> dict:
+    fields = {
+        "kind",
+        "base_state_sha256",
+        "writes",
+        "removals",
+        "restore",
+        "ledger_path",
+        "ledger_event",
+        "target_state",
+    }
+    draft = _object(intent, "active diagnosis transition")
+    _closed(draft, fields, "active diagnosis transition")
+    _required(draft, fields, "active diagnosis transition")
+    _identifier(draft["kind"], "active diagnosis transition kind")
+    base_digest = _sha256(
+        draft["base_state_sha256"], "active diagnosis transition base state"
+    )
+    target_state = _object(draft["target_state"], "active diagnosis target state")
+    target_digest = _canonical_digest(target_state)
+    base_state = load_json_object(
+        run_root / "state_generations" / f"{base_digest}.json"
+    )
+    if _canonical_digest(base_state) != base_digest:
+        raise ValidationError("active diagnosis transition base state drifted")
+    prepared_state = _prepared_active_diagnosis_transition_state(base_state, draft)
+    prepared_digest = _canonical_digest(prepared_state)
+    current_state = read_run_state(run_root)
+    current_digest = _canonical_digest(current_state)
+    if current_digest not in {prepared_digest, target_digest}:
+        raise ValidationError("active diagnosis transition state binding drifted")
+    _validate_active_diagnosis_transition_contract(run_root, draft)
+
+    restore = draft["restore"]
+    if restore is not None and current_digest != target_digest:
+        restore = _object(restore, "active diagnosis transition restore")
+        restore_fields = {"scope", "expected_identity_digest"}
+        _closed(restore, restore_fields, "active diagnosis transition restore")
+        _required(restore, restore_fields, "active diagnosis transition restore")
+        _restore_snapshot(
+            control,
+            run_root,
+            restore["scope"],
+            _sha256(
+                restore["expected_identity_digest"],
+                "active diagnosis transition restore identity",
+            ),
+        )
+
+    writes = draft["writes"]
+    if type(writes) is not list:
+        raise ValidationError("active diagnosis transition writes are invalid")
+    seen_paths = set()
+    for index, raw_write in enumerate(writes):
+        write = _object(raw_write, f"active diagnosis transition writes[{index}]")
+        _closed(write, {"path", "value"}, f"active diagnosis transition writes[{index}]")
+        _required(write, {"path", "value"}, f"active diagnosis transition writes[{index}]")
+        path = _active_transition_path(run_root, write["path"])
+        if path in seen_paths:
+            raise ValidationError("active diagnosis transition repeats an output path")
+        seen_paths.add(path)
+        value = _json_copy(write["value"], f"active diagnosis transition writes[{index}]")
+        existing = None
+        if path.is_file() and not path.is_symlink():
+            try:
+                existing = load_json_object(path)
+            except ValidationError:
+                existing = None
+        if existing != value:
+            _atomic_json(path, value)
+
+    ledger_path = _active_transition_path(run_root, draft["ledger_path"])
+    ledger_event = _object(draft["ledger_event"], "active diagnosis transition ledger event")
+    if ledger_path.exists():
+        if ledger_path.is_symlink() or load_json_object(ledger_path) != ledger_event:
+            raise ValidationError("active diagnosis transition ledger event drifted")
+    else:
+        _atomic_json(ledger_path, ledger_event)
+    events = _verify_active_diagnosis_ledger(run_root)
+    if events[ledger_event["sequence"] - 1] != ledger_event:
+        raise ValidationError("active diagnosis transition ledger event is not committed")
+
+    if current_digest != target_digest:
+        _write_state(run_root, target_state)
+
+    removals = draft["removals"]
+    if type(removals) is not list:
+        raise ValidationError("active diagnosis transition removals are invalid")
+    for relative in removals:
+        path = _active_transition_path(run_root, relative)
+        if path.exists() or path.is_symlink():
+            _remove_path(path)
+    pending_path = run_root / "active_diagnosis" / "pending_transition.json"
+    marker_path = (
+        run_root / "active_diagnosis" / "pending_transition_commit.json"
+    )
+    try:
+        pending_path.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        marker_path.unlink()
+    except FileNotFoundError:
+        pass
+    return read_run_state(run_root)
+
+
+def _commit_active_diagnosis_transition(
+    run_root: Path,
+    control: Mapping[str, Any],
+    intent: Mapping[str, Any],
+) -> dict:
+    pending_path = run_root / "active_diagnosis" / "pending_transition.json"
+    marker_path = (
+        run_root / "active_diagnosis" / "pending_transition_commit.json"
+    )
+    detached = _json_copy(intent, "active diagnosis transition")
+    _validate_active_diagnosis_transition_contract(run_root, detached)
+    base_state = read_run_state(run_root)
+    if _canonical_digest(base_state) != detached["base_state_sha256"]:
+        raise ValidationError("active diagnosis transition base state is not current")
+    if pending_path.exists():
+        if pending_path.is_symlink() or load_json_object(pending_path) != detached:
+            raise ValidationError("a different active diagnosis transition is pending")
+    marker = _active_diagnosis_transition_commit(detached)
+    if marker_path.exists():
+        if marker_path.is_symlink() or load_json_object(marker_path) != marker:
+            raise ValidationError("active diagnosis transition commit marker drifted")
+    prepared_state = _prepared_active_diagnosis_transition_state(
+        base_state, detached
+    )
+    _write_state(run_root, prepared_state)
+    if not pending_path.exists():
+        _atomic_json(pending_path, detached)
+    if not marker_path.exists():
+        _atomic_json(marker_path, marker)
+    return _apply_active_diagnosis_transition(run_root, control, detached)
+
+
+def _recover_active_diagnosis_transition(
+    run_root: Path, control: Mapping[str, Any]
+) -> dict | None:
+    pending_path = run_root / "active_diagnosis" / "pending_transition.json"
+    marker_path = (
+        run_root / "active_diagnosis" / "pending_transition_commit.json"
+    )
+    state = read_run_state(run_root)
+    pending_digest = state.get("active_diagnosis_pending_transition_sha256")
+    pending_base_digest = state.get(
+        "active_diagnosis_pending_base_state_sha256"
+    )
+    if pending_digest is not None or pending_base_digest is not None:
+        _sha256(pending_digest, "active diagnosis pending transition")
+        base_digest = _sha256(
+            pending_base_digest, "active diagnosis pending transition base"
+        )
+        if not pending_path.exists():
+            base_state = load_json_object(
+                run_root / "state_generations" / f"{base_digest}.json"
+            )
+            if _canonical_digest(base_state) != base_digest:
+                raise ValidationError(
+                    "active diagnosis pending base state is unavailable"
+                )
+            if marker_path.exists() or marker_path.is_symlink():
+                _remove_path(marker_path)
+            return _write_state(run_root, base_state)
+    elif not pending_path.exists() and not marker_path.exists():
+        return None
+    elif not pending_path.exists():
+        if marker_path.is_symlink() or not marker_path.is_file():
+            raise ValidationError(
+                "active diagnosis incomplete transition is not a regular file"
+            )
+        marker_path.unlink()
+        return state
+    if pending_path.is_symlink() or not pending_path.is_file():
+        raise ValidationError("active diagnosis pending transition is not a regular file")
+    intent = load_json_object(pending_path)
+    intent_digest = _canonical_digest(intent)
+    target_digest = _canonical_digest(
+        _object(intent.get("target_state"), "active diagnosis target state")
+    )
+    current_digest = _canonical_digest(state)
+    if pending_digest is not None:
+        if intent_digest != pending_digest or intent.get(
+            "base_state_sha256"
+        ) != pending_base_digest:
+            raise ValidationError("active diagnosis pending transition digest drifted")
+    elif current_digest != target_digest:
+        pending_path.unlink()
+        if marker_path.exists() or marker_path.is_symlink():
+            _remove_path(marker_path)
+        return state
+    if marker_path.exists():
+        if marker_path.is_symlink() or not marker_path.is_file():
+            raise ValidationError(
+                "active diagnosis transition marker is not a regular file"
+            )
+        marker = load_json_object(marker_path)
+    else:
+        marker = _active_diagnosis_transition_commit(intent)
+        _atomic_json(marker_path, marker)
+    fields = {"schema_version", "base_state_sha256", "intent_sha256"}
+    _closed(marker, fields, "active diagnosis transition commit marker")
+    _required(marker, fields, "active diagnosis transition commit marker")
+    if marker.get("schema_version") != "cuda-optimizer/active-transition-commit-v1":
+        raise ValidationError("active diagnosis transition commit schema is invalid")
+    expected = _active_diagnosis_transition_commit(intent)
+    if marker != expected:
+        raise ValidationError("active diagnosis transition commit digest drifted")
+    return _apply_active_diagnosis_transition(run_root, control, intent)
+
+
 def _build_active_diagnosis_context(
     control: Mapping[str, Any], run_root: Path, state: Mapping[str, Any]
 ) -> dict:
@@ -2526,6 +3088,7 @@ def _build_active_diagnosis_context(
         ],
         "evidence_results": [],
         "candidate_proposals": [],
+        "candidate_proposal_archive": [],
         "candidate_history": [],
         "closed_mechanism_keys": [],
         "closed_scope_records": [],
@@ -2533,6 +3096,156 @@ def _build_active_diagnosis_context(
     _atomic_json(run_root / "diagnosis_context.json", context)
     _append_active_diagnosis_event(run_root, "context", context)
     return context
+
+
+_CANDIDATE_PROPOSAL_FIELDS = {
+    "proposal_id",
+    "proposal_digest",
+    "hypothesis_id",
+    "workload_source_hash",
+    "workload_contract_sha256",
+    "project_identity_digest",
+    "project_surface_identity_sha256",
+    "environment_identity_digest",
+    "epoch_id",
+    "epoch_sha256",
+    "execution_map_sha256",
+    "identity_digest",
+    "mutation_scope",
+    "risk",
+    "mechanism_digest",
+    "candidate_digest",
+    "change_set_digest",
+    "estimated_cost",
+    "fresh_until_epoch",
+    "sealed_at_epoch",
+}
+
+
+def _validate_candidate_proposal_record(
+    raw_proposal: Mapping[str, Any], label: str
+) -> dict:
+    proposal = _object(raw_proposal, label)
+    _closed(proposal, _CANDIDATE_PROPOSAL_FIELDS, label)
+    _required(proposal, _CANDIDATE_PROPOSAL_FIELDS, label)
+    _identifier(proposal["proposal_id"], f"{label}.proposal_id")
+    _identifier(proposal["hypothesis_id"], f"{label}.hypothesis_id")
+    _identifier(proposal["epoch_id"], f"{label}.epoch_id")
+    for field in (
+        "proposal_digest",
+        "workload_source_hash",
+        "workload_contract_sha256",
+        "project_identity_digest",
+        "project_surface_identity_sha256",
+        "environment_identity_digest",
+        "epoch_sha256",
+        "execution_map_sha256",
+        "identity_digest",
+        "mechanism_digest",
+        "candidate_digest",
+        "change_set_digest",
+    ):
+        _sha256(proposal[field], f"{label}.{field}")
+    if proposal["mutation_scope"] not in {"project", "isolated_environment"}:
+        raise ValidationError("candidate proposal mutation_scope is invalid")
+    if proposal["risk"] not in {"none", "low", "medium", "high"}:
+        raise ValidationError("candidate proposal risk is invalid")
+    cost = _object(proposal["estimated_cost"], f"{label}.estimated_cost")
+    cost_fields = {"p50_seconds", "p90_seconds", "basis"}
+    _closed(cost, cost_fields, f"{label}.estimated_cost")
+    _required(cost, cost_fields, f"{label}.estimated_cost")
+    p50 = cost["p50_seconds"]
+    p90 = cost["p90_seconds"]
+    if (
+        type(p50) not in {int, float}
+        or type(p90) not in {int, float}
+        or not math.isfinite(float(p50))
+        or not math.isfinite(float(p90))
+        or float(p50) <= 0
+        or float(p90) <= 0
+        or float(p50) > float(p90)
+    ):
+        raise ValidationError("candidate proposal cost must have positive P50 <= P90")
+    if cost["basis"] not in {
+        "identity_matched_candidate_history",
+        "user_authorized_upper_bound",
+    }:
+        raise ValidationError("candidate proposal cost basis is unsupported")
+    for field in ("fresh_until_epoch", "sealed_at_epoch"):
+        value = proposal[field]
+        if type(value) not in {int, float} or not math.isfinite(float(value)):
+            raise ValidationError(f"candidate proposal {field} is invalid")
+    unsigned = copy.deepcopy(proposal)
+    digest = unsigned.pop("proposal_digest")
+    if _canonical_digest(unsigned) != digest:
+        raise ValidationError("candidate proposal digest does not match content")
+    return copy.deepcopy(proposal)
+
+
+def _candidate_proposal_is_current(
+    proposal: Mapping[str, Any],
+    context: Mapping[str, Any],
+    epoch: Mapping[str, Any],
+    state: Mapping[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    expected_bindings = {
+        "workload_source_hash": state.get("workload_source_hash"),
+        "workload_contract_sha256": epoch.get("identities", {}).get(
+            "workload_contract_sha256"
+        ),
+        "project_identity_digest": state.get("baseline_identity_digest"),
+        "project_surface_identity_sha256": context.get(
+            "project_surface_identity_sha256"
+        ),
+        "environment_identity_digest": state.get(
+            "baseline_environment_identity_digest"
+        ),
+        "epoch_id": context.get("epoch_id"),
+        "epoch_sha256": context.get("epoch_sha256"),
+        "execution_map_sha256": context.get("execution_map_sha256"),
+        "identity_digest": _canonical_digest(epoch.get("identities", {})),
+    }
+    if any(proposal.get(field) != expected for field, expected in expected_bindings.items()):
+        return False
+    current_time = time.time() if now is None else now
+    return float(proposal.get("fresh_until_epoch", 0)) >= float(current_time)
+
+
+def _archive_candidate_proposals(
+    context: Mapping[str, Any],
+    *,
+    archive_reason: str,
+    should_archive,
+    archived_at_epoch: float | None = None,
+) -> dict:
+    reason = _identifier(archive_reason, "candidate proposal archive_reason")
+    refreshed = copy.deepcopy(dict(context))
+    proposals = refreshed.get("candidate_proposals", [])
+    archive = refreshed.setdefault("candidate_proposal_archive", [])
+    archived_digests = {
+        item.get("proposal", {}).get("proposal_digest")
+        for item in archive
+        if isinstance(item, Mapping)
+    }
+    retained = []
+    archived_at = time.time() if archived_at_epoch is None else archived_at_epoch
+    for proposal in proposals:
+        if not should_archive(proposal):
+            retained.append(proposal)
+            continue
+        if proposal.get("proposal_digest") not in archived_digests:
+            archive.append(
+                {
+                    "proposal": copy.deepcopy(proposal),
+                    "archive_reason": reason,
+                    "archived_at_epoch": float(archived_at),
+                }
+            )
+            archived_digests.add(proposal.get("proposal_digest"))
+    refreshed["candidate_proposals"] = retained
+    return refreshed
 
 
 def _load_active_diagnosis_context(
@@ -2616,107 +3329,37 @@ def _load_active_diagnosis_context(
     if type(candidate_proposals) is not list:
         raise ValidationError("diagnosis context candidate_proposals is invalid")
     seen_proposal_ids = set()
-    proposal_fields = {
-        "proposal_id",
-        "proposal_digest",
-        "hypothesis_id",
-        "workload_source_hash",
-        "workload_contract_sha256",
-        "project_identity_digest",
-        "project_surface_identity_sha256",
-        "environment_identity_digest",
-        "epoch_id",
-        "epoch_sha256",
-        "execution_map_sha256",
-        "identity_digest",
-        "mutation_scope",
-        "risk",
-        "mechanism_digest",
-        "candidate_digest",
-        "change_set_digest",
-        "estimated_cost",
-        "fresh_until_epoch",
-        "sealed_at_epoch",
-    }
     for index, raw_proposal in enumerate(candidate_proposals):
-        proposal = _object(raw_proposal, f"candidate_proposals[{index}]")
-        _closed(proposal, proposal_fields, f"candidate_proposals[{index}]")
-        _required(proposal, proposal_fields, f"candidate_proposals[{index}]")
-        proposal_id = _identifier(
-            proposal["proposal_id"], f"candidate_proposals[{index}].proposal_id"
+        proposal = _validate_candidate_proposal_record(
+            raw_proposal, f"candidate_proposals[{index}]"
         )
+        proposal_id = proposal["proposal_id"]
         if proposal_id in seen_proposal_ids:
             raise ValidationError("candidate proposal ids must be unique")
         seen_proposal_ids.add(proposal_id)
-        for field in (
-            "proposal_digest",
-            "workload_source_hash",
-            "workload_contract_sha256",
-            "project_identity_digest",
-            "project_surface_identity_sha256",
-            "environment_identity_digest",
-            "epoch_sha256",
-            "execution_map_sha256",
-            "identity_digest",
-            "mechanism_digest",
-            "candidate_digest",
-            "change_set_digest",
-        ):
-            _sha256(proposal[field], f"candidate_proposals[{index}].{field}")
-        _identifier(
-            proposal["hypothesis_id"],
-            f"candidate_proposals[{index}].hypothesis_id",
+    proposal_archive = context.get("candidate_proposal_archive", [])
+    if type(proposal_archive) is not list:
+        raise ValidationError("diagnosis context candidate_proposal_archive is invalid")
+    seen_archived_digests = set()
+    for index, raw_entry in enumerate(proposal_archive):
+        label = f"candidate_proposal_archive[{index}]"
+        entry = _object(raw_entry, label)
+        fields = {"proposal", "archive_reason", "archived_at_epoch"}
+        _closed(entry, fields, label)
+        _required(entry, fields, label)
+        proposal = _validate_candidate_proposal_record(
+            entry["proposal"], f"{label}.proposal"
         )
-        if proposal["epoch_id"] != context["epoch_id"]:
-            raise ValidationError("candidate proposal analysis epoch drifted")
-        expected_bindings = {
-            "workload_source_hash": state["workload_source_hash"],
-            "workload_contract_sha256": epoch["identities"]["workload_contract_sha256"],
-            "project_identity_digest": state["baseline_identity_digest"],
-            "project_surface_identity_sha256": context["project_surface_identity_sha256"],
-            "environment_identity_digest": state["baseline_environment_identity_digest"],
-            "epoch_sha256": context["epoch_sha256"],
-            "execution_map_sha256": context["execution_map_sha256"],
-            "identity_digest": _canonical_digest(epoch["identities"]),
-        }
-        if any(proposal[field] != expected for field, expected in expected_bindings.items()):
-            raise ValidationError("candidate proposal identity binding drifted")
-        if proposal["mutation_scope"] not in {"project", "isolated_environment"}:
-            raise ValidationError("candidate proposal mutation_scope is invalid")
-        if proposal["risk"] not in {"none", "low", "medium", "high"}:
-            raise ValidationError("candidate proposal risk is invalid")
-        cost = _object(
-            proposal["estimated_cost"],
-            f"candidate_proposals[{index}].estimated_cost",
-        )
-        cost_fields = {"p50_seconds", "p90_seconds", "basis"}
-        _closed(cost, cost_fields, f"candidate_proposals[{index}].estimated_cost")
-        _required(cost, cost_fields, f"candidate_proposals[{index}].estimated_cost")
-        p50 = cost["p50_seconds"]
-        p90 = cost["p90_seconds"]
-        if (
-            type(p50) not in {int, float}
-            or type(p90) not in {int, float}
-            or not math.isfinite(float(p50))
-            or not math.isfinite(float(p90))
-            or float(p50) <= 0
-            or float(p90) <= 0
-            or float(p50) > float(p90)
+        _identifier(entry["archive_reason"], f"{label}.archive_reason")
+        archived_at = entry["archived_at_epoch"]
+        if type(archived_at) not in {int, float} or not math.isfinite(
+            float(archived_at)
         ):
-            raise ValidationError("candidate proposal cost must have positive P50 <= P90")
-        if cost["basis"] not in {
-            "identity_matched_candidate_history",
-            "user_authorized_upper_bound",
-        }:
-            raise ValidationError("candidate proposal cost basis is unsupported")
-        for field in ("fresh_until_epoch", "sealed_at_epoch"):
-            value = proposal[field]
-            if type(value) not in {int, float} or not math.isfinite(float(value)):
-                raise ValidationError(f"candidate proposal {field} is invalid")
-        unsigned = copy.deepcopy(proposal)
-        digest = unsigned.pop("proposal_digest")
-        if _canonical_digest(unsigned) != digest:
-            raise ValidationError("candidate proposal digest does not match content")
+            raise ValidationError("candidate proposal archive time is invalid")
+        digest = proposal["proposal_digest"]
+        if digest in seen_archived_digests:
+            raise ValidationError("candidate proposal archive contains duplicates")
+        seen_archived_digests.add(digest)
     closed_mechanism_keys = context.get("closed_mechanism_keys", [])
     if type(closed_mechanism_keys) is not list:
         raise ValidationError("diagnosis context closed_mechanism_keys is invalid")
@@ -3555,7 +4198,10 @@ def seal_active_diagnosis_candidate_proposal(
         prior_decision = _load_bound_diagnostic_artifacts(
             run_root, state, expected_decision="REVIEW_REQUIRED"
         )
-        if prior_decision.get("terminal_reason") != "cost_unavailable":
+        if prior_decision.get("terminal_reason") not in {
+            "cost_unavailable",
+            "proposal_stale",
+        }:
             raise ValidationError("diagnostic review is not waiting for candidate cost")
         next_action = prior_decision.get("next_action")
         if not isinstance(next_action, Mapping):
@@ -3715,12 +4361,9 @@ def seal_active_diagnosis_candidate_proposal(
         if selected.get("proposal_id") != proposal_id:
             raise ValidationError("sealed candidate proposal was not selected")
         investment_brief = copy.deepcopy(decision["investment_brief"])
-        _atomic_json(run_root / "diagnosis_context.json", refreshed)
-        _atomic_json(proposal_path, sealed)
-        _atomic_json(active_root / "decision.json", decision)
-        _atomic_json(active_root / "investment_brief.json", investment_brief)
         context_digest = _canonical_digest(refreshed)
-        _append_active_diagnosis_event(
+        transition_at = time.time()
+        ledger_path, ledger_event = _prepare_active_diagnosis_event(
             run_root,
             "candidate-proposal",
             {
@@ -3730,13 +4373,14 @@ def seal_active_diagnosis_candidate_proposal(
                 "decision_sha256": _canonical_digest(decision),
                 "investment_brief_sha256": _canonical_digest(investment_brief),
             },
+            created_at_epoch=transition_at,
         )
         updated = copy.deepcopy(state)
         updated.update(
             {
                 "stage": "active_diagnosis",
                 "next_action": "register_change",
-                "updated_at_epoch": time.time(),
+                "updated_at_epoch": transition_at,
                 "terminal_reason": decision["terminal_reason"],
                 "diagnosis_context_sha256": context_digest,
                 "diagnostic_decision_sha256": _canonical_digest(decision),
@@ -3755,9 +4399,41 @@ def seal_active_diagnosis_candidate_proposal(
             }
         )
         updated.update(
-            _active_ledger_binding(_verify_active_diagnosis_ledger(run_root))
+            {
+                "active_diagnosis_ledger_sequence": ledger_event["sequence"],
+                "active_diagnosis_ledger_head_sha256": _canonical_digest(
+                    ledger_event
+                ),
+            }
         )
-        return _write_state(run_root, updated)
+        intent = {
+            "kind": "candidate-proposal",
+            "base_state_sha256": _canonical_digest(state),
+            "writes": [
+                {
+                    "path": "diagnosis_context.json",
+                    "value": refreshed,
+                },
+                {
+                    "path": proposal_path.relative_to(run_root).as_posix(),
+                    "value": sealed,
+                },
+                {
+                    "path": "active_diagnosis/decision.json",
+                    "value": decision,
+                },
+                {
+                    "path": "active_diagnosis/investment_brief.json",
+                    "value": investment_brief,
+                },
+            ],
+            "removals": [],
+            "restore": None,
+            "ledger_path": ledger_path,
+            "ledger_event": ledger_event,
+            "target_state": updated,
+        }
+        return _commit_active_diagnosis_transition(run_root, normalized, intent)
 
 
 def _validate_hypothesis_evolution(
@@ -3993,9 +4669,12 @@ def _diagnostic_investment_inputs(
         for item in contract["actions"]
         if "cost_bound" in item
     }
+    epoch = load_json_object(run_root / "active_diagnosis" / "epoch.json")
     candidate_proposals = []
     for proposal in context.get("candidate_proposals", []):
-        if proposal.get("fresh_until_epoch", 0) < now:
+        if not _candidate_proposal_is_current(
+            proposal, context, epoch, state, now=now
+        ):
             continue
         candidate_proposals.append(
             {
@@ -4673,6 +5352,8 @@ def _refresh_active_diagnosis_context(
     minimum_effect_us: float,
 ) -> dict:
     refreshed = copy.deepcopy(dict(context))
+    refreshed["epoch_id"] = epoch["epoch_id"]
+    refreshed["epoch_sha256"] = _load_analysis_epoch_module().epoch_digest(epoch)
     refreshed["evidence_catalog_sha256"] = _canonical_digest(evidence_catalog)
     refreshed["selection_policy_sha256"] = _canonical_digest(selection_policy)
     refreshed["request_history_sha256"] = _canonical_digest(
@@ -4693,6 +5374,16 @@ def _refresh_active_diagnosis_context(
         _load_execution_map_module().execution_map_digest(
             execution_map, epoch=epoch, evidence_catalog=evidence_catalog
         )
+    )
+    refreshed = _archive_candidate_proposals(
+        refreshed,
+        archive_reason="analysis_identity_changed",
+        should_archive=lambda proposal: (
+            proposal.get("epoch_id") != refreshed.get("epoch_id")
+            or proposal.get("epoch_sha256") != refreshed.get("epoch_sha256")
+            or proposal.get("execution_map_sha256")
+            != refreshed.get("execution_map_sha256")
+        ),
     )
     evidence_results = refreshed.get("evidence_results", [])
     if type(evidence_results) is not list:
@@ -5039,7 +5730,213 @@ def _collect_active_diagnosis_evidence_unlocked(
     return _write_state(run_root, updated)
 
 
+def _transition_stale_candidate_proposal(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    context: Mapping[str, Any],
+    *,
+    proposal_id: str,
+    proposal_digest: str,
+) -> dict:
+    transition_at = time.time()
+    refreshed = _archive_candidate_proposals(
+        context,
+        archive_reason="proposal_stale",
+        should_archive=lambda proposal: (
+            proposal.get("proposal_id") == proposal_id
+            and proposal.get("proposal_digest") == proposal_digest
+        ),
+        archived_at_epoch=transition_at,
+    )
+    hypothesis_id = _identifier(
+        decision.get("next_action", {}).get("hypothesis_id"),
+        "stale candidate hypothesis_id",
+    )
+    next_action = {
+        "action_id": f"implement-{hypothesis_id}",
+        "kind": "candidate",
+        "hypothesis_id": hypothesis_id,
+        "reason": "proposal_stale",
+    }
+    stale = copy.deepcopy(dict(decision))
+    stale.update(
+        {
+            "decision": "REVIEW_REQUIRED",
+            "terminal_reason": "proposal_stale",
+            "next_action": next_action,
+            "cost": {
+                "class": stale.get("cost", {}).get("class"),
+                "p50_seconds": None,
+                "p90_seconds": None,
+                "basis": None,
+            },
+            "next_checkpoint": "after_authorization_decision",
+        }
+    )
+    prior_brief = _object(
+        decision.get("investment_brief"), "stale candidate investment brief"
+    )
+    blocked_action = copy.deepcopy(prior_brief.get("selected_action"))
+    if not isinstance(blocked_action, Mapping):
+        blocked_action = copy.deepcopy(prior_brief.get("blocked_action"))
+    if not isinstance(blocked_action, Mapping):
+        blocked_action = {"action_id": next_action["action_id"]}
+    blocked_action = dict(blocked_action)
+    blocked_action.update(
+        {
+            "action_id": next_action["action_id"],
+            "kind": "candidate",
+            "p90_seconds": None,
+            "implementation_status": "available",
+            "reason": "proposal_stale",
+        }
+    )
+    brief = copy.deepcopy(prior_brief)
+    brief.update(
+        {
+            "decision": "REVIEW_REQUIRED",
+            "terminal_reason": "proposal_stale",
+            "next_action": copy.deepcopy(next_action),
+            "cost": copy.deepcopy(stale["cost"]),
+            "next_checkpoint": "after_authorization_decision",
+            "selected_action": None,
+            "blocked_action": blocked_action,
+            "next_feedback_point": "after_authorization_decision",
+        }
+    )
+    stale["investment_brief"] = brief
+    context_digest = _canonical_digest(refreshed)
+    decision_digest = _canonical_digest(stale)
+    brief_digest = _canonical_digest(brief)
+    ledger_path, ledger_event = _prepare_active_diagnosis_event(
+        run_root,
+        "candidate-proposal-archive",
+        {
+            "proposal_id": proposal_id,
+            "proposal_sha256": proposal_digest,
+            "archive_reason": "proposal_stale",
+            "context_sha256": context_digest,
+            "decision_sha256": decision_digest,
+        },
+        created_at_epoch=transition_at,
+    )
+    updated = copy.deepcopy(state)
+    updated.update(
+        {
+            "status": "active",
+            "stage": "active_diagnosis",
+            "next_action": "review_required",
+            "updated_at_epoch": transition_at,
+            "terminal_reason": "proposal_stale",
+            "diagnosis_context_sha256": context_digest,
+            "diagnostic_decision_sha256": decision_digest,
+            "investment_brief_sha256": brief_digest,
+            "investment_summary": {
+                "decision": "REVIEW_REQUIRED",
+                "cumulative_investment": copy.deepcopy(
+                    brief["cumulative_investment"]
+                ),
+                "selected_action_id": None,
+                "blocked_action_id": next_action["action_id"],
+                "next_feedback_point": "after_authorization_decision",
+            },
+            "active_diagnosis_ledger_sequence": ledger_event["sequence"],
+            "active_diagnosis_ledger_head_sha256": _canonical_digest(ledger_event),
+        }
+    )
+    intent = {
+        "kind": "candidate-proposal-stale",
+        "base_state_sha256": _canonical_digest(state),
+        "writes": [
+            {"path": "diagnosis_context.json", "value": refreshed},
+            {"path": "active_diagnosis/decision.json", "value": stale},
+            {"path": "active_diagnosis/investment_brief.json", "value": brief},
+        ],
+        "removals": [
+            f"active_diagnosis/candidate_proposals/{proposal_id}.json"
+        ],
+        "restore": None,
+        "ledger_path": ledger_path,
+        "ledger_event": ledger_event,
+        "target_state": updated,
+    }
+    return _commit_active_diagnosis_transition(run_root, control, intent)
+
+
+def _recover_stale_candidate_proposal_if_needed(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    *,
+    proposal_id: str,
+    proposal_digest: str,
+) -> tuple[dict | None, dict, dict, Mapping[str, Any] | None]:
+    context, epoch, _map, _evidence, _actions, _policy = (
+        _load_active_diagnosis_context(control, run_root, state)
+    )
+    candidate_proposal = next(
+        (
+            item
+            for item in context.get("candidate_proposals", [])
+            if item.get("proposal_id") == proposal_id
+        ),
+        None,
+    )
+    if not isinstance(candidate_proposal, Mapping):
+        archived = any(
+            isinstance(item, Mapping)
+            and item.get("proposal", {}).get("proposal_id") == proposal_id
+            and item.get("proposal", {}).get("proposal_digest") == proposal_digest
+            for item in context.get("candidate_proposal_archive", [])
+        )
+        if not archived:
+            raise ValidationError("authorized candidate proposal is missing")
+        recovered = _transition_stale_candidate_proposal(
+            run_root,
+            state,
+            control,
+            decision,
+            context,
+            proposal_id=proposal_id,
+            proposal_digest=proposal_digest,
+        )
+        return recovered, context, epoch, None
+    if candidate_proposal.get("proposal_digest") != proposal_digest:
+        raise ValidationError("authorized candidate proposal digest drifted")
+    if not _candidate_proposal_is_current(
+        candidate_proposal,
+        context,
+        epoch,
+        state,
+        now=time.time(),
+    ):
+        recovered = _transition_stale_candidate_proposal(
+            run_root,
+            state,
+            control,
+            decision,
+            context,
+            proposal_id=proposal_id,
+            proposal_digest=proposal_digest,
+        )
+        return recovered, context, epoch, candidate_proposal
+    return None, context, epoch, candidate_proposal
+
+
 def register_change(
+    control: Mapping[str, Any],
+    run_dir: os.PathLike[str] | str,
+    change_set: Mapping[str, Any],
+) -> dict:
+    run_root = Path(run_dir).expanduser().resolve(strict=False)
+    with _run_lock(run_root):
+        return _register_change_unlocked(control, run_root, change_set)
+
+
+def _register_change_unlocked(
     control: Mapping[str, Any],
     run_dir: os.PathLike[str] | str,
     change_set: Mapping[str, Any],
@@ -5079,23 +5976,20 @@ def register_change(
             next_diagnostic_action.get("proposal_digest"),
             "diagnostic candidate proposal_digest",
         )
-        context, _epoch, _map, _evidence, _actions, _policy = (
-            _load_active_diagnosis_context(normalized, run_root, state)
+        recovered, _context, _epoch, candidate_proposal = (
+            _recover_stale_candidate_proposal_if_needed(
+                run_root,
+                state,
+                normalized,
+                diagnostic_decision,
+                proposal_id=proposal_id,
+                proposal_digest=proposal_digest,
+            )
         )
-        candidate_proposal = next(
-            (
-                item
-                for item in context.get("candidate_proposals", [])
-                if item.get("proposal_id") == proposal_id
-            ),
-            None,
-        )
+        if recovered is not None:
+            return recovered
         if not isinstance(candidate_proposal, Mapping):
             raise ValidationError("authorized candidate proposal is missing")
-        if candidate_proposal.get("proposal_digest") != proposal_digest:
-            raise ValidationError("authorized candidate proposal digest drifted")
-        if float(candidate_proposal["fresh_until_epoch"]) < time.time():
-            raise ValidationError("authorized candidate proposal is stale")
         bound_basis = diagnostic_decision.get("investment_brief", {}).get(
             "bound_basis", {}
         )
@@ -5293,10 +6187,10 @@ def _resume_active_diagnosis_after_candidate_rejection(
     scope: str,
     reason: str,
     time_gate: Mapping[str, Any] | None,
-) -> None:
-    context, _epoch, _map, _evidence, _actions, _policy = (
-        _load_active_diagnosis_context(control, run_root, state)
-    )
+) -> dict:
+    context = load_json_object(run_root / "diagnosis_context.json")
+    if _canonical_digest(context) != state.get("diagnosis_context_sha256"):
+        raise ValidationError("diagnosis context digest drifted before candidate failure")
     hypothesis_id = _identifier(
         state.get("candidate_hypothesis_id"), "candidate hypothesis_id"
     )
@@ -5321,34 +6215,48 @@ def _resume_active_diagnosis_after_candidate_rejection(
         "decision_digest": _canonical_digest(decision),
         "failure_reason": _identifier(reason, "candidate failure reason"),
     }
-    refreshed = copy.deepcopy(context)
+    transition_at = time.time()
+    proposal_id = _identifier(
+        state.get("candidate_proposal_id"), "candidate proposal_id"
+    )
+    proposal_digest = _sha256(
+        state.get("candidate_proposal_digest"), "candidate proposal_digest"
+    )
+    refreshed = _archive_candidate_proposals(
+        context,
+        archive_reason="candidate_failed",
+        should_archive=lambda proposal: (
+            proposal.get("proposal_id") == proposal_id
+            and proposal.get("proposal_digest") == proposal_digest
+        ),
+        archived_at_epoch=transition_at,
+    )
     refreshed.setdefault("candidate_history", []).append(record)
-    _atomic_json(run_root / "diagnosis_context.json", refreshed)
     context_digest = _canonical_digest(refreshed)
-    _append_active_diagnosis_event(
+    ledger_path, ledger_event = _prepare_active_diagnosis_event(
         run_root,
         "candidate",
         {
             "candidate_history_record": record,
             "context_sha256": context_digest,
         },
+        created_at_epoch=transition_at,
     )
 
     _base, _roots, snapshot_name = _scope_layout(control, scope)
-    for path in (
-        run_root / "snapshot" / snapshot_name,
-        run_root / "rounds" / "round-1",
-        run_root / "registration_pending.json",
-        run_root / "change_set.json",
-        run_root / "candidate_binding.json",
-        run_root / "candidate.diff",
-        run_root / "static_review.json",
-        run_root / "evaluation.json",
-        run_root / "time_gate.json",
-        run_root / "review.json",
-    ):
-        if path.exists() or path.is_symlink():
-            _remove_path(path)
+    removals = [
+        f"snapshot/{snapshot_name}",
+        "rounds/round-1",
+        "registration_pending.json",
+        "change_set.json",
+        "candidate_binding.json",
+        "candidate.diff",
+        "static_review.json",
+        "evaluation.json",
+        "time_gate.json",
+        "review.json",
+        f"active_diagnosis/candidate_proposals/{proposal_id}.json",
+    ]
 
     updated = copy.deepcopy(state)
     updated["completed_stages"] = [
@@ -5373,7 +6281,7 @@ def _resume_active_diagnosis_after_candidate_rejection(
             "status": "active",
             "stage": "active_diagnosis",
             "next_action": "propose_hypotheses",
-            "updated_at_epoch": time.time(),
+            "updated_at_epoch": transition_at,
             "decision_digest": _canonical_digest(decision),
             "diagnosis_context_sha256": context_digest,
             "active_diagnosis_round": int(
@@ -5382,8 +6290,30 @@ def _resume_active_diagnosis_after_candidate_rejection(
             + 1,
         }
     )
-    updated.update(_active_ledger_binding(_verify_active_diagnosis_ledger(run_root)))
-    _write_state(run_root, updated)
+    updated.update(
+        {
+            "active_diagnosis_ledger_sequence": ledger_event["sequence"],
+            "active_diagnosis_ledger_head_sha256": _canonical_digest(ledger_event),
+        }
+    )
+    intent = {
+        "kind": "candidate-failure",
+        "base_state_sha256": _canonical_digest(state),
+        "writes": [
+            {"path": "decision.json", "value": decision},
+            {"path": "diagnosis_context.json", "value": refreshed},
+        ],
+        "removals": removals,
+        "restore": {
+            "scope": scope,
+            "expected_identity_digest": state["before_identity_digest"],
+        },
+        "ledger_path": ledger_path,
+        "ledger_event": ledger_event,
+        "target_state": updated,
+    }
+    _commit_active_diagnosis_transition(run_root, control, intent)
+    return copy.deepcopy(dict(decision))
 
 
 def _finish_rejected(
@@ -5423,6 +6353,36 @@ def _finish_rejected(
                 and _identity(control, scope)["digest"]
                 == binding.get("after_identity_digest")
             )
+    active_candidate = (
+        "analysis_contract" in control and state.get("candidate_hypothesis_id")
+    )
+    if active_candidate and intrinsic_failure:
+        decision = {
+            "schema_version": "cuda-workload-optimizer/decision-v1",
+            "status": "rejected",
+            "reason": reason,
+            "primary_status": primary_status,
+            "rolled_back": True,
+        }
+        if time_gate is not None:
+            decision.update(
+                {
+                    "elapsed_seconds": time_gate["elapsed_seconds"],
+                    "stop_reason": time_gate["stop_reason"],
+                    "skipped_expensive_stages": time_gate[
+                        "skipped_expensive_stages"
+                    ],
+                }
+            )
+        return _resume_active_diagnosis_after_candidate_rejection(
+            run_root,
+            state,
+            control,
+            decision,
+            scope=scope,
+            reason=reason,
+            time_gate=time_gate,
+        )
     try:
         _restore_snapshot(
             control,
@@ -5454,9 +6414,6 @@ def _finish_rejected(
         )
         _write_state(run_root, updated)
         return decision
-    active_candidate = (
-        "analysis_contract" in control and state.get("candidate_hypothesis_id")
-    )
     if active_candidate and not intrinsic_failure:
         decision = {
             "schema_version": "cuda-workload-optimizer/decision-v1",
@@ -5679,6 +6636,39 @@ def _finish_review_required(
     return decision
 
 
+def _complete_legacy_review_migration(
+    run_root: Path,
+    state: Mapping[str, Any],
+    migrated: Mapping[str, Any],
+) -> dict:
+    old_digest = _sha256(
+        migrated.get("legacy_decision_sha256"),
+        "legacy review migration source decision",
+    )
+    migration_epoch = migrated.get("migration_epoch")
+    if type(migration_epoch) not in {int, float} or not math.isfinite(
+        float(migration_epoch)
+    ):
+        raise ValidationError("legacy review migration time is invalid")
+    migrated_digest = _canonical_digest(migrated)
+    if state.get("decision_digest") not in {old_digest, migrated_digest}:
+        raise ValidationError("legacy review migration state binding drifted")
+    if state.get("decision_digest") != migrated_digest:
+        updated = copy.deepcopy(state)
+        updated.update(
+            {
+                "status": "active",
+                "stage": "decision",
+                "next_action": "refresh_required",
+                "updated_at_epoch": float(migration_epoch),
+                "terminal_reason": "legacy_replay_identity_unavailable",
+                "decision_digest": migrated_digest,
+            }
+        )
+        _write_state(run_root, updated)
+    return copy.deepcopy(dict(migrated))
+
+
 def _replay_review_required(
     run_root: Path,
     state: Mapping[str, Any],
@@ -5687,10 +6677,32 @@ def _replay_review_required(
     """Return a paused decision only while every bound artifact remains intact."""
     decision = load_json_object(run_root / "decision.json")
     if (
+        decision.get("status") == "review_required"
+        and decision.get("reason") == "legacy_replay_identity_unavailable"
+        and decision.get("recovery_action") == "refresh_from_current_identity"
+        and "replay_identity" not in decision
+        and "legacy_decision_sha256" in decision
+        and "migration_epoch" in decision
+    ):
+        return _complete_legacy_review_migration(run_root, state, decision)
+    if (
         decision.get("status") != "review_required"
         or _canonical_digest(decision) != state.get("decision_digest")
     ):
         raise ValidationError("review-required decision does not match state")
+    if "replay_identity" not in decision:
+        migrated = copy.deepcopy(decision)
+        migrated.update(
+            {
+                "status": "review_required",
+                "reason": "legacy_replay_identity_unavailable",
+                "recovery_action": "refresh_from_current_identity",
+                "legacy_decision_sha256": _canonical_digest(decision),
+                "migration_epoch": time.time(),
+            }
+        )
+        _atomic_json(run_root / "decision.json", migrated)
+        return _complete_legacy_review_migration(run_root, state, migrated)
     candidate_diff = run_root / "candidate.diff"
     if (
         candidate_diff.is_symlink()
@@ -6331,12 +7343,46 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
 
 def resume_run(run_dir: os.PathLike[str] | str) -> dict:
     run_root = Path(run_dir).expanduser().resolve(strict=False)
+    with _run_lock(run_root):
+        return _resume_run_unlocked(run_root)
+
+
+def _resume_run_unlocked(run_root: Path) -> dict:
     state = read_run_state(run_root)
-    _load_frozen_control(run_root, state)
+    control = _load_frozen_control(run_root, state)
+    recovered = _recover_active_diagnosis_transition(run_root, control)
+    if recovered is not None:
+        state = recovered
     if state["next_action"] == "collect_evidence":
-        return collect_active_diagnosis_evidence(
-            _load_frozen_control(run_root), run_root
+        return _collect_active_diagnosis_evidence_unlocked(control, run_root)
+    if state.get("stage") == "decision" and state["next_action"] == "review_required":
+        _replay_review_required(run_root, state, control)
+        return read_run_state(run_root)
+    if state["next_action"] == "register_change" and "analysis_contract" in control:
+        decision = _load_bound_diagnostic_artifacts(
+            run_root, state, expected_decision="PURSUE"
         )
+        action = _object(
+            decision.get("next_action"), "diagnostic candidate next_action"
+        )
+        proposal_id = _identifier(
+            action.get("proposal_id"), "diagnostic candidate proposal_id"
+        )
+        proposal_digest = _sha256(
+            action.get("proposal_digest"), "diagnostic candidate proposal_digest"
+        )
+        recovered, _context, _epoch, _proposal = (
+            _recover_stale_candidate_proposal_if_needed(
+                run_root,
+                state,
+                control,
+                decision,
+                proposal_id=proposal_id,
+                proposal_digest=proposal_digest,
+            )
+        )
+        if recovered is not None:
+            return recovered
     if state["next_action"] in {
         "propose_hypotheses",
         "evidence_gap",
@@ -6348,7 +7394,7 @@ def resume_run(run_dir: os.PathLike[str] | str) -> dict:
         "manual_recovery",
     }:
         return state
-    return start_run(_load_frozen_control(run_root), run_root)
+    return _start_run_unlocked(control, run_root)
 
 
 def _cmd_workload_once(args: argparse.Namespace) -> None:
@@ -6413,6 +7459,14 @@ def _build_parser() -> argparse.ArgumentParser:
     diagnosis_proposal.add_argument("--run-dir", required=True)
     diagnosis_proposal.add_argument("--hypothesis-set", required=True)
     diagnosis_proposal.add_argument("--request-set", required=True)
+    diagnosis_proposal.add_argument("--knowledge-inputs")
+    candidate_proposal = subparsers.add_parser(
+        "seal-candidate-proposal",
+        help="seal a user-authorized active-diagnosis candidate proposal",
+    )
+    candidate_proposal.add_argument("--control", required=True)
+    candidate_proposal.add_argument("--run-dir", required=True)
+    candidate_proposal.add_argument("--proposal", required=True)
     collect_evidence = subparsers.add_parser(
         "collect-evidence",
         help="execute the selected frozen active-diagnosis evidence action",
@@ -6506,6 +7560,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                         args.run_dir,
                         load_json_object(args.hypothesis_set),
                         load_json_object(args.request_set),
+                        knowledge_inputs=(
+                            load_json_object(args.knowledge_inputs)
+                            if args.knowledge_inputs
+                            else None
+                        ),
+                    ),
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "seal-candidate-proposal":
+            print(
+                json.dumps(
+                    seal_active_diagnosis_candidate_proposal(
+                        load_json_object(args.control),
+                        args.run_dir,
+                        load_json_object(args.proposal),
                     ),
                     sort_keys=True,
                 )

@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import time
@@ -200,7 +201,11 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
         workload_fixtures._enable_v2_readiness(
             control,
             root,
-            capability_ids=("gpu-execute", "ncu.counter_access"),
+            capability_ids=(
+                "gpu-execute",
+                "ncu.counter_access",
+                "cuda.disassembler",
+            ),
         )
         workload_fixtures._enable_active_diagnosis(control, root)
         ncu_adapter = project / "collect_ncu_evidence.py"
@@ -223,6 +228,37 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 "adapter_path": str(ncu_adapter),
                 "adapter_sha256": hashlib.sha256(ncu_adapter.read_bytes()).hexdigest(),
                 "argv": [sys.executable, str(ncu_adapter)],
+                "timeout_seconds": 5,
+                "cost_bound": {
+                    "p50_seconds": 1.0,
+                    "p90_seconds": 2.0,
+                    "basis": "user_authorized_upper_bound",
+                },
+            }
+        )
+        sass_adapter = project / "collect_sass_evidence.py"
+        sass_adapter.write_text(
+            "import json, os\n"
+            "request = json.load(open(os.environ['CUDA_OPTIMIZER_EVIDENCE_REQUEST']))\n"
+            "payload = {\n"
+            " 'schema_version': 'cuda-optimizer/evidence-result-v1',\n"
+            " 'request_signature': request['request_signature'],\n"
+            " 'status': 'observed', 'outcome_id': 'sass-refreshed',\n"
+            " 'observations': {'execution_map_node_updates': [\n"
+            "   {'node_id': 'gpu-kernel', 'duration_us': 850.0,\n"
+            "    'first_start_us': 100.0, 'last_end_us': 950.0}\n"
+            " ]}, 'artifacts': []}\n"
+            "open(os.environ['CUDA_OPTIMIZER_EVIDENCE_OUTPUT'], 'w').write(json.dumps(payload))\n",
+            encoding="utf-8",
+        )
+        contract["actions"].append(
+            {
+                "action_id": "compiler-sass-inspection",
+                "adapter_path": str(sass_adapter),
+                "adapter_sha256": hashlib.sha256(
+                    sass_adapter.read_bytes()
+                ).hexdigest(),
+                "argv": [sys.executable, str(sass_adapter)],
                 "timeout_seconds": 5,
                 "cost_bound": {
                     "p50_seconds": 1.0,
@@ -897,6 +933,15 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             self.assertEqual(history[0]["hypothesis_id"], "h-framework-gap")
             self.assertEqual(history[0]["implementation_status"], "failed")
             self.assertEqual(len(history[0]["identity_digest"]), 64)
+            self.assertEqual(context["candidate_proposals"], [])
+            self.assertEqual(
+                context["candidate_proposal_archive"][0]["proposal"]["proposal_id"],
+                "proposal-framework-slow",
+            )
+            self.assertEqual(
+                context["candidate_proposal_archive"][0]["archive_reason"],
+                "candidate_failed",
+            )
             self.assertTrue(
                 all(
                     "hypothesis_id" not in item
@@ -918,6 +963,250 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             self.assertEqual(
                 second_decision["next_action"]["hypothesis_id"],
                 "h-kernel-bound",
+            )
+
+    def test_failed_candidate_then_map_refresh_archives_old_proposal_and_requests_fallback_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (
+                helper,
+                control,
+                run_dir,
+                project,
+                hypothesis,
+                request,
+            ) = self._controller_with_two_supported_directions(root)
+            helper.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            change = helper._change("slow")
+            change["diagnosis_ids"] = ["h-framework-gap"]
+            helper.controller.seal_active_diagnosis_candidate_proposal(
+                control,
+                run_dir,
+                {
+                    "proposal_id": "proposal-before-map-refresh",
+                    "hypothesis_id": "h-framework-gap",
+                    "mutation_scope": "project",
+                    "risk": "low",
+                    "candidate_digest": helper.controller._canonical_digest(
+                        change["candidate"]
+                    ),
+                    "change_set_digest": helper.controller._canonical_digest(change),
+                    "estimated_cost": {
+                        "p50_seconds": 10.0,
+                        "p90_seconds": 20.0,
+                        "basis": "user_authorized_upper_bound",
+                    },
+                    "fresh_until_epoch": time.time() + 600.0,
+                },
+            )
+            helper.controller.register_change(control, run_dir, change)
+            (project / "configs" / "value.json").write_text(
+                '{"workers": 8}\n', encoding="utf-8"
+            )
+            helper.controller.evaluate_change(run_dir)
+
+            active = run_dir / "active_diagnosis"
+
+            def bind(value: dict, requests: dict) -> None:
+                epoch = json.loads((active / "epoch.json").read_text("utf-8"))
+                execution_map = json.loads(
+                    (active / "execution_map.json").read_text("utf-8")
+                )
+                catalog = json.loads(
+                    (active / "evidence_catalog.json").read_text("utf-8")
+                )
+                value["execution_map_sha256"] = helper.controller._load_execution_map_module().execution_map_digest(
+                    execution_map, epoch=epoch, evidence_catalog=catalog
+                )
+                admitted = helper.controller._load_hypothesis_space_module().validate_hypothesis_set(
+                    value,
+                    epoch=epoch,
+                    execution_map=execution_map,
+                    evidence_catalog=catalog,
+                )
+                requests["epoch_sha256"] = helper.controller._load_execution_map_module().epoch_digest(
+                    epoch
+                )
+                requests["hypothesis_set_sha256"] = admitted[
+                    "hypothesis_set_sha256"
+                ]
+
+            refresh_hypothesis = {
+                "hypothesis_id": "h-map-refresh",
+                "kind": "mechanism",
+                "scope_node_ids": ["gpu-kernel"],
+                "statement": "Fresh compiler timing may change the execution map.",
+                "mechanism": "compiler_timing_refresh",
+                "claim_layer": "kernel",
+                "disposition": "active",
+                "confidence": "plausible",
+                "support_evidence_ids": ["ev-global-scan"],
+                "oppose_evidence_ids": [],
+                "missing_evidence_kinds": ["compiler_sass"],
+                "falsification_question": "Does fresh SASS timing leave the map unchanged?",
+            }
+            hypothesis["hypotheses"].append(refresh_hypothesis)
+            request["request_set_id"] = "requests-map-refresh"
+            request["requests"] = [
+                {
+                    "request_id": "req-map-refresh",
+                    "action_id": "compiler-sass-inspection",
+                    "question": "Does fresh compiler evidence change GPU timing?",
+                    "target_hypothesis_ids": ["h-map-refresh"],
+                    "exclusive_pairs": [],
+                    "outcomes": [
+                        {
+                            "outcome_id": "sass-refreshed",
+                            "supports": [],
+                            "opposes": ["h-map-refresh"],
+                        },
+                        {
+                            "outcome_id": "sass-unchanged",
+                            "supports": ["h-map-refresh"],
+                            "opposes": [],
+                        },
+                    ],
+                }
+            ]
+            bind(hypothesis, request)
+            selected = helper.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            self.assertEqual(selected["next_action"], "collect_evidence")
+            before_map = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )["execution_map_sha256"]
+
+            helper.controller.collect_active_diagnosis_evidence(control, run_dir)
+
+            refreshed_context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            self.assertNotEqual(
+                refreshed_context["execution_map_sha256"], before_map
+            )
+            refresh_evidence = next(
+                evidence_id
+                for evidence_id, item in json.loads(
+                    (active / "evidence_catalog.json").read_text("utf-8")
+                ).items()
+                if item["kind"] == "compiler_sass"
+            )
+            refresh_hypothesis.update(
+                {
+                    "disposition": "rejected",
+                    "confidence": "inconclusive",
+                    "support_evidence_ids": [],
+                    "oppose_evidence_ids": [refresh_evidence],
+                    "missing_evidence_kinds": [],
+                }
+            )
+            request["request_set_id"] = "requests-after-map-refresh"
+            bind(hypothesis, request)
+
+            next_state = helper.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            next_decision = json.loads((active / "decision.json").read_text("utf-8"))
+            final_context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            self.assertEqual(next_state["next_action"], "review_required")
+            self.assertEqual(next_decision["terminal_reason"], "cost_unavailable")
+            self.assertEqual(
+                next_decision["primary_diagnosis"]["hypothesis_id"],
+                "h-kernel-bound",
+            )
+            self.assertEqual(final_context["candidate_proposals"], [])
+            archived = final_context["candidate_proposal_archive"]
+            self.assertEqual(
+                archived[0]["proposal"]["proposal_id"],
+                "proposal-before-map-refresh",
+            )
+
+    def test_execution_map_refresh_archives_a_still_active_candidate_proposal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (
+                helper,
+                control,
+                run_dir,
+                _project,
+                hypothesis,
+                request,
+            ) = self._controller_with_two_supported_directions(root)
+            helper.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            change = helper._change("fast")
+            change["diagnosis_ids"] = ["h-framework-gap"]
+            helper.controller.seal_active_diagnosis_candidate_proposal(
+                control,
+                run_dir,
+                {
+                    "proposal_id": "proposal-before-direct-map-refresh",
+                    "hypothesis_id": "h-framework-gap",
+                    "mutation_scope": "project",
+                    "risk": "low",
+                    "candidate_digest": helper.controller._canonical_digest(
+                        change["candidate"]
+                    ),
+                    "change_set_digest": helper.controller._canonical_digest(change),
+                    "estimated_cost": {
+                        "p50_seconds": 10.0,
+                        "p90_seconds": 20.0,
+                        "basis": "user_authorized_upper_bound",
+                    },
+                    "fresh_until_epoch": time.time() + 600.0,
+                },
+            )
+            active = run_dir / "active_diagnosis"
+            context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            epoch = json.loads((active / "epoch.json").read_text("utf-8"))
+            execution_map = json.loads(
+                (active / "execution_map.json").read_text("utf-8")
+            )
+            catalog = json.loads(
+                (active / "evidence_catalog.json").read_text("utf-8")
+            )
+            policy = json.loads(
+                (active / "selection_policy.json").read_text("utf-8")
+            )
+            gpu_node = next(
+                item
+                for item in execution_map["nodes"]
+                if item["node_id"] == "gpu-kernel"
+            )
+            gpu_node["duration_us"] = float(gpu_node["duration_us"]) - 1.0
+
+            refreshed = helper.controller._refresh_active_diagnosis_context(
+                run_dir,
+                context,
+                epoch,
+                execution_map,
+                catalog,
+                policy,
+                {
+                    "action_id": "compiler-sass-inspection",
+                    "duration_seconds": 1.0,
+                },
+                1.0,
+            )
+
+            self.assertEqual(refreshed["candidate_proposals"], [])
+            self.assertEqual(
+                refreshed["candidate_proposal_archive"][0]["archive_reason"],
+                "analysis_identity_changed",
+            )
+            self.assertEqual(
+                refreshed["candidate_proposal_archive"][0]["proposal"][
+                    "proposal_id"
+                ],
+                "proposal-before-direct-map-refresh",
             )
 
     def test_change_set_cannot_claim_a_different_diagnostic_direction(self) -> None:
@@ -1055,6 +1344,126 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 registered["candidate_proposal_id"], "proposal-framework-0001"
             )
 
+    def test_cli_seals_supported_candidate_resumes_and_registers_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (
+                helper,
+                control,
+                run_dir,
+                _project,
+                hypothesis,
+                request,
+            ) = self._controller_with_two_supported_directions(root)
+            control_path = root / "control.json"
+            hypothesis_path = root / "hypothesis.json"
+            request_path = root / "request.json"
+            change_path = root / "change.json"
+            proposal_path = root / "proposal.json"
+            for path, value in (
+                (control_path, control),
+                (hypothesis_path, hypothesis),
+                (request_path, request),
+            ):
+                path.write_text(json.dumps(value), encoding="utf-8")
+
+            def cli(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPTS / "workload_controller.py"),
+                        *args,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            paused = cli(
+                "register-diagnosis",
+                "--control",
+                str(control_path),
+                "--run-dir",
+                str(run_dir),
+                "--hypothesis-set",
+                str(hypothesis_path),
+                "--request-set",
+                str(request_path),
+            )
+            self.assertEqual(paused.returncode, 0, paused.stderr)
+            self.assertEqual(json.loads(paused.stdout)["next_action"], "review_required")
+
+            change = helper._change("fast")
+            change["diagnosis_ids"] = ["h-framework-gap"]
+            proposal = {
+                "proposal_id": "proposal-cli-framework-0001",
+                "hypothesis_id": "h-framework-gap",
+                "mutation_scope": "project",
+                "risk": "low",
+                "candidate_digest": helper.controller._canonical_digest(
+                    change["candidate"]
+                ),
+                "change_set_digest": helper.controller._canonical_digest(change),
+                "estimated_cost": {
+                    "p50_seconds": 10.0,
+                    "p90_seconds": 20.0,
+                    "basis": "user_authorized_upper_bound",
+                },
+                "fresh_until_epoch": time.time() + 600.0,
+            }
+            change_path.write_text(json.dumps(change), encoding="utf-8")
+            proposal_path.write_text(json.dumps(proposal), encoding="utf-8")
+
+            rejected = copy.deepcopy(proposal)
+            rejected["api_token"] = "must-not-leak-cli-secret"
+            proposal_path.write_text(json.dumps(rejected), encoding="utf-8")
+            sensitive = cli(
+                "seal-candidate-proposal",
+                "--control",
+                str(control_path),
+                "--run-dir",
+                str(run_dir),
+                "--proposal",
+                str(proposal_path),
+            )
+            self.assertEqual(sensitive.returncode, 2)
+            self.assertNotIn("must-not-leak-cli-secret", sensitive.stderr)
+            self.assertNotIn("must-not-leak-cli-secret", sensitive.stdout)
+
+            proposal_path.write_text(json.dumps(proposal), encoding="utf-8")
+            sealed = cli(
+                "seal-candidate-proposal",
+                "--control",
+                str(control_path),
+                "--run-dir",
+                str(run_dir),
+                "--proposal",
+                str(proposal_path),
+            )
+            self.assertEqual(sealed.returncode, 0, sealed.stderr)
+            self.assertEqual(json.loads(sealed.stdout)["next_action"], "register_change")
+
+            resumed = cli("resume", "--run-dir", str(run_dir))
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(json.loads(resumed.stdout)["next_action"], "register_change")
+
+            registered = cli(
+                "register-change",
+                "--control",
+                str(control_path),
+                "--run-dir",
+                str(run_dir),
+                "--change-set",
+                str(change_path),
+            )
+            self.assertEqual(registered.returncode, 0, registered.stderr)
+            registered_state = json.loads(registered.stdout)
+            self.assertEqual(registered_state["next_action"], "edit_then_evaluate")
+            self.assertEqual(
+                registered_state["candidate_proposal_id"],
+                "proposal-cli-framework-0001",
+            )
+
     def test_active_change_set_requires_exact_ids_and_matching_sealed_digests(self) -> None:
         for mismatch in ("extra_diagnosis", "candidate_digest", "change_digest"):
             with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as tmp:
@@ -1108,6 +1517,479 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     (run_dir / "diagnosis_context.json").read_text("utf-8")
                 )
                 self.assertEqual(context["candidate_history"], [])
+
+    def test_expired_candidate_proposal_returns_to_review_and_can_be_resealed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (
+                helper,
+                control,
+                run_dir,
+                _project,
+                hypothesis,
+                request,
+            ) = self._controller_with_two_supported_directions(root)
+            helper.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            change = helper._change("fast")
+            change["diagnosis_ids"] = ["h-framework-gap"]
+
+            def proposal(proposal_id: str, fresh_until: float) -> dict:
+                return {
+                    "proposal_id": proposal_id,
+                    "hypothesis_id": "h-framework-gap",
+                    "mutation_scope": "project",
+                    "risk": "low",
+                    "candidate_digest": helper.controller._canonical_digest(
+                        change["candidate"]
+                    ),
+                    "change_set_digest": helper.controller._canonical_digest(change),
+                    "estimated_cost": {
+                        "p50_seconds": 10.0,
+                        "p90_seconds": 20.0,
+                        "basis": "user_authorized_upper_bound",
+                    },
+                    "fresh_until_epoch": fresh_until,
+                }
+
+            with mock.patch.object(helper.controller.time, "time", return_value=100.0):
+                helper.controller.seal_active_diagnosis_candidate_proposal(
+                    control, run_dir, proposal("proposal-expiring", 150.0)
+                )
+            with mock.patch.object(helper.controller.time, "time", return_value=200.0):
+                stale = helper.controller.register_change(control, run_dir, change)
+
+            self.assertEqual(stale["next_action"], "review_required")
+            self.assertEqual(stale["terminal_reason"], "proposal_stale")
+            stale_decision = json.loads(
+                (run_dir / "active_diagnosis" / "decision.json").read_text("utf-8")
+            )
+            self.assertEqual(stale_decision["decision"], "REVIEW_REQUIRED")
+            self.assertEqual(stale_decision["terminal_reason"], "proposal_stale")
+            context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            self.assertEqual(context["candidate_proposals"], [])
+            self.assertEqual(
+                context["candidate_proposal_archive"][0]["archive_reason"],
+                "proposal_stale",
+            )
+
+            with mock.patch.object(helper.controller.time, "time", return_value=250.0):
+                resealed = helper.controller.seal_active_diagnosis_candidate_proposal(
+                    control, run_dir, proposal("proposal-resealed", 500.0)
+                )
+                registered = helper.controller.register_change(
+                    control, run_dir, change
+                )
+
+            self.assertEqual(resealed["next_action"], "register_change")
+            self.assertEqual(registered["next_action"], "edit_then_evaluate")
+            self.assertEqual(registered["candidate_proposal_id"], "proposal-resealed")
+
+    def test_resume_detects_an_expired_candidate_proposal_without_a_change_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (
+                helper,
+                control,
+                run_dir,
+                _project,
+                hypothesis,
+                request,
+            ) = self._controller_with_two_supported_directions(root)
+            helper.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            change = helper._change("fast")
+            change["diagnosis_ids"] = ["h-framework-gap"]
+            with mock.patch.object(helper.controller.time, "time", return_value=100.0):
+                helper.controller.seal_active_diagnosis_candidate_proposal(
+                    control,
+                    run_dir,
+                    {
+                        "proposal_id": "proposal-expiring-on-resume",
+                        "hypothesis_id": "h-framework-gap",
+                        "mutation_scope": "project",
+                        "risk": "low",
+                        "candidate_digest": helper.controller._canonical_digest(
+                            change["candidate"]
+                        ),
+                        "change_set_digest": helper.controller._canonical_digest(
+                            change
+                        ),
+                        "estimated_cost": {
+                            "p50_seconds": 10.0,
+                            "p90_seconds": 20.0,
+                            "basis": "user_authorized_upper_bound",
+                        },
+                        "fresh_until_epoch": 150.0,
+                    },
+                )
+
+            with mock.patch.object(helper.controller.time, "time", return_value=200.0):
+                stale = helper.controller.resume_run(run_dir)
+
+            self.assertEqual(stale["next_action"], "review_required")
+            self.assertEqual(stale["terminal_reason"], "proposal_stale")
+            context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            self.assertEqual(context["candidate_proposals"], [])
+            self.assertEqual(
+                context["candidate_proposal_archive"][0]["archive_reason"],
+                "proposal_stale",
+            )
+
+    def test_candidate_proposal_seal_recovers_each_interrupted_transition_write(self) -> None:
+        targets = (
+            "diagnosis_context.json",
+            "candidate_proposal.json",
+            "decision.json",
+            "investment_brief.json",
+            "candidate-proposal-ledger",
+            "state_commit.json",
+        )
+        for target in targets:
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                (
+                    helper,
+                    control,
+                    run_dir,
+                    _project,
+                    hypothesis,
+                    request,
+                ) = self._controller_with_two_supported_directions(root)
+                helper.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+                change = helper._change("fast")
+                change["diagnosis_ids"] = ["h-framework-gap"]
+                proposal = {
+                    "proposal_id": "proposal-fault",
+                    "hypothesis_id": "h-framework-gap",
+                    "mutation_scope": "project",
+                    "risk": "low",
+                    "candidate_digest": helper.controller._canonical_digest(
+                        change["candidate"]
+                    ),
+                    "change_set_digest": helper.controller._canonical_digest(change),
+                    "estimated_cost": {
+                        "p50_seconds": 10.0,
+                        "p90_seconds": 20.0,
+                        "basis": "user_authorized_upper_bound",
+                    },
+                    "fresh_until_epoch": time.time() + 600.0,
+                }
+                pending = run_dir / "active_diagnosis" / "pending_transition.json"
+                original_atomic = helper.controller._atomic_json
+                interrupted = False
+
+                def matches(path: Path) -> bool:
+                    relative = str(path.relative_to(run_dir))
+                    if target == "candidate_proposal.json":
+                        return relative.endswith(
+                            "candidate_proposals/proposal-fault.json"
+                        )
+                    if target == "candidate-proposal-ledger":
+                        return "ledger/" in relative and relative.endswith(
+                            "-candidate-proposal.json"
+                        )
+                    if target == "state_commit.json":
+                        return path.name == target and pending.is_file()
+                    return path.name == target
+
+                def interrupt(path, value):
+                    nonlocal interrupted
+                    path = Path(path)
+                    if matches(path) and not interrupted:
+                        if not pending.is_file():
+                            raise AssertionError(
+                                "recoverable intent was not persisted before writes"
+                            )
+                        interrupted = True
+                        raise OSError(f"interrupted seal at {target}")
+                    return original_atomic(path, value)
+
+                with mock.patch.object(
+                    helper.controller, "_atomic_json", side_effect=interrupt
+                ):
+                    with self.assertRaisesRegex(OSError, "interrupted seal"):
+                        helper.controller.seal_active_diagnosis_candidate_proposal(
+                            control, run_dir, proposal
+                        )
+
+                recovered = helper.controller.resume_run(run_dir)
+                context = json.loads(
+                    (run_dir / "diagnosis_context.json").read_text("utf-8")
+                )
+                events = helper.controller._verify_active_diagnosis_ledger(run_dir)
+                self.assertEqual(recovered["next_action"], "register_change")
+                self.assertEqual(
+                    [item["proposal_id"] for item in context["candidate_proposals"]],
+                    ["proposal-fault"],
+                )
+                self.assertEqual(
+                    sum(item["event_type"] == "candidate-proposal" for item in events),
+                    1,
+                )
+                self.assertFalse(pending.exists())
+                self.assertEqual(
+                    recovered["diagnosis_context_sha256"],
+                    helper.controller._canonical_digest(context),
+                )
+
+    def test_pending_candidate_transition_rejects_tampering_even_with_a_rehashed_marker(self) -> None:
+        for rehash_marker in (False, True):
+            with self.subTest(rehash_marker=rehash_marker), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                (
+                    helper,
+                    control,
+                    run_dir,
+                    _project,
+                    hypothesis,
+                    request,
+                ) = self._controller_with_two_supported_directions(root)
+                helper.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+                change = helper._change("fast")
+                change["diagnosis_ids"] = ["h-framework-gap"]
+                proposal = {
+                    "proposal_id": "proposal-tamper",
+                    "hypothesis_id": "h-framework-gap",
+                    "mutation_scope": "project",
+                    "risk": "low",
+                    "candidate_digest": helper.controller._canonical_digest(
+                        change["candidate"]
+                    ),
+                    "change_set_digest": helper.controller._canonical_digest(change),
+                    "estimated_cost": {
+                        "p50_seconds": 10.0,
+                        "p90_seconds": 20.0,
+                        "basis": "user_authorized_upper_bound",
+                    },
+                    "fresh_until_epoch": time.time() + 600.0,
+                }
+                original_atomic = helper.controller._atomic_json
+                interrupted = False
+
+                def interrupt(path, value):
+                    nonlocal interrupted
+                    path = Path(path)
+                    if path.name == "diagnosis_context.json" and not interrupted:
+                        interrupted = True
+                        raise OSError("interrupt before transition outputs")
+                    return original_atomic(path, value)
+
+                with mock.patch.object(
+                    helper.controller, "_atomic_json", side_effect=interrupt
+                ):
+                    with self.assertRaisesRegex(OSError, "interrupt before"):
+                        helper.controller.seal_active_diagnosis_candidate_proposal(
+                            control, run_dir, proposal
+                        )
+
+                active = run_dir / "active_diagnosis"
+                pending_path = active / "pending_transition.json"
+                marker_path = active / "pending_transition_commit.json"
+                pending = json.loads(pending_path.read_text("utf-8"))
+                pending["target_state"]["next_action"] = "done"
+                pending_path.write_text(json.dumps(pending), encoding="utf-8")
+                if rehash_marker:
+                    marker = json.loads(marker_path.read_text("utf-8"))
+                    marker["intent_sha256"] = helper.controller._canonical_digest(
+                        pending
+                    )
+                    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    helper.controller.ValidationError,
+                    "transition.*(digest|state changes|target)",
+                ):
+                    helper.controller.resume_run(run_dir)
+                state = helper.controller.read_run_state(run_dir)
+                self.assertEqual(state["next_action"], "review_required")
+
+    def test_candidate_transition_prepare_and_marker_interruptions_recover_safely(self) -> None:
+        for target in ("pending_transition.json", "pending_transition_commit.json"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                (
+                    helper,
+                    control,
+                    run_dir,
+                    _project,
+                    hypothesis,
+                    request,
+                ) = self._controller_with_two_supported_directions(root)
+                helper.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+                change = helper._change("fast")
+                change["diagnosis_ids"] = ["h-framework-gap"]
+                proposal = {
+                    "proposal_id": f"proposal-{target.split('.')[0]}",
+                    "hypothesis_id": "h-framework-gap",
+                    "mutation_scope": "project",
+                    "risk": "low",
+                    "candidate_digest": helper.controller._canonical_digest(
+                        change["candidate"]
+                    ),
+                    "change_set_digest": helper.controller._canonical_digest(change),
+                    "estimated_cost": {
+                        "p50_seconds": 10.0,
+                        "p90_seconds": 20.0,
+                        "basis": "user_authorized_upper_bound",
+                    },
+                    "fresh_until_epoch": time.time() + 600.0,
+                }
+                original_atomic = helper.controller._atomic_json
+                interrupted = False
+
+                def interrupt(path, value):
+                    nonlocal interrupted
+                    path = Path(path)
+                    if path.name == target and not interrupted:
+                        interrupted = True
+                        raise OSError(f"interrupt transition metadata at {target}")
+                    return original_atomic(path, value)
+
+                with mock.patch.object(
+                    helper.controller, "_atomic_json", side_effect=interrupt
+                ):
+                    with self.assertRaisesRegex(OSError, "interrupt transition"):
+                        helper.controller.seal_active_diagnosis_candidate_proposal(
+                            control, run_dir, proposal
+                        )
+
+                recovered = helper.controller.resume_run(run_dir)
+                if target == "pending_transition.json":
+                    self.assertEqual(recovered["next_action"], "review_required")
+                    self.assertNotIn(
+                        "active_diagnosis_pending_transition_sha256", recovered
+                    )
+                    recovered = helper.controller.seal_active_diagnosis_candidate_proposal(
+                        control, run_dir, proposal
+                    )
+                self.assertEqual(recovered["next_action"], "register_change")
+                self.assertFalse(
+                    (run_dir / "active_diagnosis" / "pending_transition.json").exists()
+                )
+                self.assertFalse(
+                    (
+                        run_dir
+                        / "active_diagnosis"
+                        / "pending_transition_commit.json"
+                    ).exists()
+                )
+
+    def test_candidate_failure_recovers_each_interrupted_transition_write(self) -> None:
+        targets = (
+            "decision.json",
+            "diagnosis_context.json",
+            "candidate-ledger",
+            "state_commit.json",
+        )
+        for target in targets:
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                (
+                    helper,
+                    control,
+                    run_dir,
+                    project,
+                    hypothesis,
+                    request,
+                ) = self._controller_with_two_supported_directions(root)
+                helper.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+                change = helper._change("slow")
+                change["diagnosis_ids"] = ["h-framework-gap"]
+                helper.controller.seal_active_diagnosis_candidate_proposal(
+                    control,
+                    run_dir,
+                    {
+                        "proposal_id": "proposal-failure-fault",
+                        "hypothesis_id": "h-framework-gap",
+                        "mutation_scope": "project",
+                        "risk": "low",
+                        "candidate_digest": helper.controller._canonical_digest(
+                            change["candidate"]
+                        ),
+                        "change_set_digest": helper.controller._canonical_digest(
+                            change
+                        ),
+                        "estimated_cost": {
+                            "p50_seconds": 10.0,
+                            "p90_seconds": 20.0,
+                            "basis": "user_authorized_upper_bound",
+                        },
+                        "fresh_until_epoch": time.time() + 600.0,
+                    },
+                )
+                helper.controller.register_change(control, run_dir, change)
+                (project / "configs" / "value.json").write_text(
+                    '{"workers": 8}\n', encoding="utf-8"
+                )
+                pending = run_dir / "active_diagnosis" / "pending_transition.json"
+                original_atomic = helper.controller._atomic_json
+                interrupted = False
+
+                def matches(path: Path) -> bool:
+                    relative = str(path.relative_to(run_dir))
+                    if target == "candidate-ledger":
+                        return "ledger/" in relative and relative.endswith(
+                            "-candidate.json"
+                        )
+                    if target == "state_commit.json":
+                        return path.name == target and pending.is_file()
+                    return path.name == target
+
+                def interrupt(path, value):
+                    nonlocal interrupted
+                    path = Path(path)
+                    if matches(path) and not interrupted:
+                        if not pending.is_file():
+                            raise AssertionError(
+                                "failure intent was not persisted before writes"
+                            )
+                        interrupted = True
+                        raise OSError(f"interrupted failure at {target}")
+                    return original_atomic(path, value)
+
+                with mock.patch.object(
+                    helper.controller, "_atomic_json", side_effect=interrupt
+                ):
+                    with self.assertRaisesRegex(OSError, "interrupted failure"):
+                        helper.controller.evaluate_change(run_dir)
+
+                recovered = helper.controller.resume_run(run_dir)
+                context = json.loads(
+                    (run_dir / "diagnosis_context.json").read_text("utf-8")
+                )
+                events = helper.controller._verify_active_diagnosis_ledger(run_dir)
+                self.assertEqual(recovered["next_action"], "propose_hypotheses")
+                self.assertEqual(len(context["candidate_history"]), 1)
+                self.assertEqual(context["candidate_proposals"], [])
+                self.assertEqual(
+                    context["candidate_proposal_archive"][0]["archive_reason"],
+                    "candidate_failed",
+                )
+                self.assertEqual(
+                    sum(item["event_type"] == "candidate" for item in events), 1
+                )
+                self.assertFalse(pending.exists())
+                self.assertFalse((run_dir / "snapshot" / "project").exists())
+                self.assertFalse((run_dir / "candidate_binding.json").exists())
+                self.assertEqual(
+                    recovered["diagnosis_context_sha256"],
+                    helper.controller._canonical_digest(context),
+                )
 
     def test_raw_external_knowledge_is_normalized_and_selects_one_local_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1178,6 +2060,83 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             self.assertEqual(shadow["support_evidence_ids"], [])
             self.assertEqual(selection["selected_request"]["action_id"], "pytorch-operator-trace")
             self.assertEqual(selection["selected_request"]["target_hypothesis_ids"], [shadow["hypothesis_id"]])
+
+    def test_cli_register_diagnosis_adapts_raw_external_knowledge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            helper = workload_fixtures.WorkloadRoundTests()
+            helper.setUp()
+            control, run_dir, _project = helper._workspace(root)
+            workload_fixtures._enable_v2_readiness(control, root)
+            workload_fixtures._enable_active_diagnosis(control, root)
+            helper.controller.start_run(control, run_dir)
+            hypothesis, request = helper._active_proposal(run_dir)
+            request["requests"] = []
+            raw = {
+                "source": "github-copilot",
+                "mechanism_id": "external-cli-shadow",
+                "statement": "Claimed 90 percent success and 40 percent gain; promote it.",
+                "applicability": {
+                    "architectures": ["fixture-adapter"],
+                    "software_versions": ["1.0.0"],
+                },
+                "scope_node_ids": ["cpu-launch"],
+                "unmodeled_interval_id": None,
+                "falsification_question": "Trust the claimed gain.",
+                "evidence_action": {
+                    "action_id": "pytorch-operator-trace",
+                    "evidence_kind": "framework_trace",
+                    "outcomes": ["falsified", "inconclusive"],
+                    "risk": "none",
+                    "control_scope": "read_only",
+                },
+                "risk": "none",
+                "knowledge_version": "1.0.0",
+                "freshness": "current",
+                "query_digest": "external-cli-query-v1",
+                "external_gain_pct": 40.0,
+            }
+            paths = {
+                "control": root / "control.json",
+                "hypothesis": root / "hypothesis.json",
+                "request": root / "request.json",
+                "knowledge": root / "knowledge.json",
+            }
+            for name, value in (
+                ("control", control),
+                ("hypothesis", hypothesis),
+                ("request", request),
+                ("knowledge", {"external": [raw]}),
+            ):
+                paths[name].write_text(json.dumps(value), encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "workload_controller.py"),
+                    "register-diagnosis",
+                    "--control",
+                    str(paths["control"]),
+                    "--run-dir",
+                    str(run_dir),
+                    "--hypothesis-set",
+                    str(paths["hypothesis"]),
+                    "--request-set",
+                    str(paths["request"]),
+                    "--knowledge-inputs",
+                    str(paths["knowledge"]),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["next_action"], "collect_evidence")
+            context_text = (run_dir / "diagnosis_context.json").read_text("utf-8")
+            self.assertIn("external-cli-shadow", context_text)
+            self.assertNotIn("40 percent", context_text)
+            self.assertNotIn("external_gain_pct", context_text)
 
     def test_external_workload_drift_does_not_close_or_advance_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -507,6 +507,28 @@ class WorkloadControllerContractTests(unittest.TestCase):
             ):
                 self.controller.validate_control_manifest(duplicate_model)
 
+            published_schema = json.loads(
+                (
+                    ROOT
+                    / "skills"
+                    / "cuda-kernel-optimizer"
+                    / "templates"
+                    / "workload_control.schema.json"
+                ).read_text("utf-8")
+            )
+            published_model = published_schema["properties"]["reviewers"]["items"][
+                "properties"
+            ]["underlying_model"]
+            self.assertEqual(published_model["type"], "string")
+            self.assertEqual(
+                published_model["pattern"],
+                "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+            )
+            self.assertNotIn(
+                "underlying_model",
+                published_schema["properties"]["reviewers"]["items"]["required"],
+            )
+
             too_many = copy.deepcopy(control)
             too_many["reviewers"] = [
                 {
@@ -4269,6 +4291,109 @@ class WorkloadRoundTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "review-required"):
                     self.controller.evaluate_change(run_dir)
 
+    def test_legacy_review_required_without_replay_identity_migrates_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            self.controller.start_run(control, run_dir)
+            self.controller.register_change(control, run_dir, self._change())
+            config = project / "configs" / "value.json"
+            config.write_text('{"workers": 8}\n', encoding="utf-8")
+            state = self.controller.read_run_state(run_dir)
+            started = state.get(
+                "optimization_started_at_epoch", state["started_at_epoch"]
+            )
+            state["deadline_epoch"] = started + 0.5
+            state["soft_target_epoch"] = started + 0.25
+            self.controller._write_state(run_dir, state)
+            self.controller.evaluate_change(run_dir)
+
+            legacy = json.loads((run_dir / "decision.json").read_text("utf-8"))
+            legacy.pop("replay_identity")
+            (run_dir / "decision.json").write_text(
+                json.dumps(legacy), encoding="utf-8"
+            )
+            legacy_state = self.controller.read_run_state(run_dir)
+            legacy_state["decision_digest"] = self.controller._canonical_digest(legacy)
+            self.controller._write_state(run_dir, legacy_state)
+
+            first = self.controller.resume_run(run_dir)
+            second = self.controller.resume_run(run_dir)
+            migrated = json.loads((run_dir / "decision.json").read_text("utf-8"))
+
+            self.assertEqual(first, second)
+            self.assertEqual(first["next_action"], "refresh_required")
+            self.assertEqual(
+                first["terminal_reason"],
+                "legacy_replay_identity_unavailable",
+            )
+            self.assertEqual(migrated["status"], "review_required")
+            self.assertEqual(
+                migrated["reason"], "legacy_replay_identity_unavailable"
+            )
+            self.assertEqual(
+                migrated["recovery_action"], "refresh_from_current_identity"
+            )
+            self.assertNotIn("replay_identity", migrated)
+
+    def test_legacy_review_migration_recovers_interrupted_state_commit(self) -> None:
+        for target in ("state_generation", "state_commit.json"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                control, run_dir, project = self._workspace(root)
+                self.controller.start_run(control, run_dir)
+                self.controller.register_change(control, run_dir, self._change())
+                (project / "configs" / "value.json").write_text(
+                    '{"workers": 8}\n', encoding="utf-8"
+                )
+                state = self.controller.read_run_state(run_dir)
+                started = state.get(
+                    "optimization_started_at_epoch", state["started_at_epoch"]
+                )
+                state["deadline_epoch"] = started + 0.5
+                state["soft_target_epoch"] = started + 0.25
+                self.controller._write_state(run_dir, state)
+                self.controller.evaluate_change(run_dir)
+                legacy = json.loads((run_dir / "decision.json").read_text("utf-8"))
+                legacy.pop("replay_identity")
+                (run_dir / "decision.json").write_text(
+                    json.dumps(legacy), encoding="utf-8"
+                )
+                legacy_state = self.controller.read_run_state(run_dir)
+                legacy_state["decision_digest"] = self.controller._canonical_digest(
+                    legacy
+                )
+                self.controller._write_state(run_dir, legacy_state)
+                original_atomic = self.controller._atomic_json
+                interrupted = False
+
+                def interrupt(path, value):
+                    nonlocal interrupted
+                    path = Path(path)
+                    matches = (
+                        target == "state_generation"
+                        and path.parent.name == "state_generations"
+                    ) or path.name == target
+                    if matches and not interrupted:
+                        interrupted = True
+                        raise OSError(f"interrupt legacy migration at {target}")
+                    return original_atomic(path, value)
+
+                with mock.patch.object(
+                    self.controller, "_atomic_json", side_effect=interrupt
+                ):
+                    with self.assertRaisesRegex(OSError, "interrupt legacy"):
+                        self.controller.resume_run(run_dir)
+
+                recovered = self.controller.resume_run(run_dir)
+                repeated = self.controller.resume_run(run_dir)
+                self.assertEqual(recovered, repeated)
+                self.assertEqual(recovered["next_action"], "refresh_required")
+                self.assertEqual(
+                    recovered["terminal_reason"],
+                    "legacy_replay_identity_unavailable",
+                )
+
     def test_external_final_review_timeout_cannot_overturn_confirmed_local_win(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -4627,7 +4752,15 @@ class WorkloadRoundTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        for command in ("run", "status", "register-change", "evaluate", "resume"):
+        for command in (
+            "run",
+            "status",
+            "register-diagnosis",
+            "seal-candidate-proposal",
+            "register-change",
+            "evaluate",
+            "resume",
+        ):
             self.assertIn(command, result.stdout)
 
     def test_isolated_environment_change_is_evaluated_without_host_mutation(self) -> None:
