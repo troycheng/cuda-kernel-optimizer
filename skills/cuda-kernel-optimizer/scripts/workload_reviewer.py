@@ -123,6 +123,10 @@ def _string(value: Any, field: str, maximum: int = 4096) -> str:
     return value
 
 
+def _canonical_model(model: str) -> str:
+    return model.strip().lower()
+
+
 def build_review_request(
     *,
     diagnosis: Mapping[str, Any],
@@ -528,7 +532,7 @@ def run_reviewers(
         if _PROVIDER.fullmatch(underlying_model) is None:
             raise ReviewerError(f"reviewers[{index}].underlying_model is invalid")
         canonical_provider = _PROVIDER_ALIASES.get(provider.lower(), provider.lower())
-        run_key = (expected, canonical_provider, underlying_model.lower())
+        run_key = (expected, canonical_provider, _canonical_model(underlying_model))
         if run_key in run_keys:
             continue
         run_keys.add(run_key)
@@ -573,7 +577,11 @@ def run_reviewers(
                 },
                 request,
                 run_root / "reviewers" / _digest(
-                    [expected, config["canonical_provider"], config["underlying_model"].lower()]
+                    [
+                        expected,
+                        config["canonical_provider"],
+                        _canonical_model(config["underlying_model"]),
+                    ]
                 )[:16],
             )
             execution = artifact.get("execution", {})
@@ -684,7 +692,10 @@ def _ordered_reviewer_configs(
     distinct = []
     run_keys = set()
     for item in normalized:
-        run_key = (item["canonical_provider"], item["underlying_model"].lower())
+        run_key = (
+            item["canonical_provider"],
+            _canonical_model(item["underlying_model"]),
+        )
         if run_key in run_keys:
             continue
         run_keys.add(run_key)
@@ -711,14 +722,17 @@ def select_reviewer_configs(
 
 def _heterogeneous_models(reviews: Sequence[Mapping[str, Any]]) -> list[str]:
     models = []
+    model_keys = set()
     for item in reviews:
         model = item["underlying_model"]
+        model_key = _canonical_model(model)
         if (
             item["status"] == "completed"
-            and model.lower() not in {"auto", "unknown"}
-            and model not in models
+            and model_key not in {"auto", "unknown"}
+            and model_key not in model_keys
         ):
             models.append(model)
+            model_keys.add(model_key)
     return models
 
 

@@ -543,11 +543,14 @@ class ReviewerProcessTests(unittest.TestCase):
             configs = [
                 {
                     "provider": provider,
-                    "underlying_model": "gpt-4.1",
+                    "underlying_model": model,
                     "argv": [sys.executable, str(good)],
                     "timeout_seconds": 5,
                 }
-                for provider in ("google-ai-mode", "github-copilot")
+                for provider, model in (
+                    ("google-ai-mode", "GPT-4.1"),
+                    ("github-copilot", "gpt-4.1"),
+                )
             ]
 
             artifact = self.reviewer.run_reviewers(
@@ -557,7 +560,7 @@ class ReviewerProcessTests(unittest.TestCase):
                 total_timeout_seconds=2,
             )
 
-        self.assertEqual(artifact["heterogeneous_models"], ["gpt-4.1"])
+        self.assertEqual(artifact["heterogeneous_models"], ["GPT-4.1"])
 
     def test_provider_aliases_cannot_fill_multiple_independent_review_slots(self) -> None:
         configs = [
