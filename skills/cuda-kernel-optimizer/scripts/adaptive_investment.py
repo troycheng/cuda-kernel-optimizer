@@ -265,16 +265,18 @@ def _changes_decision(action: Mapping[str, Any], active: Mapping[str, dict]) -> 
     return False
 
 
+def _evidence_contributions(action: Mapping[str, Any]) -> set[tuple[str, str]]:
+    return {
+        (action["mechanism"], direction_id)
+        for outcome in action["outcomes"]
+        for direction_id in (
+            outcome["supports"] + outcome["opposes"] + list(outcome["candidate_intervals"])
+        )
+    }
+
+
 def _evidence_gain(action: Mapping[str, Any]) -> int:
-    return len(
-        {
-            (action["mechanism"], direction_id)
-            for outcome in action["outcomes"]
-            for direction_id in (
-                outcome["supports"] + outcome["opposes"] + list(outcome["candidate_intervals"])
-            )
-        }
-    )
+    return len(_evidence_contributions(action))
 
 
 def _dominates(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
@@ -283,12 +285,14 @@ def _dominates(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
         for field in ("cost", "perturbation", "risk")
     ) and left["p90_seconds"] <= right["p90_seconds"]
     covers = set(left["target_direction_ids"]) >= set(right["target_direction_ids"])
-    independent_gain = _evidence_gain(left) >= _evidence_gain(right)
+    left_evidence = _evidence_contributions(left)
+    right_evidence = _evidence_contributions(right)
+    independent_gain = left_evidence >= right_evidence
     strictly_better = (
         any(_LEVELS[left[field]] < _LEVELS[right[field]] for field in ("cost", "perturbation", "risk"))
         or left["p90_seconds"] < right["p90_seconds"]
         or set(left["target_direction_ids"]) > set(right["target_direction_ids"])
-        or _evidence_gain(left) > _evidence_gain(right)
+        or left_evidence > right_evidence
     )
     return no_worse and covers and independent_gain and strictly_better
 

@@ -177,9 +177,21 @@ class AdaptiveInvestmentTests(unittest.TestCase):
         result = self.decide(
             directions,
             [
-                evidence_action("expensive", direction="a", cost="high", p90_seconds=10.0),
+                evidence_action(
+                    "expensive",
+                    direction="a",
+                    mechanism="shared-evidence",
+                    cost="high",
+                    p90_seconds=10.0,
+                ),
                 {
-                    **evidence_action("cheap", direction="a", cost="low", p90_seconds=1.0),
+                    **evidence_action(
+                        "cheap",
+                        direction="a",
+                        mechanism="shared-evidence",
+                        cost="low",
+                        p90_seconds=1.0,
+                    ),
                     "target_direction_ids": ["a", "b"],
                     "outcomes": [
                         {"outcome_id": "cheap-support", "supports": ["a", "b"], "opposes": []},
@@ -190,6 +202,17 @@ class AdaptiveInvestmentTests(unittest.TestCase):
         )
         self.assertEqual(result["selected_action"]["action_id"], "cheap")
         self.assertIn("expensive", result["skipped_actions"])
+
+    def test_cheaper_different_mechanism_evidence_does_not_dominate_fallback(self):
+        result = self.decide(
+            [direction_fixture()],
+            [
+                evidence_action("cheap-trace", direction="z", mechanism="trace", cost="low"),
+                evidence_action("ncu-fallback", direction="z", mechanism="ncu", cost="high"),
+            ],
+        )
+        self.assertEqual(result["selected_action"]["action_id"], "cheap-trace")
+        self.assertNotIn("ncu-fallback", result["skipped_actions"])
 
     def test_different_mechanism_fallback_survives_failed_preferred_implementation(self):
         failed = evidence_action("preferred", direction="z", mechanism="ncu")
