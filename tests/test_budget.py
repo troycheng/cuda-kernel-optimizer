@@ -266,6 +266,74 @@ class BudgetClockTests(unittest.TestCase):
 
 
 class CandidateGateTests(unittest.TestCase):
+    def test_profiler_action_without_cost_fails_closed_before_any_action(self) -> None:
+        gate = budget.CandidateGate(
+            {
+                "soft_target_seconds": 30,
+                "hard_ceiling_seconds": 300,
+                "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
+            },
+            {
+                "claim_layer": "workload",
+                "cheapest_falsifier": "static_review",
+                "estimated_cost": {
+                    "static_review": 1,
+                    "build_correctness": 2,
+                    "short_paired": 3,
+                    "formal_paired": 5,
+                    "service": 6,
+                },
+                "minimum_effect": {"metric": "service_pct", "value": 0.5},
+                "rejection_condition": "any gate fails",
+                "promotion_condition": "formal lower bound passes",
+            },
+        )
+        actions = {
+            "static_review": mock.Mock(return_value={"status": "passed"}),
+            "build_correctness": mock.Mock(return_value={"status": "passed"}),
+            "short_paired": mock.Mock(
+                return_value={
+                    "status": "passed",
+                    "lower_bound": 0.1,
+                    "upper_bound": 1.0,
+                }
+            ),
+            "profiler": mock.Mock(return_value={"status": "passed"}),
+            "formal_paired": mock.Mock(
+                return_value={"status": "passed", "lower_bound": 1.0}
+            ),
+        }
+
+        try:
+            result = gate.run(actions)
+        except KeyError as error:
+            self.fail(f"missing profiler cost escaped as KeyError: {error}")
+
+        for action in actions.values():
+            action.assert_not_called()
+        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
+        self.assertEqual(result["stop_reason"], "cost_unavailable_for_next_action")
+        self.assertEqual(result["next_stage"], "profiler")
+        self.assertEqual(
+            result["blocked_action"],
+            {
+                "action_id": "profiler",
+                "p90_seconds": None,
+                "reason": "cost_unavailable_for_next_action",
+            },
+        )
+        self.assertIsNone(result["projected_spend"]["p90_seconds"])
+        self.assertEqual(
+            result["skipped_expensive_stages"],
+            [
+                "static_review",
+                "build_correctness",
+                "short_paired",
+                "profiler",
+                "formal_paired",
+            ],
+        )
+
     def test_action_exception_terminal_is_cached_after_failure_details_are_added(self) -> None:
         gate = budget.CandidateGate(
             {

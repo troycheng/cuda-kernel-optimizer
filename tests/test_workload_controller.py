@@ -3718,6 +3718,75 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(artifact["status"], "failed")
             self.assertIn("live_uncertainty", artifact["reason"])
 
+    def test_live_uncertainty_without_profiler_cost_pauses_before_all_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            self.controller.start_run(control, run_dir)
+            diagnosis = json.loads((run_dir / "diagnosis.json").read_text("utf-8"))
+            diagnosis["suggested_probes"] = ["timeline"]
+            (run_dir / "diagnosis.json").write_text(
+                json.dumps(diagnosis), encoding="utf-8"
+            )
+            change = self._change()
+            change["candidate"]["estimated_cost"].pop("profiler")
+            self.controller.register_change(control, run_dir, change)
+            config = project / "configs" / "value.json"
+            original = config.read_text("utf-8")
+            config.write_text('{"workers": 8}\n', encoding="utf-8")
+            evaluator = mock.Mock()
+            evaluator.evaluate_pairs.return_value = {
+                "status": "evaluated",
+                "primary": {
+                    "status": "confirmed_win",
+                    "estimate_pct": 5.0,
+                    "ci_low_pct": 4.0,
+                    "ci_high_pct": 6.0,
+                },
+                "constraints": [],
+            }
+
+            with mock.patch.object(
+                self.controller,
+                "_static_review_changed_files",
+                wraps=self.controller._static_review_changed_files,
+            ) as static_review, mock.patch.object(
+                self.controller, "_load_evaluate_module", return_value=evaluator
+            ), mock.patch.object(
+                self.controller,
+                "run_probe",
+                side_effect=AssertionError("profiler executed before cost check"),
+            ) as profiler:
+                try:
+                    first = self.controller.evaluate_change(run_dir)
+                except KeyError as error:
+                    self.fail(f"missing profiler cost escaped as KeyError: {error}")
+
+            static_review.assert_not_called()
+            evaluator.evaluate_pairs.assert_not_called()
+            profiler.assert_not_called()
+            self.assertEqual(first["status"], "review_required")
+            self.assertEqual(first["stop_reason"], "cost_unavailable_for_next_action")
+            self.assertEqual(first["blocked_action"]["action_id"], "profiler")
+            self.assertIsNone(first["blocked_action"]["p90_seconds"])
+            self.assertIsNone(first["projected_spend"]["p90_seconds"])
+            self.assertEqual(config.read_text("utf-8"), original)
+            self.assertTrue((run_dir / "time_gate.json").is_file())
+            self.assertTrue((run_dir / "decision.json").is_file())
+            self.assertIn("candidate_binding.json", first["evidence"])
+            self.assertFalse((run_dir / "static_review.json").exists())
+            self.assertFalse((run_dir / "correctness.json").exists())
+            self.assertFalse((run_dir / "profiler_stage.json").exists())
+
+            repeated = self.controller.evaluate_change(run_dir)
+
+            self.assertEqual(repeated, first)
+            state = self.controller.read_run_state(run_dir)
+            self.assertEqual(state["next_action"], "review_required")
+            self.assertEqual(
+                state["decision_digest"], self.controller._canonical_digest(first)
+            )
+
     def test_live_kernel_uncertainty_runs_profiler_before_formal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

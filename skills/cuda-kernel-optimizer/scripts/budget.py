@@ -183,6 +183,7 @@ _CLAIM_LAST_STAGE = {
     "workload": "formal_paired",
     "serving": "service",
 }
+_PROJECTED_SPEND_UNSET = object()
 
 
 def maintenance_budget_seconds(hard_ceiling_seconds: float) -> float:
@@ -338,7 +339,7 @@ class CandidateGate:
         completed: Sequence[str],
         next_stage: str | None = None,
         blocked_action: Mapping | None = None,
-        projected_p90_seconds: float | None = None,
+        projected_p90_seconds: float | None | object = _PROJECTED_SPEND_UNSET,
         observed_elapsed_seconds: float | None = None,
         details: Mapping | None = None,
     ) -> dict:
@@ -364,10 +365,12 @@ class CandidateGate:
                 None if blocked_action is None else dict(blocked_action)
             ),
             "projected_spend": {
-                "p90_seconds": float(
-                    elapsed
+                "p90_seconds": (
+                    float(elapsed)
+                    if projected_p90_seconds is _PROJECTED_SPEND_UNSET
+                    else None
                     if projected_p90_seconds is None
-                    else projected_p90_seconds
+                    else float(projected_p90_seconds)
                 )
             },
         }
@@ -385,6 +388,24 @@ class CandidateGate:
         completed: list[str] = []
         last_stage = _CLAIM_LAST_STAGE[self.candidate["claim_layer"]]
         applicable = _CANDIDATE_STAGES[: _CANDIDATE_STAGES.index(last_stage) + 1]
+        for stage in applicable:
+            if (
+                callable(actions.get(stage))
+                and stage not in self.candidate["estimated_cost"]
+            ):
+                return self._result(
+                    started_at=started,
+                    decision="REVIEW_REQUIRED",
+                    stop_reason="cost_unavailable_for_next_action",
+                    completed=completed,
+                    next_stage=stage,
+                    blocked_action={
+                        "action_id": stage,
+                        "p90_seconds": None,
+                        "reason": "cost_unavailable_for_next_action",
+                    },
+                    projected_p90_seconds=None,
+                )
         threshold = self.candidate["minimum_effect"]["value"]
         for stage in applicable:
             action = actions.get(stage)
