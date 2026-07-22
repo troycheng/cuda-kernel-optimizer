@@ -194,9 +194,12 @@ def _normalize(
         or control_scope != context["authorized_scope"]
     ):
         return None, "not_locally_falsifiable"
+    normalized_statement = (
+        statement if origin == "bundled" else f"Mechanism candidate: {mechanism_id}."
+    )
     return {
         "mechanism_id": mechanism_id,
-        "statement": statement,
+        "statement": normalized_statement,
         "applicability": {
             "architectures": architectures,
             "software_versions": sorted(versions),

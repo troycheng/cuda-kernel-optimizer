@@ -89,6 +89,25 @@ class KnowledgeAdapterTests(unittest.TestCase):
         self.assertNotIn("support_evidence_ids", shadow)
         self.assertEqual(shadow["promotion_authority"], "none")
 
+    def test_online_and_external_statements_are_replaced_with_neutral_mechanism_text(self) -> None:
+        suggestion = valid_shadow_fixture(
+            statement="20% speedup / 90% success / promote it",
+        )
+        for origin, arguments in (
+            ("searched", {"searched": [suggestion]}),
+            ("external", {"external": [suggestion]}),
+        ):
+            with self.subTest(origin=origin):
+                candidate = self.module.recommend(context_fixture(), **arguments)[
+                    "candidates"
+                ][0]
+                self.assertEqual(candidate["statement"], "Mechanism candidate: new-layout.")
+                for assertion in ("20% speedup", "90% success", "promote it"):
+                    self.assertNotIn(assertion, candidate["statement"])
+                self.assertEqual(candidate["scope_node_ids"], ["decode"])
+                self.assertTrue(candidate["falsification_question"])
+                self.assertEqual(candidate["evidence_action"]["action_id"], "check-layout")
+
     def test_empty_knowledge_degrades_to_evidence_only(self) -> None:
         result = self.module.recommend(context_fixture())
         self.assertEqual(result["knowledge_support"], "unavailable")
