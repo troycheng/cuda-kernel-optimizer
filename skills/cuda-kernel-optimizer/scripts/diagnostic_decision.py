@@ -394,27 +394,40 @@ def _investment_action(
     controller_action: Mapping[str, Any] | None,
     model: Mapping[str, Any],
     history: list[dict],
+    action_bounds: Mapping[str, Any],
     kind: str = "check",
-) -> dict:
+) -> tuple[dict, bool]:
     controller = {} if controller_action is None else dict(controller_action)
     estimate = model.get("action_timing_estimates", {}).get(action_id, {})
     record = _matching_history(history, action_id=action_id)
     status = record.get("implementation_status", record.get("status", "available"))
-    return {
+    raw_p90 = record.get("p90_seconds", record.get("elapsed_seconds"))
+    if raw_p90 is None and isinstance(estimate, Mapping):
+        raw_p90 = estimate.get("p90_seconds")
+    if raw_p90 is None:
+        bound = action_bounds.get(action_id)
+        if isinstance(bound, Mapping):
+            raw_p90 = bound.get("p90_seconds")
+        elif type(bound) in {int, float}:
+            raw_p90 = bound
+    bounded = raw_p90 is not None
+    action = {
         "action_id": action_id,
         "kind": kind,
         "mechanism": mechanism,
         "cost": controller.get("cost", "low"),
         "perturbation": controller.get("perturbation", "low"),
         "risk": controller.get("risk", "none"),
-        "p90_seconds": _number(
-            record.get("p90_seconds", estimate.get("p90_seconds", 0.0)),
-            f"action {action_id} p90_seconds",
+        "p90_seconds": (
+            _number(raw_p90, f"action {action_id} p90_seconds")
+            if bounded
+            else None
         ),
         "target_direction_ids": copy.deepcopy(targets),
         "outcomes": copy.deepcopy(outcomes),
         "implementation_status": "failed" if status == "failed" else "available",
     }
+    return action, bounded
 
 
 def _adaptive_actions(
@@ -423,9 +436,11 @@ def _adaptive_actions(
     selection: Mapping[str, Any],
     model: Mapping[str, Any],
     history: list[dict],
-) -> tuple[list[dict], dict[str, dict]]:
+    action_bounds: Mapping[str, Any],
+) -> tuple[list[dict], dict[str, dict], list[dict]]:
     actions = []
     metadata = {}
+    unbounded = []
     by_id = {item["direction_id"]: item for item in directions}
     if selection.get("status") == "sufficient":
         for hypothesis in ranked:
@@ -438,7 +453,7 @@ def _adaptive_actions(
             )
             record = _matching_history(history, hypothesis_id=direction_id)
             candidate_history = [record] if record else []
-            action = _investment_action(
+            action, bounded = _investment_action(
                 action_id,
                 mechanism=(
                     f"refresh:{hypothesis['mechanism']}"
@@ -450,16 +465,25 @@ def _adaptive_actions(
                 controller_action=None,
                 model=model,
                 history=candidate_history,
+                action_bounds=action_bounds,
                 kind="refresh" if stale else "check",
             )
             if record.get("implementation_status", record.get("status")) == "failed":
                 action["implementation_status"] = "failed"
-            actions.append(action)
+            if stale:
+                # A stale candidate bound cannot authorize a synthetic command.
+                # Refresh must be represented by an executable catalog action.
+                bounded = False
+                action["p90_seconds"] = None
+                action["reason"] = "refresh_action_unavailable"
+            elif not bounded:
+                action["reason"] = "cost_unavailable"
+            (actions if bounded else unbounded).append(action)
             metadata[action_id] = {
                 "purpose": "refresh" if stale else "candidate",
                 "hypothesis_id": direction_id,
             }
-        return actions, metadata
+        return actions, metadata, unbounded
 
     selected = selection.get("selected_request")
     candidates = []
@@ -479,7 +503,7 @@ def _adaptive_actions(
         outcomes = request.get("outcomes")
         if type(outcomes) is not list or not outcomes:
             outcomes = _action_outcomes(action_id, targets)
-        action = _investment_action(
+        action, bounded = _investment_action(
             action_id,
             mechanism=controller.get("evidence_kind", action_id),
             targets=targets,
@@ -487,12 +511,15 @@ def _adaptive_actions(
             controller_action=controller,
             model=model,
             history=history,
+            action_bounds=action_bounds,
         )
         if not is_selected:
             action["implementation_status"] = "failed"
-        actions.append(action)
+        if not bounded:
+            action["reason"] = "cost_unavailable"
+        (actions if bounded else unbounded).append(action)
         metadata[action_id] = {"purpose": "evidence", "request": request}
-    return actions, metadata
+    return actions, metadata, unbounded
 
 
 def _knowledge_summary(value: Mapping[str, Any] | None) -> dict:
@@ -523,6 +550,7 @@ def decide_next_step(
     spend: Mapping[str, Any] | None = None,
     candidate_history: Sequence[Mapping[str, Any]] | None = None,
     knowledge_adaptation: Mapping[str, Any] | None = None,
+    action_bounds: Mapping[str, Any] | None = None,
 ) -> dict:
     """Return one local evidence-authoritative decision and investment brief."""
     model = _object(performance_model, "performance_model")
@@ -536,8 +564,9 @@ def decide_next_step(
     maximum_ceiling = max((item["benefit_ceiling_us"] for item in ranked), default=0.0)
     history = _history_records(candidate_history)
     directions, identity = _direction_portfolio(ranked, model, history, threshold)
-    adaptive_actions, action_metadata = _adaptive_actions(
-        ranked, directions, selection, model, history
+    bounds = {} if action_bounds is None else _object(action_bounds, "action_bounds")
+    adaptive_actions, action_metadata, unbounded_actions = _adaptive_actions(
+        ranked, directions, selection, model, history, bounds
     )
     adaptive_authorization, adaptive_spend = _investment_inputs(
         model, authorization, spend
@@ -614,7 +643,51 @@ def decide_next_step(
     if local_decision in {"MEASURE", "PURSUE"}:
         selected_investment = adaptive.get("selected_action")
         blocked_investment = adaptive.get("blocked_action")
-        if adaptive["decision"] == "REVIEW_REQUIRED":
+        unavailable = next(
+            (
+                item
+                for item in unbounded_actions
+                if item.get("implementation_status") != "failed"
+            ),
+            None,
+        )
+        if unavailable is not None and selected_investment is None:
+            unavailable_info = action_metadata[unavailable["action_id"]]
+            unavailable_reason = unavailable["reason"]
+            decision, reason, checkpoint = (
+                "REVIEW_REQUIRED",
+                unavailable_reason,
+                "after_authorization_decision",
+            )
+            if unavailable_info["purpose"] == "candidate":
+                chosen = next(
+                    item
+                    for item in ranked
+                    if item["hypothesis_id"] == unavailable_info["hypothesis_id"]
+                )
+                primary = chosen
+                next_action = {
+                    "action_id": unavailable["action_id"],
+                    "hypothesis_id": chosen["hypothesis_id"],
+                    "authorization_reason": unavailable_reason,
+                }
+            elif unavailable_info["purpose"] == "refresh":
+                next_action = {
+                    "action_id": unavailable["action_id"],
+                    "kind": "refresh",
+                    "target_hypothesis_ids": copy.deepcopy(
+                        unavailable["target_direction_ids"]
+                    ),
+                    "authorization_reason": unavailable_reason,
+                }
+            else:
+                request = unavailable_info["request"]
+                next_action = {
+                    "request_id": request.get("request_id"),
+                    "action_id": unavailable["action_id"],
+                    "authorization_reason": unavailable_reason,
+                }
+        elif adaptive["decision"] == "REVIEW_REQUIRED":
             decision, reason, checkpoint = (
                 "REVIEW_REQUIRED",
                 "cumulative_authorization_exceeded",
@@ -714,6 +787,16 @@ def decide_next_step(
         blocked_summary = next(
             (
                 copy.deepcopy(item)
+                for item in unbounded_actions
+                if item["action_id"] == blocked_id
+            ),
+            None,
+        )
+    if blocked_summary is None and result["decision"] == "REVIEW_REQUIRED":
+        blocked_id = (result.get("next_action") or {}).get("action_id")
+        blocked_summary = next(
+            (
+                copy.deepcopy(item)
                 for item in adaptive_actions
                 if item["action_id"] == blocked_id
             ),
@@ -736,12 +819,24 @@ def decide_next_step(
         "cumulative_investment": {
             "elapsed_seconds": adaptive_spend["elapsed_seconds"],
             "remaining_authorization_seconds": remaining,
-            "projected_p90_seconds": adaptive["projected_spend"]["p90_seconds"],
+            "projected_p90_seconds": (
+                None
+                if blocked_summary is not None
+                and blocked_summary.get("p90_seconds") is None
+                else adaptive["projected_spend"]["p90_seconds"]
+            ),
             "bound_basis": "controller_elapsed_or_identity_matched_history",
         },
         "selected_action": copy.deepcopy(adaptive.get("selected_action")),
         "blocked_action": blocked_summary,
-        "skipped_action_ids": copy.deepcopy(adaptive.get("skipped_actions", [])),
+        "skipped_action_ids": sorted(
+            set(adaptive.get("skipped_actions", []))
+            | {
+                item["action_id"]
+                for item in unbounded_actions
+                if item.get("implementation_status") == "failed"
+            }
+        ),
         "bound_basis": {
             "identity_digest": identity,
             "benefit": "local_execution_map_timing_upper_bound",

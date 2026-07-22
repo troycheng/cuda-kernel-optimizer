@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.test_analysis_epoch import epoch_fixture
 from tests.test_evidence_selector import (
@@ -15,6 +18,7 @@ from tests.test_evidence_selector import (
 )
 from tests.test_execution_map import evidence_catalog, map_fixture
 from tests.test_hypothesis_space import hypothesis_fixture
+from tests import test_workload_controller as workload_fixtures
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -187,6 +191,160 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
         )
         self.epoch = epoch_fixture()
         self.evidence = evidence_catalog()
+
+    def _controller_with_two_supported_directions(self, root: Path):
+        helper = workload_fixtures.WorkloadRoundTests()
+        helper.setUp()
+        control, run_dir, project = helper._workspace(root)
+        workload_fixtures._enable_v2_readiness(
+            control,
+            root,
+            capability_ids=("gpu-execute", "ncu.counter_access"),
+        )
+        workload_fixtures._enable_active_diagnosis(control, root)
+        ncu_adapter = project / "collect_ncu_evidence.py"
+        ncu_adapter.write_text(
+            "import json, os\n"
+            "request = json.load(open(os.environ['CUDA_OPTIMIZER_EVIDENCE_REQUEST']))\n"
+            "payload = {\n"
+            " 'schema_version': 'cuda-optimizer/evidence-result-v1',\n"
+            " 'request_signature': request['request_signature'],\n"
+            " 'status': 'observed', 'outcome_id': 'kernel-present',\n"
+            " 'observations': {'stall': 'memory'}, 'artifacts': []}\n"
+            "open(os.environ['CUDA_OPTIMIZER_EVIDENCE_OUTPUT'], 'w').write(json.dumps(payload))\n",
+            encoding="utf-8",
+        )
+        contract_path = Path(control["analysis_contract"])
+        contract = json.loads(contract_path.read_text("utf-8"))
+        contract["actions"].append(
+            {
+                "action_id": "ncu-targeted-kernel",
+                "adapter_path": str(ncu_adapter),
+                "adapter_sha256": hashlib.sha256(ncu_adapter.read_bytes()).hexdigest(),
+                "argv": [sys.executable, str(ncu_adapter)],
+                "timeout_seconds": 5,
+            }
+        )
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+        helper.controller.start_run(control, run_dir)
+
+        def bind(hypothesis, request):
+            active = run_dir / "active_diagnosis"
+            epoch = json.loads((active / "epoch.json").read_text("utf-8"))
+            result = helper.controller._load_hypothesis_space_module().validate_hypothesis_set(
+                hypothesis,
+                epoch=epoch,
+                execution_map=json.loads(
+                    (active / "execution_map.json").read_text("utf-8")
+                ),
+                evidence_catalog=json.loads(
+                    (active / "evidence_catalog.json").read_text("utf-8")
+                ),
+            )
+            request["hypothesis_set_sha256"] = result["hypothesis_set_sha256"]
+            return hypothesis, request
+
+        hypothesis, request = helper._active_proposal(run_dir)
+        hypothesis["relationships"] = []
+        framework, kernel = hypothesis["hypotheses"]
+        kernel.update(
+            {
+                "confidence": "plausible",
+                "support_evidence_ids": ["ev-global-scan"],
+            }
+        )
+        request["requests"] = [
+            {
+                "request_id": "req-framework-support",
+                "action_id": "pytorch-operator-trace",
+                "question": "Does the framework trace support launch overhead?",
+                "target_hypothesis_ids": ["h-framework-gap"],
+                "exclusive_pairs": [],
+                "outcomes": [
+                    {
+                        "outcome_id": "gap-present",
+                        "supports": ["h-framework-gap"],
+                        "opposes": [],
+                    },
+                    {
+                        "outcome_id": "gap-absent",
+                        "supports": [],
+                        "opposes": ["h-framework-gap"],
+                    },
+                ],
+            }
+        ]
+        bind(hypothesis, request)
+        helper.controller.register_active_diagnosis_proposal(
+            control, run_dir, hypothesis, request
+        )
+        helper.controller.collect_active_diagnosis_evidence(control, run_dir)
+
+        catalog = json.loads(
+            (run_dir / "active_diagnosis" / "evidence_catalog.json").read_text(
+                "utf-8"
+            )
+        )
+        framework_evidence = next(
+            evidence_id
+            for evidence_id, item in catalog.items()
+            if item["kind"] == "framework_trace"
+        )
+        framework.update(
+            {
+                "confidence": "direction_supported",
+                "support_evidence_ids": ["ev-global-scan", framework_evidence],
+                "missing_evidence_kinds": [],
+            }
+        )
+        request["request_set_id"] = "requests-kernel-support"
+        request["requests"] = [
+            {
+                "request_id": "req-kernel-support",
+                "action_id": "ncu-targeted-kernel",
+                "question": "Does NCU support the kernel mechanism?",
+                "target_hypothesis_ids": ["h-kernel-bound"],
+                "exclusive_pairs": [],
+                "outcomes": [
+                    {
+                        "outcome_id": "kernel-present",
+                        "supports": ["h-kernel-bound"],
+                        "opposes": [],
+                    },
+                    {
+                        "outcome_id": "kernel-absent",
+                        "supports": [],
+                        "opposes": ["h-kernel-bound"],
+                    },
+                ],
+            }
+        ]
+        bind(hypothesis, request)
+        helper.controller.register_active_diagnosis_proposal(
+            control, run_dir, hypothesis, request
+        )
+        helper.controller.collect_active_diagnosis_evidence(control, run_dir)
+
+        catalog = json.loads(
+            (run_dir / "active_diagnosis" / "evidence_catalog.json").read_text(
+                "utf-8"
+            )
+        )
+        kernel_evidence = next(
+            evidence_id
+            for evidence_id, item in catalog.items()
+            if item["kind"] == "ncu_kernel"
+        )
+        kernel.update(
+            {
+                "confidence": "direction_supported",
+                "support_evidence_ids": ["ev-global-scan", kernel_evidence],
+                "missing_evidence_kinds": [],
+            }
+        )
+        request["request_set_id"] = "requests-supported"
+        bind(hypothesis, request)
+        return helper, control, run_dir, project, hypothesis, request
 
     def test_five_cpu_scenarios_stay_compact_and_preserve_gaps(self) -> None:
         expected_unmodeled = {"unknown_idle"}
@@ -496,7 +654,17 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     request_history=[],
                 )
                 model = self.model_module.build_performance_model(
-                    execution_map, minimum_effect_us=1.0
+                    execution_map,
+                    minimum_effect_us=1.0,
+                    action_timings=[
+                        {
+                            "action_id": action_id,
+                            "identities": copy.deepcopy(
+                                execution_map["identities"]
+                            ),
+                            "elapsed_seconds": 2.0,
+                        }
+                    ],
                 )
                 decision = self.decision_module.decide_next_step(
                     model, hypothesis_result, selection
@@ -518,6 +686,168 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 )
                 if claim_layer != "kernel":
                     self.assertNotEqual(decision["next_action"]["action_id"], "ncu-targeted")
+
+    def test_controller_stale_bound_never_enters_unexecutable_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (
+                helper,
+                control,
+                run_dir,
+                _project,
+                hypothesis,
+                request,
+            ) = self._controller_with_two_supported_directions(root)
+            original_inputs = helper.controller._diagnostic_investment_inputs
+            evidence_root = run_dir / "active_diagnosis" / "evidence"
+            evidence_entries_before = {
+                path.relative_to(evidence_root)
+                for path in evidence_root.rglob("*")
+            }
+
+            def stale_inputs(*args, **kwargs):
+                inputs = original_inputs(*args, **kwargs)
+                inputs["candidate_history"] = [
+                    {
+                        "hypothesis_id": hypothesis_id,
+                        "action_id": f"implement-{hypothesis_id}",
+                        "implementation_status": "available",
+                        "identity_digest": "0" * 64,
+                        "elapsed_seconds": 2.0,
+                    }
+                    for hypothesis_id in (
+                        "h-framework-gap",
+                        "h-kernel-bound",
+                    )
+                ]
+                return inputs
+
+            with mock.patch.object(
+                helper.controller,
+                "_diagnostic_investment_inputs",
+                side_effect=stale_inputs,
+            ):
+                state = helper.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+
+            selection = json.loads(
+                (run_dir / "active_diagnosis" / "evidence_selection.json").read_text(
+                    "utf-8"
+                )
+            )
+            decision = json.loads(
+                (run_dir / "active_diagnosis" / "decision.json").read_text("utf-8")
+            )
+            self.assertEqual(selection["status"], "sufficient")
+            self.assertIsNone(selection["selected_request"])
+            self.assertEqual(decision["decision"], "REVIEW_REQUIRED")
+            self.assertEqual(
+                decision["next_action"]["authorization_reason"],
+                "refresh_action_unavailable",
+            )
+            self.assertEqual(state["next_action"], "review_required")
+            self.assertEqual(helper.controller.resume_run(run_dir), state)
+            self.assertEqual(
+                {
+                    path.relative_to(evidence_root)
+                    for path in evidence_root.rglob("*")
+                },
+                evidence_entries_before,
+            )
+
+    def test_failed_candidate_ledger_selects_supported_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (
+                helper,
+                control,
+                run_dir,
+                project,
+                hypothesis,
+                request,
+            ) = self._controller_with_two_supported_directions(root)
+            real_module = helper.controller._load_diagnostic_decision_module()
+
+            def authorized_primary(*args, **kwargs):
+                decision = real_module.decide_next_step(*args, **kwargs)
+                primary = decision["primary_diagnosis"]
+                decision.update(
+                    {
+                        "decision": "PURSUE",
+                        "terminal_reason": "direction_supported",
+                        "next_action": {
+                            "action_id": "implement-candidate",
+                            "hypothesis_id": primary["hypothesis_id"],
+                            "mechanism": primary["mechanism"],
+                            "claim_layer": primary["claim_layer"],
+                        },
+                        "next_checkpoint": "after_candidate_screen",
+                    }
+                )
+                brief = decision["investment_brief"]
+                for field in (
+                    "decision",
+                    "terminal_reason",
+                    "next_action",
+                    "next_checkpoint",
+                ):
+                    brief[field] = copy.deepcopy(decision[field])
+                return decision
+
+            legacy = mock.Mock()
+            legacy.decide_next_step.side_effect = authorized_primary
+            with mock.patch.object(
+                helper.controller,
+                "_load_diagnostic_decision_module",
+                return_value=legacy,
+            ):
+                first = helper.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+            self.assertEqual(first["next_action"], "register_change")
+            change = helper._change("slow")
+            change["diagnosis_ids"] = ["h-framework-gap"]
+            helper.controller.register_change(control, run_dir, change)
+            (project / "configs" / "value.json").write_text(
+                '{"workers": 8}\n', encoding="utf-8"
+            )
+
+            candidate_decision = helper.controller.evaluate_change(run_dir)
+
+            self.assertEqual(candidate_decision["status"], "rejected")
+            after_failure = helper.controller.read_run_state(run_dir)
+            self.assertEqual(after_failure["next_action"], "propose_hypotheses")
+            context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            history = context["candidate_history"]
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["hypothesis_id"], "h-framework-gap")
+            self.assertEqual(history[0]["implementation_status"], "failed")
+            self.assertEqual(len(history[0]["identity_digest"]), 64)
+            self.assertTrue(
+                all(
+                    "hypothesis_id" not in item
+                    for item in context["evidence_results"]
+                )
+            )
+
+            second = helper.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            second_decision = json.loads(
+                (run_dir / "active_diagnosis" / "decision.json").read_text("utf-8")
+            )
+            self.assertEqual(second["next_action"], "review_required")
+            self.assertEqual(
+                second_decision["primary_diagnosis"]["hypothesis_id"],
+                "h-kernel-bound",
+            )
+            self.assertEqual(
+                second_decision["next_action"]["hypothesis_id"],
+                "h-kernel-bound",
+            )
 
 
 if __name__ == "__main__":

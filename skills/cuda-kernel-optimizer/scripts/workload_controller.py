@@ -2456,6 +2456,7 @@ def _build_active_diagnosis_context(
             "requires_unmodeled_hypothesis"
         ],
         "evidence_results": [],
+        "candidate_history": [],
         "closed_mechanism_keys": [],
         "closed_scope_records": [],
     }
@@ -2510,6 +2511,37 @@ def _load_active_diagnosis_context(
     result_summaries = context.get("evidence_results", [])
     if type(result_summaries) is not list:
         raise ValidationError("diagnosis context evidence_results is invalid")
+    candidate_history = context.get("candidate_history", [])
+    if type(candidate_history) is not list:
+        raise ValidationError("diagnosis context candidate_history is invalid")
+    for index, raw_record in enumerate(candidate_history):
+        record = _object(raw_record, f"candidate_history[{index}]")
+        fields = {
+            "hypothesis_id",
+            "action_id",
+            "implementation_status",
+            "identity_digest",
+            "elapsed_seconds",
+            "candidate_digest",
+            "decision_digest",
+            "failure_reason",
+        }
+        _closed(record, fields, f"candidate_history[{index}]")
+        _required(record, fields, f"candidate_history[{index}]")
+        _identifier(record["hypothesis_id"], f"candidate_history[{index}].hypothesis_id")
+        _identifier(record["action_id"], f"candidate_history[{index}].action_id")
+        if record["implementation_status"] != "failed":
+            raise ValidationError("candidate history records must describe failed candidates")
+        for field in ("identity_digest", "candidate_digest", "decision_digest"):
+            _sha256(record[field], f"candidate_history[{index}].{field}")
+        elapsed = record["elapsed_seconds"]
+        if (
+            type(elapsed) not in {int, float}
+            or not math.isfinite(float(elapsed))
+            or float(elapsed) < 0
+        ):
+            raise ValidationError("candidate history elapsed_seconds is invalid")
+        _identifier(record["failure_reason"], f"candidate_history[{index}].failure_reason")
     closed_mechanism_keys = context.get("closed_mechanism_keys", [])
     if type(closed_mechanism_keys) is not list:
         raise ValidationError("diagnosis context closed_mechanism_keys is invalid")
@@ -3395,16 +3427,27 @@ def _load_bound_diagnostic_artifacts(
 
 
 def _diagnostic_investment_inputs(
-    state: Mapping[str, Any], context: Mapping[str, Any]
+    run_root: Path, state: Mapping[str, Any], context: Mapping[str, Any]
 ) -> dict:
     now = time.time()
     started = state.get("optimization_started_at_epoch", state["started_at_epoch"])
     elapsed = max(0.0, now - float(started))
     remaining = max(0.0, float(state["deadline_epoch"]) - now)
+    contract = load_json_object(
+        run_root / "active_diagnosis" / "analysis_contract.json"
+    )
+    action_bounds = {
+        item["action_id"]: {
+            "p90_seconds": item["timeout_seconds"],
+            "basis": "controller_timeout",
+        }
+        for item in contract["actions"]
+    }
     return {
         "authorization": {"max_seconds": elapsed + remaining},
         "spend": {"elapsed_seconds": elapsed},
-        "candidate_history": copy.deepcopy(context.get("evidence_results", [])),
+        "candidate_history": copy.deepcopy(context.get("candidate_history", [])),
+        "action_bounds": action_bounds,
         "knowledge_adaptation": copy.deepcopy(
             context.get("knowledge_adaptation", context.get("knowledge_context"))
         ),
@@ -3624,7 +3667,7 @@ def _register_active_diagnosis_proposal_unlocked(
             hypothesis_result,
             selection,
         )
-        investment_inputs = _diagnostic_investment_inputs(state, context)
+        investment_inputs = _diagnostic_investment_inputs(run_root, state, context)
         decision = _load_diagnostic_decision_module().decide_next_step(
             performance_model,
             hypothesis_result,
@@ -4409,8 +4452,9 @@ def register_change(
     if state["control_digest"] != _canonical_digest(normalized):
         raise ValidationError("control manifest drifted before ChangeSet registration")
     _load_frozen_control(run_root, state)
+    diagnostic_decision = None
     if "analysis_contract" in normalized:
-        _load_bound_diagnostic_artifacts(
+        diagnostic_decision = _load_bound_diagnostic_artifacts(
             run_root, state, expected_decision="PURSUE"
         )
     change = validate_change_set(change_set, normalized)
@@ -4485,6 +4529,29 @@ def register_change(
             "change_scope": change["scope"],
         }
     )
+    if diagnostic_decision is not None:
+        next_diagnostic_action = diagnostic_decision.get("next_action")
+        if not isinstance(next_diagnostic_action, Mapping):
+            raise ValidationError("diagnostic decision lacks a bound candidate action")
+        hypothesis_id = _identifier(
+            next_diagnostic_action.get("hypothesis_id"),
+            "diagnostic candidate hypothesis_id",
+        )
+        bound_basis = diagnostic_decision.get("investment_brief", {}).get(
+            "bound_basis", {}
+        )
+        identity_digest = _sha256(
+            bound_basis.get("identity_digest"),
+            "diagnostic candidate identity_digest",
+        )
+        updated.update(
+            {
+                "candidate_hypothesis_id": hypothesis_id,
+                "candidate_identity_digest": identity_digest,
+                "candidate_digest": _canonical_digest(change["candidate"]),
+                "candidate_started_at_epoch": time.time(),
+            }
+        )
     committed = _write_state(run_root, updated)
     try:
         pending_path.unlink()
@@ -4573,6 +4640,106 @@ def _run_python_workload_once_bounded(
     return load_json_object(output_path)
 
 
+def _resume_active_diagnosis_after_candidate_rejection(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    *,
+    scope: str,
+    reason: str,
+    time_gate: Mapping[str, Any] | None,
+) -> None:
+    context, _epoch, _map, _evidence, _actions, _policy = (
+        _load_active_diagnosis_context(control, run_root, state)
+    )
+    hypothesis_id = _identifier(
+        state.get("candidate_hypothesis_id"), "candidate hypothesis_id"
+    )
+    identity_digest = _sha256(
+        state.get("candidate_identity_digest"), "candidate identity_digest"
+    )
+    candidate_digest = _sha256(
+        state.get("candidate_digest"), "candidate digest"
+    )
+    elapsed = (
+        float(time_gate["elapsed_seconds"])
+        if time_gate is not None
+        else max(0.0, time.time() - float(state["candidate_started_at_epoch"]))
+    )
+    record = {
+        "hypothesis_id": hypothesis_id,
+        "action_id": f"implement-{hypothesis_id}",
+        "implementation_status": "failed",
+        "identity_digest": identity_digest,
+        "elapsed_seconds": elapsed,
+        "candidate_digest": candidate_digest,
+        "decision_digest": _canonical_digest(decision),
+        "failure_reason": _identifier(reason, "candidate failure reason"),
+    }
+    refreshed = copy.deepcopy(context)
+    refreshed.setdefault("candidate_history", []).append(record)
+    _atomic_json(run_root / "diagnosis_context.json", refreshed)
+    context_digest = _canonical_digest(refreshed)
+    _append_active_diagnosis_event(
+        run_root,
+        "candidate",
+        {
+            "candidate_history_record": record,
+            "context_sha256": context_digest,
+        },
+    )
+
+    _base, _roots, snapshot_name = _scope_layout(control, scope)
+    for path in (
+        run_root / "snapshot" / snapshot_name,
+        run_root / "rounds" / "round-1",
+        run_root / "registration_pending.json",
+        run_root / "change_set.json",
+        run_root / "candidate_binding.json",
+        run_root / "candidate.diff",
+        run_root / "static_review.json",
+        run_root / "evaluation.json",
+        run_root / "time_gate.json",
+        run_root / "review.json",
+    ):
+        if path.exists() or path.is_symlink():
+            _remove_path(path)
+
+    updated = copy.deepcopy(state)
+    updated["completed_stages"] = [
+        item
+        for item in updated["completed_stages"]
+        if item not in {"change", "review", "evaluation", "decision"}
+    ]
+    for field in (
+        "before_identity_digest",
+        "change_set_digest",
+        "change_scope",
+        "candidate_hypothesis_id",
+        "candidate_identity_digest",
+        "candidate_digest",
+        "candidate_started_at_epoch",
+    ):
+        updated.pop(field, None)
+    updated.update(
+        {
+            "status": "active",
+            "stage": "active_diagnosis",
+            "next_action": "propose_hypotheses",
+            "updated_at_epoch": time.time(),
+            "decision_digest": _canonical_digest(decision),
+            "diagnosis_context_sha256": context_digest,
+            "active_diagnosis_round": int(
+                state.get("active_diagnosis_round", 1)
+            )
+            + 1,
+        }
+    )
+    updated.update(_active_ledger_binding(_verify_active_diagnosis_ledger(run_root)))
+    _write_state(run_root, updated)
+
+
 def _finish_rejected(
     run_root: Path,
     state: Mapping[str, Any],
@@ -4632,6 +4799,17 @@ def _finish_rejected(
             }
         )
     _atomic_json(run_root / "decision.json", decision)
+    if "analysis_contract" in control and state.get("candidate_hypothesis_id"):
+        _resume_active_diagnosis_after_candidate_rejection(
+            run_root,
+            state,
+            control,
+            decision,
+            scope=scope,
+            reason=reason,
+            time_gate=time_gate,
+        )
+        return decision
     updated = copy.deepcopy(state)
     for stage in ("review", "evaluation", "decision"):
         if stage not in updated["completed_stages"]:
