@@ -445,3 +445,66 @@ def execution_map_digest(
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def critical_path_accounting(value: Mapping[str, Any]) -> dict:
+    """Account for hot-path timing envelopes without counting overlap twice.
+
+    The execution-map validator permits a node's active duration to be smaller
+    than its first-to-last timing span.  In that case this function deliberately
+    reports an envelope upper bound instead of pretending the exact active
+    intervals are known.
+    """
+    if not isinstance(value, Mapping):
+        raise ValidationError("execution_map must be an object")
+    window = value.get("window")
+    nodes = value.get("nodes")
+    hot_path = value.get("hot_path")
+    if not isinstance(window, Mapping) or type(nodes) is not list or type(hot_path) is not list:
+        raise ValidationError("execution_map is missing validated hot-path timing")
+    start = _number(window.get("start_us"), "window.start_us")
+    end = _number(window.get("end_us"), "window.end_us")
+    if end <= start:
+        raise ValidationError("execution_map window must be positive")
+    by_id = {item.get("node_id"): item for item in nodes if isinstance(item, Mapping)}
+    intervals = []
+    exact = True
+    for node_id in hot_path:
+        node = by_id.get(node_id)
+        if node is None or node.get("timing_status") != "observed":
+            raise ValidationError("hot path requires observed node timing")
+        node_start = _number(node.get("first_start_us"), f"{node_id}.first_start_us")
+        node_end = _number(node.get("last_end_us"), f"{node_id}.last_end_us")
+        duration = _number(node.get("duration_us"), f"{node_id}.duration_us", positive=True)
+        if node_start < start or node_end > end or node_end <= node_start:
+            raise ValidationError("hot-path timing must stay inside the map window")
+        exact = exact and math.isclose(
+            duration, node_end - node_start, rel_tol=1e-9, abs_tol=1e-9
+        )
+        intervals.append((node_id, node_start, node_end))
+
+    boundaries = sorted({point for _, left, right in intervals for point in (left, right)})
+    covered = 0.0
+    overlap = 0.0
+    exclusive = {node_id: 0.0 for node_id in hot_path}
+    for left, right in zip(boundaries, boundaries[1:]):
+        active = [
+            node_id
+            for node_id, node_start, node_end in intervals
+            if node_start <= left and node_end >= right
+        ]
+        width = right - left
+        if not active or width <= 0:
+            continue
+        covered += width
+        if len(active) == 1:
+            exclusive[active[0]] += width
+        else:
+            overlap += width
+    window_duration = end - start
+    return {
+        "accounting_status": "exact_envelope" if exact else "envelope_upper_bound",
+        "covered_union_upper_bound_us": min(covered, window_duration),
+        "overlap_upper_bound_us": min(overlap, window_duration),
+        "exclusive_span_us": {key: exclusive[key] for key in sorted(exclusive)},
+    }
