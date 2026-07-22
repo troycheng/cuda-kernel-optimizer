@@ -248,14 +248,26 @@ def _validate_candidate(value: Mapping, contract: Mapping) -> dict:
     if value["cheapest_falsifier"] not in _CANDIDATE_STAGES:
         raise ValueError("cheapest_falsifier is invalid")
     costs = value["estimated_cost"]
-    if not isinstance(costs, Mapping) or set(costs) != set(_CANDIDATE_STAGES):
-        raise ValueError("estimated_cost must cover every candidate stage")
+    required_costs = set(_CANDIDATE_STAGES) - {"profiler"}
+    if (
+        not isinstance(costs, Mapping)
+        or not required_costs.issubset(costs)
+        or not set(costs).issubset(_CANDIDATE_STAGES)
+    ):
+        raise ValueError(
+            "estimated_cost must cover every mandatory candidate stage"
+        )
     clean_costs = {
         stage: _positive_number(costs[stage], f"estimated_cost.{stage}")
         for stage in _CANDIDATE_STAGES
+        if stage in costs
     }
     last_stage = _CLAIM_LAST_STAGE[claim]
-    applicable = _CANDIDATE_STAGES[: _CANDIDATE_STAGES.index(last_stage) + 1]
+    applicable = [
+        stage
+        for stage in _CANDIDATE_STAGES[: _CANDIDATE_STAGES.index(last_stage) + 1]
+        if stage in clean_costs
+    ]
     for earlier, later in zip(applicable, applicable[1:]):
         if clean_costs[later] < clean_costs[earlier]:
             raise ValueError(

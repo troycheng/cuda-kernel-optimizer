@@ -26,6 +26,7 @@ import statistics as statistics_module
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
 from numbers import Real
 from pathlib import Path
@@ -515,6 +516,7 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
 
     # Run every branch through the same fail-closed, low-to-high cost gate.
     results = []
+    exploration_started = time.monotonic()
     for branch in branch_dirs:
         idx = branch["index"]
         kernel = branch["kernel"]
@@ -637,14 +639,6 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
                 "upper_bound": upper_bound_us,
             }
 
-        def profiler():
-            artifact = {
-                "status": "not_applicable",
-                "reason": "formal_pairing_resolves_the_remaining_effect_uncertainty",
-            }
-            result["profiler"] = artifact
-            return artifact
-
         def formal_paired():
             try:
                 paired_result = paired_candidate(
@@ -690,7 +684,6 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
                     "static_review": 0.01,
                     "build_correctness": 1.0,
                     "short_paired": 2.0,
-                    "profiler": 2.0,
                     "formal_paired": formal_cost,
                     "service": formal_cost,
                 },
@@ -707,13 +700,16 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
                     "minimum useful kernel effect."
                 ),
             },
+            now=time.monotonic,
+            pre_gate_elapsed_seconds=max(
+                0.0, time.monotonic() - exploration_started
+            ),
         )
         gate_result = gate.run(
             {
                 "static_review": static_review,
                 "build_correctness": build_correctness,
                 "short_paired": short_paired,
-                "profiler": profiler,
                 "formal_paired": formal_paired,
             }
         )

@@ -370,13 +370,167 @@ class BranchExploreTests(unittest.TestCase):
                     "static_review",
                     "build_correctness",
                     "short_paired",
-                    "profiler",
                     "formal_paired",
                 ],
             )
-            self.assertEqual(
-                output["champion"]["profiler"]["status"], "not_applicable"
+            self.assertIsNone(output["champion"]["profiler"])
+
+    def test_branch_gates_share_one_cumulative_authorization_clock(self) -> None:
+        branch_explore = _load_branch_explore()
+
+        class FakeClock:
+            value = 0.0
+
+            def now(self):
+                return self.value
+
+            def advance(self, seconds):
+                self.value += seconds
+
+        clock = FakeClock()
+        real_gate = branch_explore.CandidateGate
+        gate_runs = 0
+
+        class ClockedGate(real_gate):
+            def __init__(self, contract, candidate, **kwargs):
+                kwargs["now"] = clock.now
+                super().__init__(contract, candidate, **kwargs)
+
+            def run(self, actions):
+                nonlocal gate_runs
+                result = super().run(actions)
+                gate_runs += 1
+                if gate_runs == 1:
+                    clock.advance(0.5)
+                return result
+
+        candidate_calls = []
+
+        def bench(*_args, **_kwargs):
+            clock.advance(1.0)
+            return _bench()
+
+        def paired(*_args, **kwargs):
+            candidate_id = kwargs["candidate_id"]
+            candidate_calls.append(candidate_id)
+            clock.advance(1.0)
+            short = str(candidate_id).endswith(":short")
+            return {
+                "statistics": _statistics(
+                    "inconclusive" if short else "confirmed_win", 3.0
+                ),
+                "baseline_median_ms": 1.0,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, payload = self._state(root, branches=2)
+            payload["input_hash"] = "a" * 64
+            payload["budget"].update(
+                {"max_pairs": 2, "max_seconds": 7.0, "soft_target_seconds": 7.0}
             )
+            state_path.write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch.object(
+                branch_explore, "CandidateGate", ClockedGate
+            ), mock.patch.object(
+                branch_explore,
+                "time",
+                mock.Mock(monotonic=clock.now),
+                create=True,
+            ), mock.patch.object(
+                branch_explore, "_bench_kernel", side_effect=bench
+            ), mock.patch.object(
+                branch_explore, "_paired_candidate", side_effect=paired
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+        second = output["branches"][1]["candidate_gate"]
+        self.assertEqual(candidate_calls, ["1:short", "1", "2:short"])
+        self.assertEqual(second["decision"], "REVIEW_REQUIRED")
+        self.assertEqual(second["next_stage"], "formal_paired")
+        self.assertEqual(second["elapsed_seconds"], 5.5)
+        self.assertEqual(second["projected_spend"]["p90_seconds"], 7.5)
+
+    def test_absent_profiler_cannot_consume_formal_authorization(self) -> None:
+        branch_explore = _load_branch_explore()
+
+        class FakeClock:
+            value = 0.0
+
+            def now(self):
+                return self.value
+
+            def advance(self, seconds):
+                self.value += seconds
+
+        clock = FakeClock()
+        real_gate = branch_explore.CandidateGate
+        declarations = []
+
+        class ClockedGate(real_gate):
+            def __init__(self, contract, candidate, **kwargs):
+                declarations.append(copy.deepcopy(candidate))
+                kwargs["now"] = clock.now
+                super().__init__(contract, candidate, **kwargs)
+
+            def run(self, actions):
+                if "profiler" in actions:
+                    profiler = actions["profiler"]
+
+                    def charged_profiler():
+                        clock.advance(2.0)
+                        return profiler()
+
+                    actions = {**actions, "profiler": charged_profiler}
+                return super().run(actions)
+
+        candidate_calls = []
+
+        def bench(*_args, **_kwargs):
+            clock.advance(1.0)
+            return _bench()
+
+        def paired(*_args, **kwargs):
+            candidate_id = kwargs["candidate_id"]
+            candidate_calls.append(candidate_id)
+            clock.advance(1.0)
+            short = str(candidate_id).endswith(":short")
+            return {
+                "statistics": _statistics(
+                    "inconclusive" if short else "confirmed_win", 3.0
+                ),
+                "baseline_median_ms": 1.0,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, payload = self._state(root, branches=1)
+            payload["input_hash"] = "b" * 64
+            payload["budget"].update(
+                {"max_pairs": 2, "max_seconds": 5.5, "soft_target_seconds": 5.5}
+            )
+            state_path.write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch.object(
+                branch_explore, "CandidateGate", ClockedGate
+            ), mock.patch.object(
+                branch_explore,
+                "time",
+                mock.Mock(monotonic=clock.now),
+                create=True,
+            ), mock.patch.object(
+                branch_explore, "_bench_kernel", side_effect=bench
+            ), mock.patch.object(
+                branch_explore, "_paired_candidate", side_effect=paired
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+        gate = output["branches"][0]["candidate_gate"]
+        self.assertNotIn("profiler", declarations[0]["estimated_cost"])
+        self.assertEqual(candidate_calls, ["1:short", "1"])
+        self.assertEqual(gate["decision"], "PROMOTE")
+        self.assertNotIn("profiler", gate["completed_stages"])
 
     def test_candidate_exception_is_isolated_and_later_winner_survives(self) -> None:
         branch_explore = _load_branch_explore()
