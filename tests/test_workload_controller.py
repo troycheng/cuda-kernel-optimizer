@@ -202,6 +202,11 @@ def _enable_active_diagnosis(control: dict, root: Path) -> dict:
                         ).hexdigest(),
                         "argv": [sys.executable, str(evidence_adapter)],
                         "timeout_seconds": 5,
+                        "cost_bound": {
+                            "p50_seconds": 1.0,
+                            "p90_seconds": 2.0,
+                            "basis": "user_authorized_upper_bound",
+                        },
                     }
                 ],
                 "selection_policy": {
@@ -431,6 +436,7 @@ class WorkloadControllerContractTests(unittest.TestCase):
             control["reviewers"] = [
                 {
                     "provider": "kimi",
+                    "underlying_model": "moonshot-v1",
                     "argv": ["kimi-review", "--json"],
                     "timeout_seconds": 60,
                 },
@@ -448,6 +454,10 @@ class WorkloadControllerContractTests(unittest.TestCase):
                 [item["provider"] for item in normalized["reviewers"]],
                 ["kimi", "deepseek"],
             )
+            self.assertEqual(
+                normalized["reviewers"][0]["underlying_model"], "moonshot-v1"
+            )
+            self.assertNotIn("underlying_model", normalized["reviewers"][1])
             conflict = copy.deepcopy(control)
             conflict["reviewer"] = {
                 "argv": ["legacy-reviewer"],
@@ -464,6 +474,38 @@ class WorkloadControllerContractTests(unittest.TestCase):
                 self.controller.ValidationError, "64-character"
             ):
                 self.controller.validate_control_manifest(too_long)
+
+            invalid_model = copy.deepcopy(control)
+            invalid_model["reviewers"][0]["underlying_model"] = "unsafe model name"
+            with self.assertRaisesRegex(
+                self.controller.ValidationError, "underlying_model"
+            ):
+                self.controller.validate_control_manifest(invalid_model)
+
+            distinct_models = copy.deepcopy(control)
+            distinct_models["reviewers"] = [
+                {
+                    "provider": "github-copilot",
+                    "underlying_model": model,
+                    "argv": ["copilot-review", model],
+                    "timeout_seconds": 60,
+                }
+                for model in ("gpt-5", "claude-sonnet")
+            ]
+            normalized_models = self.controller.validate_control_manifest(
+                distinct_models
+            )
+            self.assertEqual(
+                [item["underlying_model"] for item in normalized_models["reviewers"]],
+                ["gpt-5", "claude-sonnet"],
+            )
+
+            duplicate_model = copy.deepcopy(distinct_models)
+            duplicate_model["reviewers"][1]["underlying_model"] = "gpt-5"
+            with self.assertRaisesRegex(
+                self.controller.ValidationError, "provider.*model|duplicate"
+            ):
+                self.controller.validate_control_manifest(duplicate_model)
 
             too_many = copy.deepcopy(control)
             too_many["reviewers"] = [
@@ -1580,6 +1622,37 @@ class WorkloadRoundTests(unittest.TestCase):
             )
             self.assertTrue((run_dir / "active_diagnosis" / "ledger" / "000001-context.json").is_file())
 
+    def test_diagnosis_action_timeout_is_only_a_kill_deadline_not_p90(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            self.controller.start_run(control, run_dir)
+            state = self.controller.read_run_state(run_dir)
+            context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            first = self.controller._diagnostic_investment_inputs(
+                run_dir, state, context
+            )
+            frozen_path = run_dir / "active_diagnosis" / "analysis_contract.json"
+            frozen = json.loads(frozen_path.read_text("utf-8"))
+            frozen["actions"][0]["timeout_seconds"] = 3600.0
+            frozen_path.write_text(json.dumps(frozen), encoding="utf-8")
+            second = self.controller._diagnostic_investment_inputs(
+                run_dir, state, context
+            )
+
+            action_id = "pytorch-operator-trace"
+            self.assertEqual(first["action_bounds"][action_id]["p90_seconds"], 2.0)
+            self.assertEqual(second["action_bounds"][action_id]["p90_seconds"], 2.0)
+            self.assertEqual(
+                first["action_bounds"][action_id]["basis"],
+                "user_authorized_upper_bound",
+            )
+            self.assertNotIn("controller_timeout", json.dumps(first))
+
     def test_active_diagnosis_rejects_adapter_digest_mismatch_before_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -1801,10 +1874,27 @@ class WorkloadRoundTests(unittest.TestCase):
             control["reviewers"] = [
                 {
                     "provider": provider,
+                    "underlying_model": (
+                        "gemini-2.5-pro"
+                        if provider == "google-ai-mode"
+                        else "gpt-5"
+                        if provider == "github-copilot"
+                        else "glm-4.5"
+                        if provider in {"glm", "zhipu"}
+                        else "unknown"
+                    ),
                     "argv": [sys.executable, str(reviewer)],
                     "timeout_seconds": 5,
                 }
-                for provider in ("gemini", "deepseek", "kimi", "glm", "google-ai-mode")
+                for provider in (
+                    "gemini",
+                    "deepseek",
+                    "kimi",
+                    "zhipu",
+                    "glm",
+                    "github-copilot",
+                    "google-ai-mode",
+                )
             ]
             self.controller.start_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
@@ -1826,14 +1916,20 @@ class WorkloadRoundTests(unittest.TestCase):
             )
             challenge = decision["external_challenge"]
             self.assertEqual(
-                challenge["providers_requested"], ["google-ai-mode", "glm"]
+                challenge["providers_requested"],
+                ["google-ai-mode", "github-copilot"],
             )
             self.assertEqual(
-                challenge["providers_completed"], ["google-ai-mode", "glm"]
+                challenge["providers_completed"],
+                ["google-ai-mode", "github-copilot"],
             )
             self.assertTrue(challenge["advisory_only"])
             self.assertEqual(decision["decision"], "MEASURE")
             self.assertEqual(len(review["reviews"]), 2)
+            self.assertEqual(
+                [item["underlying_model"] for item in review["reviews"]],
+                ["gemini-2.5-pro", "gpt-5"],
+            )
             self.assertEqual(
                 state["external_direction_review_sha256"],
                 self.controller._canonical_digest(review),
@@ -3093,6 +3189,11 @@ class WorkloadRoundTests(unittest.TestCase):
                     "adapter_sha256": hashlib.sha256(experiment.read_bytes()).hexdigest(),
                     "argv": [sys.executable, str(experiment)],
                     "timeout_seconds": 5,
+                    "cost_bound": {
+                        "p50_seconds": 1.0,
+                        "p90_seconds": 2.0,
+                        "basis": "user_authorized_upper_bound",
+                    },
                 }
             )
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
@@ -4097,7 +4198,15 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(static_review.call_count, 1)
 
     def test_review_required_replay_revalidates_all_bound_artifacts_and_snapshot(self) -> None:
-        for target in ("candidate_diff", "time_gate", "evidence", "workspace"):
+        for target in (
+            "candidate_diff",
+            "time_gate",
+            "evidence",
+            "workspace",
+            "project_surface",
+            "environment",
+            "workload_source",
+        ):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp).resolve()
                 control, run_dir, project = self._workspace(root)
@@ -4138,8 +4247,24 @@ class WorkloadRoundTests(unittest.TestCase):
                     payload = json.loads(path.read_text("utf-8"))
                     payload["tampered"] = True
                     path.write_text(json.dumps(payload), encoding="utf-8")
-                else:
+                elif target == "workspace":
                     config.write_text('{"workers": 77}\n', encoding="utf-8")
+                elif target == "project_surface":
+                    (project / "outside-mutation-surface.txt").write_text(
+                        "drift\n", encoding="utf-8"
+                    )
+                elif target == "environment":
+                    environment = Path(control["mutation"]["environment_root"])
+                    environment.mkdir(parents=True, exist_ok=True)
+                    (environment / "external.txt").write_text(
+                        "drift\n", encoding="utf-8"
+                    )
+                else:
+                    workload_source = project / "adapter.py"
+                    workload_source.write_text(
+                        workload_source.read_text("utf-8") + "\n# drift\n",
+                        encoding="utf-8",
+                    )
 
                 with self.assertRaisesRegex(ValueError, "review-required"):
                     self.controller.evaluate_change(run_dir)

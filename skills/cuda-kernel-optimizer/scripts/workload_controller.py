@@ -81,6 +81,7 @@ _HYPOTHESIS_SPACE_MODULE = None
 _EVIDENCE_SELECTOR_MODULE = None
 _PERFORMANCE_MODEL_MODULE = None
 _DIAGNOSTIC_DECISION_MODULE = None
+_KNOWLEDGE_ADAPTER_MODULE = None
 _ACTIVE_DIAGNOSIS_CONTRACT_SCHEMA = "cuda-optimizer/active-diagnosis-contract-v1"
 _GLOBAL_SCAN_DRAFT_SCHEMA = "cuda-optimizer/global-scan-draft-v1"
 _BUDGET_RUNTIME = {
@@ -331,37 +332,80 @@ def _validate_active_diagnosis_contract(value: Mapping[str, Any]) -> dict:
             "adapter_sha256",
             "argv",
             "timeout_seconds",
+            "cost_bound",
         }
         _closed(action, action_fields, f"analysis_contract.actions[{index}]")
-        _required(action, action_fields, f"analysis_contract.actions[{index}]")
+        _required(
+            action,
+            action_fields - {"cost_bound"},
+            f"analysis_contract.actions[{index}]",
+        )
         action_id = _identifier(
             action["action_id"], f"analysis_contract.actions[{index}].action_id"
         )
         if action_id in action_ids:
             raise ValidationError("analysis_contract action ids must be unique")
         action_ids.add(action_id)
-        actions.append(
-            {
-                "action_id": action_id,
-                "adapter_path": str(
-                    _absolute(
-                        action["adapter_path"],
-                        f"analysis_contract.actions[{index}].adapter_path",
-                    )
-                ),
-                "adapter_sha256": _sha256(
-                    action["adapter_sha256"],
-                    f"analysis_contract.actions[{index}].adapter_sha256",
-                ),
-                "argv": _argv(
-                    action["argv"], f"analysis_contract.actions[{index}]"
-                ),
-                "timeout_seconds": _timeout(
-                    action["timeout_seconds"],
-                    f"analysis_contract.actions[{index}].timeout_seconds",
-                ),
+        normalized_action = {
+            "action_id": action_id,
+            "adapter_path": str(
+                _absolute(
+                    action["adapter_path"],
+                    f"analysis_contract.actions[{index}].adapter_path",
+                )
+            ),
+            "adapter_sha256": _sha256(
+                action["adapter_sha256"],
+                f"analysis_contract.actions[{index}].adapter_sha256",
+            ),
+            "argv": _argv(
+                action["argv"], f"analysis_contract.actions[{index}]"
+            ),
+            "timeout_seconds": _timeout(
+                action["timeout_seconds"],
+                f"analysis_contract.actions[{index}].timeout_seconds",
+            ),
+        }
+        if "cost_bound" in action:
+            bound = _object(
+                action["cost_bound"],
+                f"analysis_contract.actions[{index}].cost_bound",
+            )
+            bound_fields = {"p50_seconds", "p90_seconds", "basis"}
+            _closed(
+                bound,
+                bound_fields,
+                f"analysis_contract.actions[{index}].cost_bound",
+            )
+            _required(
+                bound,
+                bound_fields,
+                f"analysis_contract.actions[{index}].cost_bound",
+            )
+            p50 = bound["p50_seconds"]
+            p90 = bound["p90_seconds"]
+            if (
+                type(p50) not in {int, float}
+                or type(p90) not in {int, float}
+                or not math.isfinite(float(p50))
+                or not math.isfinite(float(p90))
+                or float(p50) <= 0
+                or float(p90) <= 0
+                or float(p50) > float(p90)
+            ):
+                raise ValidationError(
+                    "analysis action cost_bound requires positive P50 <= P90"
+                )
+            if bound["basis"] != "user_authorized_upper_bound":
+                raise ValidationError(
+                    "analysis action cost_bound basis must be user_authorized_upper_bound"
+                )
+            normalized_action["cost_bound"] = {
+                "p50_seconds": float(p50),
+                "p90_seconds": float(p90),
+                "basis": bound["basis"],
             }
-        )
+        actions.append(normalized_action)
     actions.sort(key=lambda item: item["action_id"])
     try:
         policy = _load_evidence_selector_module()._validate_policy(
@@ -549,10 +593,16 @@ def validate_control_manifest(value: Mapping[str, Any], source_path=None) -> dic
             raise ValidationError(
                 f"reviewers must contain between 1 and {_MAX_REVIEWERS} entries"
             )
-        provider_ids = set()
+        reviewer_keys = set()
         for index, item in enumerate(reviewers):
             reviewer = _object(item, f"reviewers[{index}]")
-            fields = {"provider", "argv", "timeout_seconds", "include_diff"}
+            fields = {
+                "provider",
+                "underlying_model",
+                "argv",
+                "timeout_seconds",
+                "include_diff",
+            }
             _closed(reviewer, fields, f"reviewers[{index}]")
             _required(
                 reviewer,
@@ -567,9 +617,18 @@ def validate_control_manifest(value: Mapping[str, Any], source_path=None) -> dic
                 raise ValidationError(
                     f"reviewers[{index}].provider must be a safe 64-character identifier"
                 )
-            if provider in provider_ids:
-                raise ValidationError("reviewer providers must be unique")
-            provider_ids.add(provider)
+            model = reviewer.get("underlying_model", "unknown")
+            if (
+                type(model) is not str
+                or _REVIEWER_PROVIDER.fullmatch(model) is None
+            ):
+                raise ValidationError(
+                    f"reviewers[{index}].underlying_model must be a known-safe identifier, auto, or unknown"
+                )
+            reviewer_key = (provider.lower(), model.lower())
+            if reviewer_key in reviewer_keys:
+                raise ValidationError("reviewer provider/model pairs must not be duplicate")
+            reviewer_keys.add(reviewer_key)
             _argv(reviewer["argv"], f"reviewers[{index}]")
             _timeout(
                 reviewer["timeout_seconds"],
@@ -869,6 +928,15 @@ def _load_diagnostic_knowledge_module():
     return _load_sibling_module(
         "diagnostic_knowledge.py", "cuda_optimizer_diagnostic_knowledge_controller"
     )
+
+
+def _load_knowledge_adapter_module():
+    global _KNOWLEDGE_ADAPTER_MODULE
+    if _KNOWLEDGE_ADAPTER_MODULE is None:
+        _KNOWLEDGE_ADAPTER_MODULE = _load_sibling_module(
+            "knowledge_adapter.py", "cuda_optimizer_knowledge_adapter_controller"
+        )
+    return _KNOWLEDGE_ADAPTER_MODULE
 
 
 def _canonical_digest(value: Any) -> str:
@@ -1402,6 +1470,7 @@ def review_change(
         configs = [
             {
                 "provider": item["provider"],
+                "underlying_model": item.get("underlying_model", "unknown"),
                 "argv": item["argv"],
                 "timeout_seconds": min(
                     float(item["timeout_seconds"]), total_timeout
@@ -2456,6 +2525,7 @@ def _build_active_diagnosis_context(
             "requires_unmodeled_hypothesis"
         ],
         "evidence_results": [],
+        "candidate_proposals": [],
         "candidate_history": [],
         "closed_mechanism_keys": [],
         "closed_scope_records": [],
@@ -2542,6 +2612,111 @@ def _load_active_diagnosis_context(
         ):
             raise ValidationError("candidate history elapsed_seconds is invalid")
         _identifier(record["failure_reason"], f"candidate_history[{index}].failure_reason")
+    candidate_proposals = context.get("candidate_proposals", [])
+    if type(candidate_proposals) is not list:
+        raise ValidationError("diagnosis context candidate_proposals is invalid")
+    seen_proposal_ids = set()
+    proposal_fields = {
+        "proposal_id",
+        "proposal_digest",
+        "hypothesis_id",
+        "workload_source_hash",
+        "workload_contract_sha256",
+        "project_identity_digest",
+        "project_surface_identity_sha256",
+        "environment_identity_digest",
+        "epoch_id",
+        "epoch_sha256",
+        "execution_map_sha256",
+        "identity_digest",
+        "mutation_scope",
+        "risk",
+        "mechanism_digest",
+        "candidate_digest",
+        "change_set_digest",
+        "estimated_cost",
+        "fresh_until_epoch",
+        "sealed_at_epoch",
+    }
+    for index, raw_proposal in enumerate(candidate_proposals):
+        proposal = _object(raw_proposal, f"candidate_proposals[{index}]")
+        _closed(proposal, proposal_fields, f"candidate_proposals[{index}]")
+        _required(proposal, proposal_fields, f"candidate_proposals[{index}]")
+        proposal_id = _identifier(
+            proposal["proposal_id"], f"candidate_proposals[{index}].proposal_id"
+        )
+        if proposal_id in seen_proposal_ids:
+            raise ValidationError("candidate proposal ids must be unique")
+        seen_proposal_ids.add(proposal_id)
+        for field in (
+            "proposal_digest",
+            "workload_source_hash",
+            "workload_contract_sha256",
+            "project_identity_digest",
+            "project_surface_identity_sha256",
+            "environment_identity_digest",
+            "epoch_sha256",
+            "execution_map_sha256",
+            "identity_digest",
+            "mechanism_digest",
+            "candidate_digest",
+            "change_set_digest",
+        ):
+            _sha256(proposal[field], f"candidate_proposals[{index}].{field}")
+        _identifier(
+            proposal["hypothesis_id"],
+            f"candidate_proposals[{index}].hypothesis_id",
+        )
+        if proposal["epoch_id"] != context["epoch_id"]:
+            raise ValidationError("candidate proposal analysis epoch drifted")
+        expected_bindings = {
+            "workload_source_hash": state["workload_source_hash"],
+            "workload_contract_sha256": epoch["identities"]["workload_contract_sha256"],
+            "project_identity_digest": state["baseline_identity_digest"],
+            "project_surface_identity_sha256": context["project_surface_identity_sha256"],
+            "environment_identity_digest": state["baseline_environment_identity_digest"],
+            "epoch_sha256": context["epoch_sha256"],
+            "execution_map_sha256": context["execution_map_sha256"],
+            "identity_digest": _canonical_digest(epoch["identities"]),
+        }
+        if any(proposal[field] != expected for field, expected in expected_bindings.items()):
+            raise ValidationError("candidate proposal identity binding drifted")
+        if proposal["mutation_scope"] not in {"project", "isolated_environment"}:
+            raise ValidationError("candidate proposal mutation_scope is invalid")
+        if proposal["risk"] not in {"none", "low", "medium", "high"}:
+            raise ValidationError("candidate proposal risk is invalid")
+        cost = _object(
+            proposal["estimated_cost"],
+            f"candidate_proposals[{index}].estimated_cost",
+        )
+        cost_fields = {"p50_seconds", "p90_seconds", "basis"}
+        _closed(cost, cost_fields, f"candidate_proposals[{index}].estimated_cost")
+        _required(cost, cost_fields, f"candidate_proposals[{index}].estimated_cost")
+        p50 = cost["p50_seconds"]
+        p90 = cost["p90_seconds"]
+        if (
+            type(p50) not in {int, float}
+            or type(p90) not in {int, float}
+            or not math.isfinite(float(p50))
+            or not math.isfinite(float(p90))
+            or float(p50) <= 0
+            or float(p90) <= 0
+            or float(p50) > float(p90)
+        ):
+            raise ValidationError("candidate proposal cost must have positive P50 <= P90")
+        if cost["basis"] not in {
+            "identity_matched_candidate_history",
+            "user_authorized_upper_bound",
+        }:
+            raise ValidationError("candidate proposal cost basis is unsupported")
+        for field in ("fresh_until_epoch", "sealed_at_epoch"):
+            value = proposal[field]
+            if type(value) not in {int, float} or not math.isfinite(float(value)):
+                raise ValidationError(f"candidate proposal {field} is invalid")
+        unsigned = copy.deepcopy(proposal)
+        digest = unsigned.pop("proposal_digest")
+        if _canonical_digest(unsigned) != digest:
+            raise ValidationError("candidate proposal digest does not match content")
     closed_mechanism_keys = context.get("closed_mechanism_keys", [])
     if type(closed_mechanism_keys) is not list:
         raise ValidationError("diagnosis context closed_mechanism_keys is invalid")
@@ -3195,17 +3370,394 @@ def _start_run_unlocked(
     return state
 
 
+def _adapt_controller_knowledge(
+    knowledge_inputs: Mapping[str, Any] | None,
+    *,
+    contract: Mapping[str, Any],
+    execution_map: Mapping[str, Any],
+    action_catalog: Mapping[str, Any],
+    hypothesis_set: Mapping[str, Any],
+    request_set: Mapping[str, Any],
+) -> tuple[dict, dict, dict]:
+    """Normalize raw knowledge and create at most one evidence-only shadow."""
+    if knowledge_inputs is None:
+        raw_inputs = {}
+    else:
+        raw_inputs = _object(knowledge_inputs, "knowledge_inputs")
+        _closed(raw_inputs, {"bundled", "searched", "external"}, "knowledge_inputs")
+    by_action = {
+        item["action_id"]: item
+        for item in action_catalog.get("actions", [])
+        if item.get("control_scope") == "read_only"
+    }
+    adapter_context = {
+        "architecture": contract["source"]["adapter_id"],
+        "software_version": contract["source"]["adapter_version"],
+        "execution_node_ids": sorted(
+            item["node_id"] for item in execution_map.get("nodes", [])
+        ),
+        "uncovered_interval_ids": [],
+        "available_evidence_action_ids": sorted(by_action),
+        "authorized_risk": contract["selection_policy"]["max_risk"],
+        "authorized_scope": "read_only",
+    }
+    if not adapter_context["available_evidence_action_ids"]:
+        adaptation = {
+            "knowledge_support": "unavailable",
+            "candidates": [],
+            "rejections": [
+                {"origin": "controller", "reason": "no_local_read_only_action"}
+            ],
+        }
+    else:
+        try:
+            adaptation = _load_knowledge_adapter_module().recommend(
+                adapter_context,
+                bundled=raw_inputs.get("bundled", ()),
+                searched=raw_inputs.get("searched", ()),
+                external=raw_inputs.get("external", ()),
+                limit=3,
+            )
+        except ValueError as error:
+            adaptation = {
+                "knowledge_support": "unavailable",
+                "candidates": [],
+                "rejections": [
+                    {
+                        "origin": "controller",
+                        "reason": f"adapter_unavailable:{type(error).__name__}",
+                    }
+                ],
+            }
+    valid_candidates = []
+    rejections = copy.deepcopy(adaptation.get("rejections", []))
+    for candidate in adaptation.get("candidates", []):
+        action = candidate.get("evidence_action")
+        local = by_action.get(action.get("action_id")) if isinstance(action, Mapping) else None
+        if (
+            not isinstance(local, Mapping)
+            or action.get("evidence_kind") != local.get("evidence_kind")
+            or action.get("risk") != local.get("risk")
+            or action.get("control_scope") != local.get("control_scope")
+            or sorted(action.get("outcomes", [])) != ["falsified", "inconclusive"]
+        ):
+            rejections.append(
+                {
+                    "origin": candidate.get("origin", "unknown"),
+                    "reason": "controller_action_or_outcome_mismatch",
+                }
+            )
+            continue
+        valid_candidates.append(copy.deepcopy(candidate))
+    adaptation = {
+        "knowledge_support": "available" if valid_candidates else "unavailable",
+        "candidates": valid_candidates,
+        "rejections": rejections,
+    }
+    augmented_hypotheses = _json_copy(
+        hypothesis_set, "hypothesis_set", reject_sensitive=True
+    )
+    augmented_requests = _json_copy(request_set, "request_set", reject_sensitive=True)
+    active_count = sum(
+        item.get("disposition") == "active"
+        for item in augmented_hypotheses.get("hypotheses", [])
+    )
+    candidate = valid_candidates[0] if valid_candidates and active_count < 3 else None
+    if candidate is not None:
+        shadow_id = f"knowledge-{_canonical_digest(candidate)[:16]}"
+        nodes = {
+            item["node_id"]: item for item in execution_map.get("nodes", [])
+        }
+        layers = {
+            nodes[node_id]["layer"]
+            for node_id in candidate["scope_node_ids"]
+            if node_id in nodes
+        }
+        claim_layer = "kernel" if layers == {"gpu"} else "runtime"
+        action = candidate["evidence_action"]
+        augmented_hypotheses["hypotheses"].append(
+            {
+                "hypothesis_id": shadow_id,
+                "kind": "mechanism",
+                "scope_node_ids": copy.deepcopy(candidate["scope_node_ids"]),
+                "statement": candidate["statement"],
+                "mechanism": candidate["mechanism_id"],
+                "claim_layer": claim_layer,
+                "disposition": "active",
+                "confidence": "inconclusive",
+                "support_evidence_ids": [],
+                "oppose_evidence_ids": [],
+                "missing_evidence_kinds": [action["evidence_kind"]],
+                "falsification_question": candidate["falsification_question"],
+            }
+        )
+        augmented_requests.setdefault("requests", []).append(
+            {
+                "request_id": f"request-{shadow_id}",
+                "action_id": action["action_id"],
+                "question": candidate["falsification_question"],
+                "target_hypothesis_ids": [shadow_id],
+                "exclusive_pairs": [],
+                "outcomes": [
+                    {
+                        "outcome_id": "falsified",
+                        "supports": [],
+                        "opposes": [shadow_id],
+                    },
+                    {
+                        "outcome_id": "inconclusive",
+                        "supports": [],
+                        "opposes": [],
+                    },
+                ],
+            }
+        )
+    return augmented_hypotheses, augmented_requests, adaptation
+
+
 def register_active_diagnosis_proposal(
     control: Mapping[str, Any],
     run_dir: os.PathLike[str] | str,
     hypothesis_set: Mapping[str, Any],
     request_set: Mapping[str, Any],
+    *,
+    knowledge_inputs: Mapping[str, Any] | None = None,
 ) -> dict:
     run_root = Path(run_dir).expanduser().resolve(strict=False)
     with _run_lock(run_root):
         return _register_active_diagnosis_proposal_unlocked(
-            control, run_root, hypothesis_set, request_set
+            control,
+            run_root,
+            hypothesis_set,
+            request_set,
+            knowledge_inputs=knowledge_inputs,
         )
+
+
+def seal_active_diagnosis_candidate_proposal(
+    control: Mapping[str, Any],
+    run_dir: os.PathLike[str] | str,
+    proposal: Mapping[str, Any],
+) -> dict:
+    """Seal one user-authorized implementation bound and re-evaluate locally."""
+    run_root = Path(run_dir).expanduser().resolve(strict=False)
+    with _run_lock(run_root):
+        normalized = validate_control_manifest(control)
+        if "analysis_contract" not in normalized:
+            raise ValidationError("control does not enable active diagnosis")
+        state = read_run_state(run_root)
+        if state["control_digest"] != _canonical_digest(normalized):
+            raise ValidationError("control manifest drifted before candidate proposal")
+        _load_frozen_control(run_root, state)
+        if state["next_action"] != "review_required":
+            raise ValidationError("run is not ready to seal a candidate proposal")
+        _check_deadline(state)
+        prior_decision = _load_bound_diagnostic_artifacts(
+            run_root, state, expected_decision="REVIEW_REQUIRED"
+        )
+        if prior_decision.get("terminal_reason") != "cost_unavailable":
+            raise ValidationError("diagnostic review is not waiting for candidate cost")
+        next_action = prior_decision.get("next_action")
+        if not isinstance(next_action, Mapping):
+            raise ValidationError("diagnostic review lacks a candidate next step")
+        authorized_hypothesis_id = _identifier(
+            next_action.get("hypothesis_id"), "authorized candidate hypothesis_id"
+        )
+        (
+            context,
+            epoch,
+            _execution_map,
+            _evidence_catalog,
+            _action_catalog,
+            selection_policy,
+        ) = _load_active_diagnosis_context(normalized, run_root, state)
+        raw = _object(proposal, "candidate_proposal")
+        fields = {
+            "proposal_id",
+            "hypothesis_id",
+            "mutation_scope",
+            "risk",
+            "candidate_digest",
+            "change_set_digest",
+            "estimated_cost",
+            "fresh_until_epoch",
+        }
+        _closed(raw, fields, "candidate_proposal")
+        _required(raw, fields, "candidate_proposal")
+        proposal_id = _identifier(raw["proposal_id"], "candidate_proposal.proposal_id")
+        hypothesis_id = _identifier(
+            raw["hypothesis_id"], "candidate_proposal.hypothesis_id"
+        )
+        if hypothesis_id != authorized_hypothesis_id:
+            raise ValidationError("candidate proposal does not match authorized hypothesis")
+        if any(
+            item.get("proposal_id") == proposal_id
+            for item in context.get("candidate_proposals", [])
+        ):
+            raise ValidationError("candidate proposal id is already sealed")
+        mutation_scope = raw["mutation_scope"]
+        if mutation_scope not in {"project", "isolated_environment"}:
+            raise ValidationError("candidate proposal mutation_scope is invalid")
+        risk = raw["risk"]
+        if risk not in {"none", "low", "medium", "high"}:
+            raise ValidationError("candidate proposal risk is invalid")
+        risk_levels = {"none": 0, "low": 1, "medium": 2, "high": 3}
+        if risk_levels[risk] > risk_levels[selection_policy["max_risk"]]:
+            raise ValidationError("candidate proposal risk exceeds local authorization")
+        candidate_digest = _sha256(
+            raw["candidate_digest"], "candidate_proposal.candidate_digest"
+        )
+        change_set_digest = _sha256(
+            raw["change_set_digest"], "candidate_proposal.change_set_digest"
+        )
+        cost = _object(raw["estimated_cost"], "candidate_proposal.estimated_cost")
+        cost_fields = {"p50_seconds", "p90_seconds", "basis"}
+        _closed(cost, cost_fields, "candidate_proposal.estimated_cost")
+        _required(cost, cost_fields, "candidate_proposal.estimated_cost")
+        p50 = cost["p50_seconds"]
+        p90 = cost["p90_seconds"]
+        if (
+            type(p50) not in {int, float}
+            or type(p90) not in {int, float}
+            or not math.isfinite(float(p50))
+            or not math.isfinite(float(p90))
+            or float(p50) <= 0
+            or float(p90) <= 0
+            or float(p50) > float(p90)
+        ):
+            raise ValidationError("candidate proposal requires positive P50 <= P90")
+        if cost["basis"] != "user_authorized_upper_bound":
+            raise ValidationError(
+                "candidate proposal basis must be user_authorized_upper_bound"
+            )
+        fresh_until = raw["fresh_until_epoch"]
+        if (
+            type(fresh_until) not in {int, float}
+            or not math.isfinite(float(fresh_until))
+            or float(fresh_until) <= time.time()
+        ):
+            raise ValidationError("candidate proposal freshness has expired")
+
+        active_root = run_root / "active_diagnosis"
+        hypothesis_result = load_json_object(active_root / "hypothesis_result.json")
+        hypotheses = hypothesis_result.get("hypothesis_set", {}).get("hypotheses", [])
+        hypothesis = next(
+            (
+                item
+                for item in hypotheses
+                if item.get("hypothesis_id") == hypothesis_id
+                and item.get("disposition") == "active"
+            ),
+            None,
+        )
+        if not isinstance(hypothesis, Mapping):
+            raise ValidationError("candidate proposal hypothesis is not active")
+        performance_model = load_json_object(active_root / "performance_model.json")
+        sealed_at = time.time()
+        sealed = {
+            "proposal_id": proposal_id,
+            "hypothesis_id": hypothesis_id,
+            "workload_source_hash": state["workload_source_hash"],
+            "workload_contract_sha256": epoch["identities"]["workload_contract_sha256"],
+            "project_identity_digest": state["baseline_identity_digest"],
+            "project_surface_identity_sha256": context["project_surface_identity_sha256"],
+            "environment_identity_digest": state["baseline_environment_identity_digest"],
+            "epoch_id": context["epoch_id"],
+            "epoch_sha256": context["epoch_sha256"],
+            "execution_map_sha256": context["execution_map_sha256"],
+            "identity_digest": _canonical_digest(performance_model["identities"]),
+            "mutation_scope": mutation_scope,
+            "risk": risk,
+            "mechanism_digest": _canonical_digest(
+                {
+                    "hypothesis_id": hypothesis_id,
+                    "mechanism": hypothesis["mechanism"],
+                    "claim_layer": hypothesis["claim_layer"],
+                    "scope_node_ids": hypothesis["scope_node_ids"],
+                }
+            ),
+            "candidate_digest": candidate_digest,
+            "change_set_digest": change_set_digest,
+            "estimated_cost": {
+                "p50_seconds": float(p50),
+                "p90_seconds": float(p90),
+                "basis": cost["basis"],
+            },
+            "fresh_until_epoch": float(fresh_until),
+            "sealed_at_epoch": sealed_at,
+        }
+        sealed["proposal_digest"] = _canonical_digest(sealed)
+        refreshed = copy.deepcopy(context)
+        refreshed.setdefault("candidate_proposals", []).append(sealed)
+        proposal_path = active_root / "candidate_proposals" / f"{proposal_id}.json"
+
+        selection = load_json_object(active_root / "evidence_selection.json")
+        external_review = None
+        external_path = active_root / "direction_review" / "review.json"
+        if external_path.is_file():
+            external_review = load_json_object(external_path)
+        investment_inputs = _diagnostic_investment_inputs(run_root, state, refreshed)
+        try:
+            decision = _load_diagnostic_decision_module().decide_next_step(
+                performance_model,
+                hypothesis_result,
+                selection,
+                external_review=external_review,
+                **investment_inputs,
+            )
+        except ValueError as error:
+            raise ValidationError(
+                f"sealed candidate proposal was not admissible: {error}"
+            ) from error
+        if decision.get("decision") != "PURSUE":
+            raise ValidationError("sealed candidate proposal did not authorize PURSUE")
+        selected = decision.get("next_action", {})
+        if selected.get("proposal_id") != proposal_id:
+            raise ValidationError("sealed candidate proposal was not selected")
+        investment_brief = copy.deepcopy(decision["investment_brief"])
+        _atomic_json(run_root / "diagnosis_context.json", refreshed)
+        _atomic_json(proposal_path, sealed)
+        _atomic_json(active_root / "decision.json", decision)
+        _atomic_json(active_root / "investment_brief.json", investment_brief)
+        context_digest = _canonical_digest(refreshed)
+        _append_active_diagnosis_event(
+            run_root,
+            "candidate-proposal",
+            {
+                "proposal_id": proposal_id,
+                "proposal_sha256": sealed["proposal_digest"],
+                "context_sha256": context_digest,
+                "decision_sha256": _canonical_digest(decision),
+                "investment_brief_sha256": _canonical_digest(investment_brief),
+            },
+        )
+        updated = copy.deepcopy(state)
+        updated.update(
+            {
+                "stage": "active_diagnosis",
+                "next_action": "register_change",
+                "updated_at_epoch": time.time(),
+                "terminal_reason": decision["terminal_reason"],
+                "diagnosis_context_sha256": context_digest,
+                "diagnostic_decision_sha256": _canonical_digest(decision),
+                "investment_brief_sha256": _canonical_digest(investment_brief),
+                "investment_summary": {
+                    "decision": investment_brief["decision"],
+                    "cumulative_investment": copy.deepcopy(
+                        investment_brief["cumulative_investment"]
+                    ),
+                    "selected_action_id": investment_brief["selected_action"][
+                        "action_id"
+                    ],
+                    "blocked_action_id": None,
+                    "next_feedback_point": investment_brief["next_feedback_point"],
+                },
+            }
+        )
+        updated.update(
+            _active_ledger_binding(_verify_active_diagnosis_ledger(run_root))
+        )
+        return _write_state(run_root, updated)
 
 
 def _validate_hypothesis_evolution(
@@ -3437,16 +3989,32 @@ def _diagnostic_investment_inputs(
         run_root / "active_diagnosis" / "analysis_contract.json"
     )
     action_bounds = {
-        item["action_id"]: {
-            "p90_seconds": item["timeout_seconds"],
-            "basis": "controller_timeout",
-        }
+        item["action_id"]: copy.deepcopy(item["cost_bound"])
         for item in contract["actions"]
+        if "cost_bound" in item
     }
+    candidate_proposals = []
+    for proposal in context.get("candidate_proposals", []):
+        if proposal.get("fresh_until_epoch", 0) < now:
+            continue
+        candidate_proposals.append(
+            {
+                "proposal_id": proposal["proposal_id"],
+                "proposal_digest": proposal["proposal_digest"],
+                "hypothesis_id": proposal["hypothesis_id"],
+                "action_id": f"implement-{proposal['hypothesis_id']}",
+                "identity_digest": proposal["identity_digest"],
+                "p50_seconds": proposal["estimated_cost"]["p50_seconds"],
+                "p90_seconds": proposal["estimated_cost"]["p90_seconds"],
+                "basis": proposal["estimated_cost"]["basis"],
+                "freshness": "current",
+            }
+        )
     return {
         "authorization": {"max_seconds": elapsed + remaining},
         "spend": {"elapsed_seconds": elapsed},
         "candidate_history": copy.deepcopy(context.get("candidate_history", [])),
+        "candidate_proposals": candidate_proposals,
         "action_bounds": action_bounds,
         "knowledge_adaptation": copy.deepcopy(
             context.get("knowledge_adaptation", context.get("knowledge_context"))
@@ -3552,6 +4120,7 @@ def _review_diagnostic_direction(
     configs = [
         {
             "provider": item["provider"],
+            "underlying_model": item.get("underlying_model", "unknown"),
             "argv": item["argv"],
             "timeout_seconds": item["timeout_seconds"],
         }
@@ -3584,6 +4153,8 @@ def _register_active_diagnosis_proposal_unlocked(
     run_dir: os.PathLike[str] | str,
     hypothesis_set: Mapping[str, Any],
     request_set: Mapping[str, Any],
+    *,
+    knowledge_inputs: Mapping[str, Any] | None = None,
 ) -> dict:
     """Replay an AI proposal against Controller-owned context and policy."""
     normalized = validate_control_manifest(control)
@@ -3605,6 +4176,19 @@ def _register_active_diagnosis_proposal_unlocked(
         action_catalog,
         selection_policy,
     ) = _load_active_diagnosis_context(normalized, run_root, state)
+    contract = _load_frozen_analysis_contract(run_root, state)
+    (
+        adapted_hypothesis_set,
+        adapted_request_set,
+        knowledge_adaptation,
+    ) = _adapt_controller_knowledge(
+        knowledge_inputs,
+        contract=contract,
+        execution_map=execution_map,
+        action_catalog=action_catalog,
+        hypothesis_set=hypothesis_set,
+        request_set=request_set,
+    )
     prior_result = None
     frozen_hypothesis_sha = state.get("hypothesis_set_sha256")
     if frozen_hypothesis_sha is not None:
@@ -3623,7 +4207,7 @@ def _register_active_diagnosis_proposal_unlocked(
             raise ValidationError("frozen hypothesis result drifted from run state")
     try:
         hypothesis_result = _load_hypothesis_space_module().validate_hypothesis_set(
-            hypothesis_set,
+            adapted_hypothesis_set,
             epoch=epoch,
             execution_map=execution_map,
             evidence_catalog=evidence_catalog,
@@ -3637,8 +4221,11 @@ def _register_active_diagnosis_proposal_unlocked(
             evidence_catalog=evidence_catalog,
             execution_map=execution_map,
         )
+        adapted_request_set["hypothesis_set_sha256"] = hypothesis_result[
+            "hypothesis_set_sha256"
+        ]
         selection = _load_evidence_selector_module().select_evidence_request(
-            request_set,
+            adapted_request_set,
             epoch=epoch,
             execution_map=execution_map,
             hypothesis_result=hypothesis_result,
@@ -3667,7 +4254,13 @@ def _register_active_diagnosis_proposal_unlocked(
             hypothesis_result,
             selection,
         )
-        investment_inputs = _diagnostic_investment_inputs(run_root, state, context)
+        decision_context = copy.deepcopy(context)
+        decision_context["knowledge_adaptation"] = copy.deepcopy(
+            knowledge_adaptation
+        )
+        investment_inputs = _diagnostic_investment_inputs(
+            run_root, state, decision_context
+        )
         decision = _load_diagnostic_decision_module().decide_next_step(
             performance_model,
             hypothesis_result,
@@ -3681,7 +4274,11 @@ def _register_active_diagnosis_proposal_unlocked(
     context = copy.deepcopy(context)
     context["closed_mechanism_keys"] = evolution["closed_mechanism_keys"]
     context["closed_scope_records"] = evolution["closed_scope_records"]
+    context["knowledge_adaptation"] = copy.deepcopy(knowledge_adaptation)
     _atomic_json(run_root / "diagnosis_context.json", context)
+    _atomic_json(
+        active_root / "knowledge_adaptation.json", knowledge_adaptation
+    )
     _atomic_json(
         active_root
         / "hypothesis_generations"
@@ -3691,7 +4288,7 @@ def _register_active_diagnosis_proposal_unlocked(
     _atomic_json(active_root / "hypothesis_result.json", hypothesis_result)
     _atomic_json(
         active_root / "request_set.json",
-        _json_copy(request_set, "request_set", reject_sensitive=True),
+        adapted_request_set,
     )
     _atomic_json(active_root / "evidence_selection.json", selection)
     _atomic_json(active_root / "decision.json", decision)
@@ -3700,13 +4297,14 @@ def _register_active_diagnosis_proposal_unlocked(
     proposal_binding = {
         "context_sha256": _canonical_digest(context),
         "hypothesis_set_sha256": hypothesis_result["hypothesis_set_sha256"],
-        "request_set_sha256": _canonical_digest(request_set),
+        "request_set_sha256": _canonical_digest(adapted_request_set),
         "selection_sha256": _canonical_digest(selection),
         "decision_sha256": _canonical_digest(decision),
         "investment_brief_sha256": _canonical_digest(investment_brief),
         "external_direction_review_sha256": (
             None if external_review is None else _canonical_digest(external_review)
         ),
+        "knowledge_adaptation_sha256": _canonical_digest(knowledge_adaptation),
     }
     _append_active_diagnosis_event(run_root, "proposal", proposal_binding)
     next_action = {
@@ -4460,6 +5058,7 @@ def register_change(
     change = validate_change_set(change_set, normalized)
     candidate_hypothesis_id = None
     candidate_identity_digest = None
+    candidate_proposal = None
     if diagnostic_decision is not None:
         next_diagnostic_action = diagnostic_decision.get("next_action")
         if not isinstance(next_diagnostic_action, Mapping):
@@ -4468,10 +5067,35 @@ def register_change(
             next_diagnostic_action.get("hypothesis_id"),
             "diagnostic candidate hypothesis_id",
         )
-        if candidate_hypothesis_id not in change["diagnosis_ids"]:
+        if change["diagnosis_ids"] != [candidate_hypothesis_id]:
             raise ValidationError(
-                "ChangeSet diagnosis_ids do not contain the authorized diagnostic candidate"
+                "ChangeSet diagnosis_ids must contain exactly the authorized diagnostic candidate"
             )
+        proposal_id = _identifier(
+            next_diagnostic_action.get("proposal_id"),
+            "diagnostic candidate proposal_id",
+        )
+        proposal_digest = _sha256(
+            next_diagnostic_action.get("proposal_digest"),
+            "diagnostic candidate proposal_digest",
+        )
+        context, _epoch, _map, _evidence, _actions, _policy = (
+            _load_active_diagnosis_context(normalized, run_root, state)
+        )
+        candidate_proposal = next(
+            (
+                item
+                for item in context.get("candidate_proposals", [])
+                if item.get("proposal_id") == proposal_id
+            ),
+            None,
+        )
+        if not isinstance(candidate_proposal, Mapping):
+            raise ValidationError("authorized candidate proposal is missing")
+        if candidate_proposal.get("proposal_digest") != proposal_digest:
+            raise ValidationError("authorized candidate proposal digest drifted")
+        if float(candidate_proposal["fresh_until_epoch"]) < time.time():
+            raise ValidationError("authorized candidate proposal is stale")
         bound_basis = diagnostic_decision.get("investment_brief", {}).get(
             "bound_basis", {}
         )
@@ -4484,6 +5108,15 @@ def register_change(
         raise ValidationError("workload identity drifted before ChangeSet registration")
     _validate_workload_candidate_minimum_effect(change, workload)
     change_digest = _canonical_digest(change)
+    if candidate_proposal is not None:
+        if candidate_proposal["mutation_scope"] != change["scope"]:
+            raise ValidationError("ChangeSet scope does not match candidate proposal")
+        if candidate_proposal["candidate_digest"] != _canonical_digest(
+            change["candidate"]
+        ):
+            raise ValidationError("ChangeSet candidate digest does not match proposal")
+        if candidate_proposal["change_set_digest"] != change_digest:
+            raise ValidationError("ChangeSet digest does not match candidate proposal")
     pending_path = run_root / "registration_pending.json"
     if state["next_action"] == "edit_then_evaluate":
         if state.get("change_set_digest") != change_digest:
@@ -4557,6 +5190,10 @@ def register_change(
                 "candidate_identity_digest": candidate_identity_digest,
                 "candidate_digest": _canonical_digest(change["candidate"]),
                 "candidate_started_at_epoch": time.time(),
+                "candidate_proposal_id": candidate_proposal["proposal_id"],
+                "candidate_proposal_digest": candidate_proposal[
+                    "proposal_digest"
+                ],
             }
         )
     committed = _write_state(run_root, updated)
@@ -4727,6 +5364,8 @@ def _resume_active_diagnosis_after_candidate_rejection(
         "candidate_identity_digest",
         "candidate_digest",
         "candidate_started_at_epoch",
+        "candidate_proposal_id",
+        "candidate_proposal_digest",
     ):
         updated.pop(field, None)
     updated.update(
@@ -4757,6 +5396,33 @@ def _finish_rejected(
     primary_status: str | None,
     time_gate: Mapping[str, Any] | None = None,
 ) -> dict:
+    intrinsic_failure_reasons = {
+        "candidate_below_project_contract",
+        "no_scoped_changes",
+        "static_falsified",
+        "correctness_failed",
+        "short_pair_failed",
+        "effect_upper_bound_below_minimum",
+        "formal_pair_failed",
+        "primary_not_confirmed",
+        "constraint_failed",
+    }
+    intrinsic_failure = reason in intrinsic_failure_reasons
+    if intrinsic_failure and reason not in {
+        "candidate_below_project_contract",
+        "no_scoped_changes",
+    }:
+        binding_path = run_root / "candidate_binding.json"
+        if not binding_path.is_file() or binding_path.is_symlink():
+            intrinsic_failure = False
+        else:
+            binding = load_json_object(binding_path)
+            intrinsic_failure = (
+                binding.get("candidate_digest") == state.get("candidate_digest")
+                and binding.get("change_set_digest") == state.get("change_set_digest")
+                and _identity(control, scope)["digest"]
+                == binding.get("after_identity_digest")
+            )
     try:
         _restore_snapshot(
             control,
@@ -4788,6 +5454,42 @@ def _finish_rejected(
         )
         _write_state(run_root, updated)
         return decision
+    active_candidate = (
+        "analysis_contract" in control and state.get("candidate_hypothesis_id")
+    )
+    if active_candidate and not intrinsic_failure:
+        decision = {
+            "schema_version": "cuda-workload-optimizer/decision-v1",
+            "status": "review_required",
+            "reason": reason,
+            "primary_status": primary_status,
+            "rolled_back": True,
+            "refresh_required": True,
+        }
+        if time_gate is not None:
+            decision.update(
+                {
+                    "elapsed_seconds": time_gate["elapsed_seconds"],
+                    "stop_reason": time_gate["stop_reason"],
+                    "skipped_expensive_stages": time_gate[
+                        "skipped_expensive_stages"
+                    ],
+                }
+            )
+        _atomic_json(run_root / "decision.json", decision)
+        updated = copy.deepcopy(state)
+        updated.update(
+            {
+                "status": "active",
+                "stage": "decision",
+                "next_action": "refresh_required",
+                "updated_at_epoch": time.time(),
+                "decision_digest": _canonical_digest(decision),
+                "terminal_reason": reason,
+            }
+        )
+        _write_state(run_root, updated)
+        return decision
     decision = {
         "schema_version": "cuda-workload-optimizer/decision-v1",
         "status": "rejected",
@@ -4806,7 +5508,7 @@ def _finish_rejected(
             }
         )
     _atomic_json(run_root / "decision.json", decision)
-    if "analysis_contract" in control and state.get("candidate_hypothesis_id"):
+    if active_candidate:
         _resume_active_diagnosis_after_candidate_rejection(
             run_root,
             state,
@@ -4909,6 +5611,47 @@ def _finish_review_required(
         _write_state(run_root, updated)
         return decision
 
+    workload = _normalize_frozen_workload(control)
+    replay_identity = {
+        "control_digest": _canonical_digest(control),
+        "frozen_control_sha256": _sha256_path(run_root / "control_manifest.json"),
+        "workload_source_hash": workload.source_hash,
+        "workload_manifest_sha256": _sha256_path(Path(control["workload_manifest"])),
+        "project_surface_identity_sha256": _canonical_digest(
+            _project_surface_identity(Path(control["project_root"]))
+        ),
+        "environment_identity_digest": _identity(
+            control, "isolated_environment"
+        )["digest"],
+        "rollback_workspace_identity_digest": _identity(control, scope)["digest"],
+        "bound_artifacts_sha256": _canonical_digest(
+            {
+                "candidate_diff_sha256": preserved["candidate_diff_sha256"],
+                "time_gate_sha256": preserved["time_gate_sha256"],
+                "evidence": preserved["evidence"],
+            }
+        ),
+        "analysis_epoch_artifact_sha256": None,
+        "execution_map_artifact_sha256": None,
+        "diagnosis_context_sha256": None,
+    }
+    if "analysis_contract" in control:
+        context = load_json_object(run_root / "diagnosis_context.json")
+        replay_identity.update(
+            {
+                "analysis_epoch_artifact_sha256": _canonical_digest(
+                    load_json_object(run_root / "active_diagnosis" / "epoch.json")
+                ),
+                "execution_map_artifact_sha256": _canonical_digest(
+                    load_json_object(
+                        run_root / "active_diagnosis" / "execution_map.json"
+                    )
+                ),
+                "diagnosis_context_sha256": _canonical_digest(context),
+            }
+        )
+    preserved["replay_identity"] = replay_identity
+
     decision = {
         "schema_version": "cuda-workload-optimizer/decision-v1",
         "status": "review_required",
@@ -4980,11 +5723,83 @@ def _replay_review_required(
             or _sha256_path(path) != expected_digest
         ):
             raise ValidationError(f"review-required evidence digest drifted: {name}")
+    replay_identity = decision.get("replay_identity")
+    replay_fields = {
+        "control_digest",
+        "frozen_control_sha256",
+        "workload_source_hash",
+        "workload_manifest_sha256",
+        "project_surface_identity_sha256",
+        "environment_identity_digest",
+        "rollback_workspace_identity_digest",
+        "bound_artifacts_sha256",
+        "analysis_epoch_artifact_sha256",
+        "execution_map_artifact_sha256",
+        "diagnosis_context_sha256",
+    }
+    if not isinstance(replay_identity, Mapping) or set(replay_identity) != replay_fields:
+        raise ValidationError("review-required replay identity is invalid")
+    if replay_identity["control_digest"] != _canonical_digest(control):
+        raise ValidationError("review-required frozen control identity drifted")
+    if replay_identity["frozen_control_sha256"] != _sha256_path(
+        run_root / "control_manifest.json"
+    ):
+        raise ValidationError("review-required frozen control artifact drifted")
+    try:
+        workload = _normalize_frozen_workload(control)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ValidationError("review-required workload identity drifted") from error
+    if (
+        replay_identity["workload_source_hash"] != workload.source_hash
+        or replay_identity["workload_manifest_sha256"]
+        != _sha256_path(Path(control["workload_manifest"]))
+    ):
+        raise ValidationError("review-required workload identity drifted")
+    if replay_identity["project_surface_identity_sha256"] != _canonical_digest(
+        _project_surface_identity(Path(control["project_root"]))
+    ):
+        raise ValidationError("review-required complete project surface drifted")
+    if replay_identity["environment_identity_digest"] != _identity(
+        control, "isolated_environment"
+    )["digest"]:
+        raise ValidationError("review-required isolated environment drifted")
+    if replay_identity["bound_artifacts_sha256"] != _canonical_digest(
+        {
+            "candidate_diff_sha256": decision["candidate_diff_sha256"],
+            "time_gate_sha256": decision["time_gate_sha256"],
+            "evidence": evidence,
+        }
+    ):
+        raise ValidationError("review-required bound artifact identity drifted")
+    if "analysis_contract" in control:
+        context = load_json_object(run_root / "diagnosis_context.json")
+        if (
+            replay_identity["analysis_epoch_artifact_sha256"]
+            != _canonical_digest(
+                load_json_object(run_root / "active_diagnosis" / "epoch.json")
+            )
+            or replay_identity["execution_map_artifact_sha256"]
+            != _canonical_digest(
+                load_json_object(
+                    run_root / "active_diagnosis" / "execution_map.json"
+                )
+            )
+            or replay_identity["diagnosis_context_sha256"]
+            != _canonical_digest(context)
+            or replay_identity["diagnosis_context_sha256"]
+            != state.get("diagnosis_context_sha256")
+        ):
+            raise ValidationError("review-required analysis epoch or map drifted")
     scope = state.get("change_scope")
     if scope not in {"project", "isolated_environment"}:
         raise ValidationError("review-required rollback scope is invalid")
     if _identity(control, scope)["digest"] != state.get("before_identity_digest"):
         raise ValidationError("review-required rollback snapshot identity drifted")
+    if (
+        replay_identity["rollback_workspace_identity_digest"]
+        != state.get("before_identity_digest")
+    ):
+        raise ValidationError("review-required rollback workspace binding drifted")
     return decision
 
 
@@ -5080,6 +5895,8 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         )
         if decision["status"] == "manual_recovery_required":
             return decision
+        if decision["status"] == "review_required":
+            return decision
         raise ValidationError("workload identity drifted before evaluation")
     try:
         _validate_workload_candidate_minimum_effect(change, workload)
@@ -5130,6 +5947,8 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             primary_status=None,
         )
         if decision["status"] == "manual_recovery_required":
+            return decision
+        if decision["status"] == "review_required":
             return decision
         raise ValidationError(
             "actual scoped diff is outside ChangeSet paths: " + ", ".join(outside)
@@ -5449,6 +6268,8 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         )
         if decision["status"] == "manual_recovery_required":
             return decision
+        if decision["status"] == "review_required":
+            return decision
         raise ValidationError("scoped identity drifted during paired evaluation")
     primary_status = evaluation.get("primary", {}).get("status")
     constraints = evaluation.get("constraints", [])
@@ -5520,6 +6341,7 @@ def resume_run(run_dir: os.PathLike[str] | str) -> dict:
         "propose_hypotheses",
         "evidence_gap",
         "review_required",
+        "refresh_required",
         "register_change",
         "edit_then_evaluate",
         "done",

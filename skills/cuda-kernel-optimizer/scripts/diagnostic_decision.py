@@ -280,6 +280,58 @@ def _history_records(value: Sequence[Mapping[str, Any]] | None) -> list[dict]:
     return records
 
 
+def _proposal_records(
+    value: Sequence[Mapping[str, Any]] | None,
+    *,
+    identity_digest: str,
+) -> list[dict]:
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValidationError("candidate_proposals must be a sequence")
+    records = []
+    seen = set()
+    for index, raw in enumerate(value):
+        if not isinstance(raw, Mapping):
+            raise ValidationError(f"candidate_proposals[{index}] must be an object")
+        proposal = copy.deepcopy(dict(raw))
+        proposal_id = proposal.get("proposal_id")
+        hypothesis_id = proposal.get("hypothesis_id")
+        action_id = proposal.get("action_id")
+        if not all(type(item) is str and item for item in (proposal_id, hypothesis_id, action_id)):
+            raise ValidationError("candidate proposal ids must be non-empty strings")
+        if proposal_id in seen:
+            raise ValidationError("candidate proposal ids must be unique")
+        seen.add(proposal_id)
+        if action_id != f"implement-{hypothesis_id}":
+            raise ValidationError("candidate proposal action does not match hypothesis")
+        if proposal.get("identity_digest") != identity_digest:
+            continue
+        if proposal.get("freshness") != "current":
+            continue
+        if proposal.get("basis") not in {
+            "identity_matched_candidate_history",
+            "user_authorized_upper_bound",
+        }:
+            raise ValidationError("candidate proposal cost basis is unsupported")
+        p50 = _number(
+            proposal.get("p50_seconds"),
+            f"candidate_proposals[{index}].p50_seconds",
+            positive=True,
+        )
+        p90 = _number(
+            proposal.get("p90_seconds"),
+            f"candidate_proposals[{index}].p90_seconds",
+            positive=True,
+        )
+        if p50 > p90:
+            raise ValidationError("candidate proposal P50 must not exceed P90")
+        proposal["p50_seconds"] = p50
+        proposal["p90_seconds"] = p90
+        records.append(proposal)
+    return records
+
+
 def _matching_history(records: list[dict], *, hypothesis_id=None, action_id=None) -> dict:
     matches = [
         item
@@ -355,11 +407,10 @@ def _direction_portfolio(
                 "status": status,
                 "mechanism": item["mechanism"],
                 "benefit": {
-                    "lower": (
-                        min(threshold, item["benefit_ceiling_us"])
-                        if status == "supported"
-                        else 0.0
-                    ),
+                    # A supported direction is not a measured candidate win.
+                    # The lower bound stays zero until representative paired
+                    # evaluation supplies an identity-bound interval.
+                    "lower": 0.0,
                     "upper": item["benefit_ceiling_us"],
                     "basis": item["benefit_ceiling_basis"],
                     "identity_digest": identity,
@@ -407,10 +458,11 @@ def _investment_action(
         raw_p90 = estimate.get("p90_seconds")
     if raw_p90 is None and allow_generic_bounds:
         bound = action_bounds.get(action_id)
-        if isinstance(bound, Mapping):
+        if isinstance(bound, Mapping) and bound.get("basis") in {
+            "identity_matched_history",
+            "user_authorized_upper_bound",
+        }:
             raw_p90 = bound.get("p90_seconds")
-        elif type(bound) in {int, float}:
-            raw_p90 = bound
     bounded = raw_p90 is not None
     action = {
         "action_id": action_id,
@@ -437,6 +489,7 @@ def _adaptive_actions(
     selection: Mapping[str, Any],
     model: Mapping[str, Any],
     history: list[dict],
+    proposals: list[dict],
     action_bounds: Mapping[str, Any],
 ) -> tuple[list[dict], dict[str, dict], list[dict]]:
     actions = []
@@ -444,7 +497,20 @@ def _adaptive_actions(
     unbounded = []
     by_id = {item["direction_id"]: item for item in directions}
     if selection.get("status") == "sufficient":
-        for hypothesis in ranked:
+        proposal_by_hypothesis = {
+            item["hypothesis_id"]: item for item in proposals
+        }
+        candidate_order = sorted(
+            ranked,
+            key=lambda item: (
+                -item["benefit_ceiling_us"],
+                proposal_by_hypothesis.get(item["hypothesis_id"], {}).get(
+                    "p90_seconds", float("inf")
+                ),
+                item["hypothesis_id"],
+            ),
+        )
+        for hypothesis in candidate_order:
             direction_id = hypothesis["hypothesis_id"]
             if hypothesis["confidence"] != "direction_supported":
                 continue
@@ -453,7 +519,16 @@ def _adaptive_actions(
                 f"refresh-{direction_id}" if stale else f"implement-{direction_id}"
             )
             record = _matching_history(history, hypothesis_id=direction_id)
-            candidate_history = [record] if record else []
+            failed = (
+                record.get("implementation_status", record.get("status")) == "failed"
+                and record.get("identity_digest") == _identity_digest(model)
+            )
+            if failed and not stale:
+                continue
+            proposal = proposal_by_hypothesis.get(direction_id, {})
+            if proposal.get("action_id") != action_id:
+                proposal = {}
+            candidate_cost = [proposal] if proposal else []
             action, bounded = _investment_action(
                 action_id,
                 mechanism=(
@@ -465,17 +540,11 @@ def _adaptive_actions(
                 outcomes=_action_outcomes(action_id, [direction_id]),
                 controller_action=None,
                 model=model,
-                history=candidate_history,
+                history=candidate_cost,
                 action_bounds=action_bounds,
                 allow_generic_bounds=False,
                 kind="refresh" if stale else "check",
             )
-            if (
-                not stale
-                and record.get("implementation_status", record.get("status"))
-                == "failed"
-            ):
-                action["implementation_status"] = "failed"
             if stale:
                 # A stale candidate bound cannot authorize a synthetic command.
                 # Refresh must be represented by an executable catalog action.
@@ -489,7 +558,11 @@ def _adaptive_actions(
             metadata[action_id] = {
                 "purpose": "refresh" if stale else "candidate",
                 "hypothesis_id": direction_id,
+                "proposal": copy.deepcopy(proposal) if proposal else None,
             }
+            # Candidate implementation follows V1.1 benefit ordering. P90 and
+            # stable identity only break an exact benefit-ceiling tie.
+            break
         return actions, metadata, unbounded
 
     selected = selection.get("selected_request")
@@ -556,6 +629,7 @@ def decide_next_step(
     authorization: Mapping[str, Any] | None = None,
     spend: Mapping[str, Any] | None = None,
     candidate_history: Sequence[Mapping[str, Any]] | None = None,
+    candidate_proposals: Sequence[Mapping[str, Any]] | None = None,
     knowledge_adaptation: Mapping[str, Any] | None = None,
     action_bounds: Mapping[str, Any] | None = None,
 ) -> dict:
@@ -571,9 +645,10 @@ def decide_next_step(
     maximum_ceiling = max((item["benefit_ceiling_us"] for item in ranked), default=0.0)
     history = _history_records(candidate_history)
     directions, identity = _direction_portfolio(ranked, model, history, threshold)
+    proposals = _proposal_records(candidate_proposals, identity_digest=identity)
     bounds = {} if action_bounds is None else _object(action_bounds, "action_bounds")
     adaptive_actions, action_metadata, unbounded_actions = _adaptive_actions(
-        ranked, directions, selection, model, history, bounds
+        ranked, directions, selection, model, history, proposals, bounds
     )
     adaptive_authorization, adaptive_spend = _investment_inputs(
         model, authorization, spend
@@ -748,6 +823,14 @@ def decide_next_step(
                     "mechanism": chosen["mechanism"],
                     "claim_layer": chosen["claim_layer"],
                 }
+                proposal = action_info.get("proposal")
+                if isinstance(proposal, Mapping):
+                    next_action.update(
+                        {
+                            "proposal_id": proposal["proposal_id"],
+                            "proposal_digest": proposal.get("proposal_digest"),
+                        }
+                    )
             elif action_info["purpose"] == "refresh":
                 decision, reason, checkpoint = (
                     "MEASURE",
@@ -786,6 +869,29 @@ def decide_next_step(
     external_summary["local_adjudication"] = _adjudicate_external_challenge(
         external_summary, decision, primary
     )
+    result_cost = _cost_for_action(model, action)
+    if isinstance(effective_selected_action, Mapping):
+        selected_info = action_metadata.get(effective_selected_action["action_id"], {})
+        proposal = selected_info.get("proposal")
+        if isinstance(proposal, Mapping):
+            result_cost = {
+                "class": effective_selected_action.get("cost"),
+                "p50_seconds": proposal["p50_seconds"],
+                "p90_seconds": proposal["p90_seconds"],
+                "basis": proposal["basis"],
+            }
+        elif result_cost["p90_seconds"] is None:
+            bound = bounds.get(effective_selected_action["action_id"])
+            if isinstance(bound, Mapping) and bound.get("basis") in {
+                "identity_matched_history",
+                "user_authorized_upper_bound",
+            }:
+                result_cost = {
+                    "class": effective_selected_action.get("cost"),
+                    "p50_seconds": bound.get("p50_seconds"),
+                    "p90_seconds": bound.get("p90_seconds"),
+                    "basis": bound["basis"],
+                }
     result = {
         "schema_version": DECISION_SCHEMA,
         "epoch_id": model.get("epoch_id"),
@@ -800,7 +906,7 @@ def decide_next_step(
         },
         "uncertainty": sorted(uncertainty),
         "next_action": next_action,
-        "cost": _cost_for_action(model, action),
+        "cost": result_cost,
         "next_checkpoint": checkpoint,
         "external_challenge": external_summary,
     }
@@ -864,6 +970,19 @@ def decide_next_step(
                 if item.get("implementation_status") == "failed"
             }
             | set(suppressed_action_ids)
+            | {
+                item["action_id"]
+                for item in proposals
+                if not isinstance(effective_selected_action, Mapping)
+                or item["action_id"] != effective_selected_action["action_id"]
+            }
+            | {
+                item.get("action_id", f"implement-{item.get('hypothesis_id')}")
+                for item in history
+                if item.get("implementation_status", item.get("status")) == "failed"
+                and item.get("identity_digest") == identity
+                and item.get("hypothesis_id")
+            }
         ),
         "bound_basis": {
             "identity_digest": identity,

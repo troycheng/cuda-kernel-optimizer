@@ -94,7 +94,17 @@
         "adapter_path": {"type": "string", "minLength": 1},
         "adapter_sha256": {"$ref": "#/$defs/sha256"},
         "argv": {"$ref": "#/$defs/argv"},
-        "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 3600}
+        "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 3600},
+        "cost_bound": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["p50_seconds", "p90_seconds", "basis"],
+          "properties": {
+            "p50_seconds": {"type": "number", "exclusiveMinimum": 0},
+            "p90_seconds": {"type": "number", "exclusiveMinimum": 0},
+            "basis": {"const": "user_authorized_upper_bound"}
+          }
+        }
       }
     }
   }

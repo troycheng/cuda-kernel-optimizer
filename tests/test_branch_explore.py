@@ -84,15 +84,56 @@ class BranchExploreTests(unittest.TestCase):
                 "nvcc": {"path": "/opt/cuda/bin/nvcc"},
             },
             "seed": 17,
+            "input_hash": "f" * 64,
             "budget": {"max_pairs": 24},
             "min_effect_pct": 0.5,
             "effective_methods": [
                 {"id": "fastsort.store", "iter": 124}
             ],
         }
+        payload["candidate_cost_bound"] = {
+            "basis": "user_authorized_upper_bound",
+            "freshness": "current",
+            "input_hash": payload["input_hash"],
+            "baseline_sha256": hashlib.sha256(baseline.read_bytes()).hexdigest(),
+            "p90_seconds": {
+                "static_review": 0.25,
+                "build_correctness": 1.0,
+                "short_paired": 2.0,
+                "formal_paired": 2.0,
+                "service": 2.0,
+            },
+        }
         state_path = root / "state.json"
         state_path.write_text(json.dumps(payload), encoding="utf-8")
         return state_path, payload
+
+    def test_missing_explicit_candidate_cost_bound_reviews_before_launch(self) -> None:
+        branch_explore = _load_branch_explore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, payload = self._state(root, branches=1)
+            del payload["candidate_cost_bound"]
+            state_path.write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch.object(
+                branch_explore,
+                "_bench_kernel",
+                side_effect=AssertionError("unbounded candidate action launched"),
+            ) as benchmark:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    output = branch_explore.run(str(state_path), iteration=1)
+
+            benchmark.assert_not_called()
+            self.assertEqual(output["status"], "review_required")
+            self.assertEqual(
+                output["terminal_reason"], "cost_unavailable_for_next_action"
+            )
+            gate = output["branches"][0]["candidate_gate"]
+            self.assertEqual(gate["decision"], "REVIEW_REQUIRED")
+            self.assertEqual(
+                gate["stop_reason"], "cost_unavailable_for_next_action"
+            )
+            self.assertIsNone(gate["projected_spend"]["p90_seconds"])
 
     def test_failed_benchmark_cannot_reuse_a_stale_passing_result(self) -> None:
         branch_explore = _load_branch_explore()
@@ -426,6 +467,7 @@ class BranchExploreTests(unittest.TestCase):
             root = Path(tmp)
             state_path, payload = self._state(root, branches=2)
             payload["input_hash"] = "a" * 64
+            payload["candidate_cost_bound"]["input_hash"] = payload["input_hash"]
             payload["budget"].update(
                 {"max_pairs": 2, "max_seconds": 7.0, "soft_target_seconds": 7.0}
             )
@@ -507,6 +549,7 @@ class BranchExploreTests(unittest.TestCase):
             root = Path(tmp)
             state_path, payload = self._state(root, branches=1)
             payload["input_hash"] = "b" * 64
+            payload["candidate_cost_bound"]["input_hash"] = payload["input_hash"]
             payload["budget"].update(
                 {"max_pairs": 2, "max_seconds": 5.5, "soft_target_seconds": 5.5}
             )
