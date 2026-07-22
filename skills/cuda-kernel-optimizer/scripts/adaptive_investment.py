@@ -145,7 +145,12 @@ def _intervals(value: Any, label: str) -> dict[str, dict]:
     return result
 
 
-def _outcomes(value: Any, label: str, known_directions: set[str]) -> list[dict]:
+def _outcomes(
+    value: Any,
+    label: str,
+    known_directions: set[str],
+    target_direction_ids: set[str],
+) -> list[dict]:
     if type(value) is not list or not value:
         raise ValidationError(f"{label} must be a non-empty list")
     result = []
@@ -166,8 +171,13 @@ def _outcomes(value: Any, label: str, known_directions: set[str]) -> list[dict]:
         if set(supports) & set(opposes):
             raise ValidationError(f"{label}[{index}] cannot support and oppose one direction")
         intervals = _intervals(raw.get("candidate_intervals"), f"{label}[{index}].candidate_intervals")
-        if not (set(supports) | set(opposes) | set(intervals)) <= known_directions:
+        referenced = set(supports) | set(opposes) | set(intervals)
+        if not referenced <= known_directions:
             raise ValidationError(f"{label}[{index}] references an unknown direction")
+        if not referenced <= target_direction_ids:
+            raise ValidationError(
+                f"{label}[{index}] must reference only target_direction_ids"
+            )
         result.append(
             {
                 "outcome_id": outcome_id,
@@ -217,7 +227,12 @@ def _actions(value: Sequence[Mapping[str, Any]], known_directions: set[str]) -> 
                 "risk": _level(raw.get("risk"), f"actions[{index}].risk"),
                 "p90_seconds": _finite(raw.get("p90_seconds"), f"actions[{index}].p90_seconds", minimum=0.0),
                 "target_direction_ids": targets,
-                "outcomes": _outcomes(raw.get("outcomes"), f"actions[{index}].outcomes", known_directions),
+                "outcomes": _outcomes(
+                    raw.get("outcomes"),
+                    f"actions[{index}].outcomes",
+                    known_directions,
+                    set(targets),
+                ),
                 "implementation_status": status,
             }
         )
@@ -330,19 +345,6 @@ def decide_next_action(
 
     skipped: list[str] = []
     active = {item["direction_id"]: item for item in portfolio if item["status"] != "closed"}
-    for action in normalized_actions:
-        if any(
-            action["mechanism"] == active[direction_id]["mechanism"]
-            for direction_id in action["target_direction_ids"]
-            if direction_id in active
-        ):
-            for direction_id in action["target_direction_ids"]:
-                if direction_id in active and action["mechanism"] == active[direction_id]["mechanism"]:
-                    active[direction_id]["status"] = "closed"
-                    active[direction_id]["reason"] = "exact_mechanism_repeat"
-                    active.pop(direction_id)
-            skipped.append(action["action_id"])
-
     eligible = []
     for action in normalized_actions:
         targets = set(action["target_direction_ids"])

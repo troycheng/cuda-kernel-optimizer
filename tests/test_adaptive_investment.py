@@ -200,6 +200,43 @@ class AdaptiveInvestmentTests(unittest.TestCase):
         self.assertEqual(result["selected_action"]["action_id"], "fallback")
         self.assertIn("preferred", result["skipped_actions"])
 
+    def test_failed_same_mechanism_action_cannot_close_direction_before_fallback(self):
+        failed = evidence_action("preferred", direction="z", mechanism="mechanism-z")
+        failed["implementation_status"] = "failed"
+        fallback = evidence_action("fallback", direction="z", mechanism="trace")
+        result = self.decide([direction_fixture()], [failed, fallback])
+        self.assertEqual(result["decision"], "ACT")
+        self.assertEqual(result["selected_action"]["action_id"], "fallback")
+        self.assertIn("preferred", result["skipped_actions"])
+
+    def test_outcomes_cannot_reference_stale_non_target_direction(self):
+        action = evidence_action("check-a", direction="a")
+        action["outcomes"] = [
+            {"outcome_id": "stale-b", "supports": ["b"], "opposes": []},
+        ]
+        with self.assertRaisesRegex(self.module.ValidationError, "target_direction_ids"):
+            self.decide(
+                [
+                    direction_fixture("a", mechanism="mechanism-a"),
+                    direction_fixture("b", mechanism="mechanism-b", stale=True),
+                ],
+                [action],
+            )
+
+    def test_outcomes_cannot_reference_closed_non_target_direction(self):
+        action = evidence_action("check-a", direction="a")
+        action["outcomes"] = [
+            {"outcome_id": "closed-b", "supports": [], "opposes": ["b"]},
+        ]
+        with self.assertRaisesRegex(self.module.ValidationError, "target_direction_ids"):
+            self.decide(
+                [
+                    direction_fixture("a", mechanism="mechanism-a"),
+                    direction_fixture("b", mechanism="mechanism-b", upper=0.5),
+                ],
+                [action],
+            )
+
     def test_same_checkpoint_replay_is_deterministic(self):
         directions = [
             direction_fixture("a", mechanism="mechanism-a"),
