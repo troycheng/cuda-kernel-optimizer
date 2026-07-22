@@ -3388,21 +3388,27 @@ def _load_bound_diagnostic_artifacts(
         raise ValidationError(
             f"diagnostic decision does not authorize {expected_decision} execution"
         )
-    expected_brief = {
-        "schema_version": "cuda-optimizer/investment-brief-v1",
-        "decision": decision.get("decision"),
-        "terminal_reason": decision.get("terminal_reason"),
-        "primary_diagnosis": copy.deepcopy(decision.get("primary_diagnosis")),
-        "benefit_ceiling": copy.deepcopy(decision.get("benefit_ceiling")),
-        "uncertainty": copy.deepcopy(decision.get("uncertainty")),
-        "next_action": copy.deepcopy(decision.get("next_action")),
-        "cost": copy.deepcopy(decision.get("cost")),
-        "next_checkpoint": decision.get("next_checkpoint"),
-        "external_challenge": copy.deepcopy(decision.get("external_challenge")),
-    }
+    expected_brief = decision.get("investment_brief")
     if brief != expected_brief:
         raise ValidationError("investment brief does not match diagnostic decision")
     return decision
+
+
+def _diagnostic_investment_inputs(
+    state: Mapping[str, Any], context: Mapping[str, Any]
+) -> dict:
+    now = time.time()
+    started = state.get("optimization_started_at_epoch", state["started_at_epoch"])
+    elapsed = max(0.0, now - float(started))
+    remaining = max(0.0, float(state["deadline_epoch"]) - now)
+    return {
+        "authorization": {"max_seconds": elapsed + remaining},
+        "spend": {"elapsed_seconds": elapsed},
+        "candidate_history": copy.deepcopy(context.get("evidence_results", [])),
+        "knowledge_adaptation": copy.deepcopy(
+            context.get("knowledge_adaptation", context.get("knowledge_context"))
+        ),
+    }
 
 
 def _review_diagnostic_direction(
@@ -3618,11 +3624,13 @@ def _register_active_diagnosis_proposal_unlocked(
             hypothesis_result,
             selection,
         )
+        investment_inputs = _diagnostic_investment_inputs(state, context)
         decision = _load_diagnostic_decision_module().decide_next_step(
             performance_model,
             hypothesis_result,
             selection,
             external_review=external_review,
+            **investment_inputs,
         )
     except ValueError as error:
         raise ValidationError(f"active diagnosis proposal rejected: {error}") from error
@@ -3644,18 +3652,7 @@ def _register_active_diagnosis_proposal_unlocked(
     )
     _atomic_json(active_root / "evidence_selection.json", selection)
     _atomic_json(active_root / "decision.json", decision)
-    investment_brief = {
-        "schema_version": "cuda-optimizer/investment-brief-v1",
-        "decision": decision["decision"],
-        "terminal_reason": decision["terminal_reason"],
-        "primary_diagnosis": copy.deepcopy(decision["primary_diagnosis"]),
-        "benefit_ceiling": copy.deepcopy(decision["benefit_ceiling"]),
-        "uncertainty": copy.deepcopy(decision["uncertainty"]),
-        "next_action": copy.deepcopy(decision["next_action"]),
-        "cost": copy.deepcopy(decision["cost"]),
-        "next_checkpoint": decision["next_checkpoint"],
-        "external_challenge": copy.deepcopy(decision["external_challenge"]),
-    }
+    investment_brief = copy.deepcopy(decision["investment_brief"])
     _atomic_json(active_root / "investment_brief.json", investment_brief)
     proposal_binding = {
         "context_sha256": _canonical_digest(context),
@@ -3687,6 +3684,23 @@ def _register_active_diagnosis_proposal_unlocked(
             "investment_brief_sha256": _canonical_digest(investment_brief),
             "terminal_reason": decision["terminal_reason"],
             "diagnosis_context_sha256": _canonical_digest(context),
+            "investment_summary": {
+                "decision": investment_brief["decision"],
+                "cumulative_investment": copy.deepcopy(
+                    investment_brief["cumulative_investment"]
+                ),
+                "selected_action_id": (
+                    None
+                    if investment_brief["selected_action"] is None
+                    else investment_brief["selected_action"]["action_id"]
+                ),
+                "blocked_action_id": (
+                    None
+                    if investment_brief["blocked_action"] is None
+                    else investment_brief["blocked_action"]["action_id"]
+                ),
+                "next_feedback_point": investment_brief["next_feedback_point"],
+            },
         }
     )
     if decision["decision"] == "STOP":

@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import importlib.util
+import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 
@@ -21,6 +25,20 @@ _AUTHORIZATION_REASONS = {
 
 class ValidationError(ValueError):
     """Raised when decision inputs are not bound to one diagnosis epoch."""
+
+
+def _load_adaptive_investment_module():
+    path = Path(__file__).with_name("adaptive_investment.py")
+    name = "cuda_optimizer_adaptive_investment_diagnostic"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load adaptive investment module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_ADAPTIVE_INVESTMENT = _load_adaptive_investment_module()
 
 
 def _object(value: Any, field: str) -> dict:
@@ -241,12 +259,270 @@ def _blocked_authorized_action(selection: Mapping[str, Any]) -> tuple[dict, dict
     return candidates[0]
 
 
+def _identity_digest(model: Mapping[str, Any]) -> str:
+    identities = _object(model.get("identities"), "performance_model.identities")
+    payload = json.dumps(
+        identities, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _history_records(value: Sequence[Mapping[str, Any]] | None) -> list[dict]:
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValidationError("candidate_history must be a sequence")
+    records = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise ValidationError(f"candidate_history[{index}] must be an object")
+        records.append(copy.deepcopy(dict(item)))
+    return records
+
+
+def _matching_history(records: list[dict], *, hypothesis_id=None, action_id=None) -> dict:
+    matches = [
+        item
+        for item in records
+        if (hypothesis_id is not None and item.get("hypothesis_id") == hypothesis_id)
+        or (action_id is not None and item.get("action_id") == action_id)
+    ]
+    return matches[-1] if matches else {}
+
+
+def _timing_spend(model: Mapping[str, Any]) -> float:
+    total = 0.0
+    estimates = model.get("action_timing_estimates", {})
+    if not isinstance(estimates, Mapping):
+        return total
+    for estimate in estimates.values():
+        if not isinstance(estimate, Mapping):
+            continue
+        sample_count = estimate.get("sample_count")
+        p50 = estimate.get("p50_seconds")
+        if type(sample_count) is int and sample_count > 0 and type(p50) in {int, float}:
+            total += sample_count * _number(p50, "action_timing_estimates.p50_seconds")
+    return total
+
+
+def _investment_inputs(
+    model: Mapping[str, Any],
+    authorization: Mapping[str, Any] | None,
+    spend: Mapping[str, Any] | None,
+) -> tuple[dict, dict]:
+    timed = _timing_spend(model)
+    explicit = 0.0
+    if spend is not None:
+        explicit = _number(
+            _object(spend, "spend").get("elapsed_seconds"),
+            "spend.elapsed_seconds",
+        )
+    elapsed = max(timed, explicit)
+    if authorization is None:
+        maximum = elapsed + 86400.0
+    else:
+        maximum = _number(
+            _object(authorization, "authorization").get("max_seconds"),
+            "authorization.max_seconds",
+        )
+    return {"max_seconds": maximum}, {"elapsed_seconds": elapsed}
+
+
+def _direction_portfolio(
+    ranked: list[dict],
+    model: Mapping[str, Any],
+    history: list[dict],
+    threshold: float,
+) -> tuple[list[dict], str]:
+    identity = _identity_digest(model)
+    directions = []
+    for item in ranked:
+        record = _matching_history(history, hypothesis_id=item["hypothesis_id"])
+        bound_identity = record.get("identity_digest", identity)
+        stale = type(bound_identity) is str and bound_identity != identity
+        status = (
+            "falsified"
+            if record.get("status") == "falsified"
+            else "stale"
+            if stale
+            else "supported"
+            if item["confidence"] == "direction_supported"
+            else "candidate"
+        )
+        directions.append(
+            {
+                "direction_id": item["hypothesis_id"],
+                "status": status,
+                "mechanism": item["mechanism"],
+                "benefit": {
+                    "lower": (
+                        min(threshold, item["benefit_ceiling_us"])
+                        if status == "supported"
+                        else 0.0
+                    ),
+                    "upper": item["benefit_ceiling_us"],
+                    "basis": item["benefit_ceiling_basis"],
+                    "identity_digest": identity,
+                    "stale": stale,
+                },
+            }
+        )
+    return directions, identity
+
+
+def _action_outcomes(action_id: str, targets: list[str]) -> list[dict]:
+    return [
+        {
+            "outcome_id": f"{action_id}-supports",
+            "supports": copy.deepcopy(targets),
+            "opposes": [],
+        },
+        {
+            "outcome_id": f"{action_id}-opposes",
+            "supports": [],
+            "opposes": copy.deepcopy(targets),
+        },
+    ]
+
+
+def _investment_action(
+    action_id: str,
+    *,
+    mechanism: str,
+    targets: list[str],
+    outcomes: list[dict],
+    controller_action: Mapping[str, Any] | None,
+    model: Mapping[str, Any],
+    history: list[dict],
+    kind: str = "check",
+) -> dict:
+    controller = {} if controller_action is None else dict(controller_action)
+    estimate = model.get("action_timing_estimates", {}).get(action_id, {})
+    record = _matching_history(history, action_id=action_id)
+    status = record.get("implementation_status", record.get("status", "available"))
+    return {
+        "action_id": action_id,
+        "kind": kind,
+        "mechanism": mechanism,
+        "cost": controller.get("cost", "low"),
+        "perturbation": controller.get("perturbation", "low"),
+        "risk": controller.get("risk", "none"),
+        "p90_seconds": _number(
+            record.get("p90_seconds", estimate.get("p90_seconds", 0.0)),
+            f"action {action_id} p90_seconds",
+        ),
+        "target_direction_ids": copy.deepcopy(targets),
+        "outcomes": copy.deepcopy(outcomes),
+        "implementation_status": "failed" if status == "failed" else "available",
+    }
+
+
+def _adaptive_actions(
+    ranked: list[dict],
+    directions: list[dict],
+    selection: Mapping[str, Any],
+    model: Mapping[str, Any],
+    history: list[dict],
+) -> tuple[list[dict], dict[str, dict]]:
+    actions = []
+    metadata = {}
+    by_id = {item["direction_id"]: item for item in directions}
+    if selection.get("status") == "sufficient":
+        for hypothesis in ranked:
+            direction_id = hypothesis["hypothesis_id"]
+            if hypothesis["confidence"] != "direction_supported":
+                continue
+            stale = by_id[direction_id]["status"] == "stale"
+            action_id = (
+                f"refresh-{direction_id}" if stale else f"implement-{direction_id}"
+            )
+            record = _matching_history(history, hypothesis_id=direction_id)
+            candidate_history = [record] if record else []
+            action = _investment_action(
+                action_id,
+                mechanism=(
+                    f"refresh:{hypothesis['mechanism']}"
+                    if stale
+                    else f"candidate:{hypothesis['mechanism']}"
+                ),
+                targets=[direction_id],
+                outcomes=_action_outcomes(action_id, [direction_id]),
+                controller_action=None,
+                model=model,
+                history=candidate_history,
+                kind="refresh" if stale else "check",
+            )
+            if record.get("implementation_status", record.get("status")) == "failed":
+                action["implementation_status"] = "failed"
+            actions.append(action)
+            metadata[action_id] = {
+                "purpose": "refresh" if stale else "candidate",
+                "hypothesis_id": direction_id,
+            }
+        return actions, metadata
+
+    selected = selection.get("selected_request")
+    candidates = []
+    if isinstance(selected, Mapping):
+        candidates.append((dict(selected), True))
+    for rejected in selection.get("rejections", []):
+        if isinstance(rejected, Mapping):
+            candidates.append((dict(rejected), False))
+    for request, is_selected in candidates:
+        action_id = request.get("action_id")
+        controller = request.get("controller_action")
+        if type(action_id) is not str or not isinstance(controller, Mapping):
+            continue
+        targets = request.get("target_hypothesis_ids")
+        if type(targets) is not list or not targets:
+            targets = [item["hypothesis_id"] for item in ranked]
+        outcomes = request.get("outcomes")
+        if type(outcomes) is not list or not outcomes:
+            outcomes = _action_outcomes(action_id, targets)
+        action = _investment_action(
+            action_id,
+            mechanism=controller.get("evidence_kind", action_id),
+            targets=targets,
+            outcomes=outcomes,
+            controller_action=controller,
+            model=model,
+            history=history,
+        )
+        if not is_selected:
+            action["implementation_status"] = "failed"
+        actions.append(action)
+        metadata[action_id] = {"purpose": "evidence", "request": request}
+    return actions, metadata
+
+
+def _knowledge_summary(value: Mapping[str, Any] | None) -> dict:
+    if not isinstance(value, Mapping):
+        return {
+            "status": "unavailable",
+            "candidate_count": 0,
+            "rejection_count": 0,
+            "advisory_only": True,
+        }
+    candidates = value.get("candidates", [])
+    rejections = value.get("rejections", [])
+    return {
+        "status": value.get("knowledge_support", "context_only"),
+        "candidate_count": len(candidates) if type(candidates) is list else 0,
+        "rejection_count": len(rejections) if type(rejections) is list else 0,
+        "advisory_only": True,
+    }
+
+
 def decide_next_step(
     performance_model: Mapping[str, Any],
     hypothesis_result: Mapping[str, Any],
     evidence_selection: Mapping[str, Any],
     *,
     external_review: Mapping[str, Any] | None = None,
+    authorization: Mapping[str, Any] | None = None,
+    spend: Mapping[str, Any] | None = None,
+    candidate_history: Sequence[Mapping[str, Any]] | None = None,
+    knowledge_adaptation: Mapping[str, Any] | None = None,
 ) -> dict:
     """Return one local evidence-authoritative decision and investment brief."""
     model = _object(performance_model, "performance_model")
@@ -258,6 +534,21 @@ def decide_next_step(
     primary = ranked[0] if ranked else None
     threshold = _number(model.get("minimum_effect_us"), "minimum_effect_us", positive=True)
     maximum_ceiling = max((item["benefit_ceiling_us"] for item in ranked), default=0.0)
+    history = _history_records(candidate_history)
+    directions, identity = _direction_portfolio(ranked, model, history, threshold)
+    adaptive_actions, action_metadata = _adaptive_actions(
+        ranked, directions, selection, model, history
+    )
+    adaptive_authorization, adaptive_spend = _investment_inputs(
+        model, authorization, spend
+    )
+    adaptive = _ADAPTIVE_INVESTMENT.decide_next_action(
+        directions,
+        adaptive_actions,
+        authorization=adaptive_authorization,
+        spend=adaptive_spend,
+        minimum_effect=threshold,
+    )
 
     decision = None
     reason = None
@@ -319,6 +610,73 @@ def decide_next_step(
     else:
         raise ValidationError("evidence selection status is inconsistent with hypotheses")
 
+    local_decision = decision
+    if local_decision in {"MEASURE", "PURSUE"}:
+        selected_investment = adaptive.get("selected_action")
+        blocked_investment = adaptive.get("blocked_action")
+        if adaptive["decision"] == "REVIEW_REQUIRED":
+            decision, reason, checkpoint = (
+                "REVIEW_REQUIRED",
+                "cumulative_authorization_exceeded",
+                "after_authorization_decision",
+            )
+            next_action = {
+                "action_id": None if blocked_investment is None else blocked_investment["action_id"],
+                "authorization_reason": "cumulative_time_exceeded",
+            }
+        elif adaptive["decision"] == "STOP":
+            decision, reason, checkpoint = "STOP", adaptive["reason"], "terminal"
+            next_action = None
+        elif isinstance(selected_investment, Mapping):
+            selected_id = selected_investment["action_id"]
+            action_info = action_metadata[selected_id]
+            if action_info["purpose"] == "candidate":
+                chosen = next(
+                    item
+                    for item in ranked
+                    if item["hypothesis_id"] == action_info["hypothesis_id"]
+                )
+                primary = chosen
+                decision, reason, checkpoint = (
+                    "PURSUE",
+                    "direction_supported",
+                    "after_candidate_screen",
+                )
+                next_action = {
+                    "action_id": "implement-candidate",
+                    "hypothesis_id": chosen["hypothesis_id"],
+                    "mechanism": chosen["mechanism"],
+                    "claim_layer": chosen["claim_layer"],
+                }
+            elif action_info["purpose"] == "refresh":
+                decision, reason, checkpoint = (
+                    "MEASURE",
+                    "stale_bound_requires_refresh",
+                    "after_selected_evidence",
+                )
+                next_action = {
+                    "action_id": selected_id,
+                    "kind": "refresh",
+                    "target_hypothesis_ids": copy.deepcopy(
+                        selected_investment["target_direction_ids"]
+                    ),
+                }
+            else:
+                request = action_info["request"]
+                decision, reason, checkpoint = (
+                    "MEASURE",
+                    "discriminating_evidence_required",
+                    "after_selected_evidence",
+                )
+                next_action = {
+                    "request_id": request.get("request_id"),
+                    "action_id": selected_id,
+                    "question": request.get("question"),
+                    "target_hypothesis_ids": copy.deepcopy(
+                        selected_investment["target_direction_ids"]
+                    ),
+                }
+
     if decision not in DECISIONS:
         raise ValidationError("decision state is unsupported")
     uncertainty = set(model.get("uncertainties", []))
@@ -328,7 +686,7 @@ def decide_next_step(
     external_summary["local_adjudication"] = _adjudicate_external_challenge(
         external_summary, decision, primary
     )
-    return {
+    result = {
         "schema_version": DECISION_SCHEMA,
         "epoch_id": model.get("epoch_id"),
         "decision": decision,
@@ -346,3 +704,50 @@ def decide_next_step(
         "next_checkpoint": checkpoint,
         "external_challenge": external_summary,
     }
+    remaining = max(
+        0.0,
+        adaptive_authorization["max_seconds"] - adaptive_spend["elapsed_seconds"],
+    )
+    blocked_summary = copy.deepcopy(adaptive.get("blocked_action"))
+    if blocked_summary is None and result["decision"] == "REVIEW_REQUIRED":
+        blocked_id = (result.get("next_action") or {}).get("action_id")
+        blocked_summary = next(
+            (
+                copy.deepcopy(item)
+                for item in adaptive_actions
+                if item["action_id"] == blocked_id
+            ),
+            None,
+        )
+        if blocked_summary is not None:
+            blocked_summary["implementation_status"] = "available"
+    result["investment_brief"] = {
+        "schema_version": "cuda-optimizer/investment-brief-v1",
+        "decision": result["decision"],
+        "terminal_reason": result["terminal_reason"],
+        "primary_diagnosis": copy.deepcopy(result["primary_diagnosis"]),
+        "benefit_ceiling": copy.deepcopy(result["benefit_ceiling"]),
+        "uncertainty": copy.deepcopy(result["uncertainty"]),
+        "next_action": copy.deepcopy(result["next_action"]),
+        "cost": copy.deepcopy(result["cost"]),
+        "next_checkpoint": result["next_checkpoint"],
+        "external_challenge": copy.deepcopy(result["external_challenge"]),
+        "portfolio": copy.deepcopy(adaptive["portfolio"]),
+        "cumulative_investment": {
+            "elapsed_seconds": adaptive_spend["elapsed_seconds"],
+            "remaining_authorization_seconds": remaining,
+            "projected_p90_seconds": adaptive["projected_spend"]["p90_seconds"],
+            "bound_basis": "controller_elapsed_or_identity_matched_history",
+        },
+        "selected_action": copy.deepcopy(adaptive.get("selected_action")),
+        "blocked_action": blocked_summary,
+        "skipped_action_ids": copy.deepcopy(adaptive.get("skipped_actions", [])),
+        "bound_basis": {
+            "identity_digest": identity,
+            "benefit": "local_execution_map_timing_upper_bound",
+            "knowledge_authority": "none",
+        },
+        "next_feedback_point": adaptive.get("next_checkpoint"),
+        "knowledge_adaptation": _knowledge_summary(knowledge_adaptation),
+    }
+    return result

@@ -507,6 +507,15 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 self.assertEqual(decision["primary_diagnosis"]["claim_layer"], claim_layer)
                 self.assertEqual(decision["next_action"]["action_id"], action_id)
                 self.assertTrue(decision["benefit_ceiling"]["qualifies"])
+                investment = decision["investment_brief"]
+                self.assertEqual(investment["portfolio"][0]["direction_id"], f"h-{name}")
+                self.assertEqual(
+                    investment["cumulative_investment"]["bound_basis"],
+                    "controller_elapsed_or_identity_matched_history",
+                )
+                self.assertEqual(
+                    investment["next_feedback_point"], action_id
+                )
                 if claim_layer != "kernel":
                     self.assertNotEqual(decision["next_action"]["action_id"], "ncu-targeted")
 

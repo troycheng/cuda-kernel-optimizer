@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -85,6 +87,14 @@ class DiagnosticDecisionTests(unittest.TestCase):
             external_review=external_review,
         )
 
+    @staticmethod
+    def identity_digest(model):
+        return hashlib.sha256(
+            json.dumps(
+                model["identities"], sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+
     def test_selected_discriminator_returns_measure_with_unknown_numeric_cost(self) -> None:
         hypotheses = self.hypotheses()
         result = self.decide(
@@ -125,6 +135,145 @@ class DiagnosticDecisionTests(unittest.TestCase):
         self.assertEqual(result["decision"], "PURSUE")
         self.assertEqual(result["primary_diagnosis"]["claim_layer"], "runtime")
         self.assertEqual(result["next_checkpoint"], "after_candidate_screen")
+
+    def test_supported_fallback_is_retained_after_primary_candidate_failure(self) -> None:
+        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
+        for item in value["hypotheses"]:
+            item.update(
+                {
+                    "confidence": "direction_supported",
+                    "support_evidence_ids": ["ev-cpu", "ev-gpu"],
+                    "missing_evidence_kinds": [],
+                }
+            )
+        value["relationships"] = []
+        hypotheses = self.hypotheses(value)
+        model = self.model()
+        selection = {
+            "status": "sufficient",
+            "selected_request": None,
+            "rejections": [],
+            "missing_capability_ids": [],
+            "gap_reason": "hypotheses_sufficiently_supported",
+        }
+
+        result = self.module.decide_next_step(
+            model,
+            hypotheses,
+            selection,
+            candidate_history=[
+                {
+                    "hypothesis_id": "h-framework-gap",
+                    "implementation_status": "failed",
+                    "identity_digest": self.identity_digest(model),
+                }
+            ],
+        )
+
+        self.assertEqual(result["decision"], "PURSUE")
+        self.assertEqual(result["next_action"]["hypothesis_id"], "h-kernel-bound")
+        self.assertIn(
+            "implement-h-framework-gap",
+            result["investment_brief"]["skipped_action_ids"],
+        )
+
+    def test_external_shadow_can_only_request_measurement(self) -> None:
+        hypotheses = self.hypotheses()
+        selection = self.selection(hypotheses)
+        selection["selected_request"]["action_id"] = "shadow-falsifier"
+        selection["selected_request"]["controller_action"][
+            "action_id"
+        ] = "shadow-falsifier"
+        for item in hypotheses["hypothesis_set"]["hypotheses"]:
+            if item["disposition"] == "active":
+                item["confidence"] = "inconclusive"
+
+        result = self.module.decide_next_step(
+            self.model(),
+            hypotheses,
+            selection,
+            knowledge_adaptation={
+                "knowledge_support": "available",
+                "candidates": [
+                    {
+                        "origin": "external",
+                        "mechanism_id": "shadow-mechanism",
+                        "confidence": "inconclusive",
+                        "promotion_authority": "none",
+                    }
+                ],
+                "rejections": [],
+            },
+        )
+
+        self.assertEqual(result["decision"], "MEASURE")
+        self.assertEqual(result["next_action"]["action_id"], "shadow-falsifier")
+        self.assertEqual(result["primary_diagnosis"]["confidence"], "inconclusive")
+        self.assertTrue(
+            result["investment_brief"]["knowledge_adaptation"]["advisory_only"]
+        )
+
+    def test_selector_rejection_cannot_be_reopened_by_time_only_investment(self) -> None:
+        hypotheses = self.hypotheses()
+        selection = self.selection(hypotheses)
+        selected = selection["selected_request"]
+        selected["action_id"] = "z-selected"
+        selected["controller_action"]["action_id"] = "z-selected"
+        rejected = copy.deepcopy(selected)
+        rejected.update(
+            {
+                "request_id": "req-unavailable",
+                "action_id": "a-unavailable",
+                "reason": "required_capability_unavailable",
+            }
+        )
+        rejected["controller_action"]["action_id"] = "a-unavailable"
+        selection["rejections"] = [rejected]
+
+        result = self.decide(self.model(), hypotheses, selection)
+
+        self.assertEqual(result["decision"], "MEASURE")
+        self.assertEqual(result["next_action"]["action_id"], "z-selected")
+        self.assertIn(
+            "a-unavailable", result["investment_brief"]["skipped_action_ids"]
+        )
+
+    def test_stale_execution_map_blocks_candidate_implementation(self) -> None:
+        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
+        framework, kernel = value["hypotheses"]
+        framework.update(
+            {
+                "confidence": "direction_supported",
+                "support_evidence_ids": ["ev-cpu", "ev-gpu"],
+                "missing_evidence_kinds": [],
+            }
+        )
+        kernel.update(
+            {
+                "disposition": "rejected",
+                "oppose_evidence_ids": ["ev-edge"],
+                "missing_evidence_kinds": [],
+            }
+        )
+        hypotheses = self.hypotheses(value)
+        model = self.model()
+
+        result = self.module.decide_next_step(
+            model,
+            hypotheses,
+            self.selection(hypotheses),
+            candidate_history=[
+                {
+                    "hypothesis_id": "h-framework-gap",
+                    "implementation_status": "available",
+                    "identity_digest": "0" * 64,
+                }
+            ],
+        )
+
+        self.assertEqual(result["decision"], "MEASURE")
+        self.assertEqual(result["next_action"]["kind"], "refresh")
+        self.assertIsNone(result["next_action"].get("hypothesis_id"))
 
     def test_no_direction_above_minimum_effect_returns_stop(self) -> None:
         value = copy.deepcopy(self.execution_map)
@@ -217,6 +366,10 @@ class DiagnosticDecisionTests(unittest.TestCase):
         self.assertEqual(result["next_action"]["action_id"], "ncu-targeted")
         self.assertEqual(result["cost"]["class"], "high")
         self.assertEqual(result["next_checkpoint"], "after_authorization_decision")
+        self.assertEqual(
+            result["investment_brief"]["blocked_action"]["action_id"],
+            "ncu-targeted",
+        )
 
     def test_no_active_hypothesis_returns_stop_not_another_round(self) -> None:
         value = hypothesis_fixture(self.hypothesis_module, self.map_module)
