@@ -1409,6 +1409,14 @@ def review_change(
             }
             for item in normalized["reviewers"]
         ]
+        if reviewer.select_reviewer_configs(configs, "final"):
+            return reviewer.run_prioritized_reviewers(
+                configs,
+                request,
+                run_root,
+                trigger="final",
+                total_timeout_seconds=total_timeout,
+            )
         return reviewer.run_reviewers(
             configs,
             request,
@@ -3060,6 +3068,131 @@ def _hypothesis_identity_registry(hypothesis_result: Mapping[str, Any]) -> dict:
     }
 
 
+def _review_diagnostic_direction(
+    control: Mapping[str, Any],
+    run_root: Path,
+    state: Mapping[str, Any],
+    performance_model: Mapping[str, Any],
+    hypothesis_result: Mapping[str, Any],
+    selection: Mapping[str, Any],
+) -> dict | None:
+    """Run an optional redacted direction challenge at bounded trigger points."""
+    reviewers = control.get("reviewers")
+    if type(reviewers) is not list or not reviewers:
+        return None
+    active = [
+        item
+        for item in hypothesis_result["hypothesis_set"]["hypotheses"]
+        if item["disposition"] == "active"
+    ]
+    if state.get("hypothesis_set_sha256") is None:
+        trigger = (
+            "major"
+            if len({item["claim_layer"] for item in active}) > 1
+            else "ordinary"
+        )
+    elif selection.get("status") == "evidence_gap":
+        trigger = "plateau"
+    else:
+        return None
+    reviewer = _load_reviewer_module()
+    active_root = run_root / "active_diagnosis" / "direction_review"
+    selected = selection.get("selected_request")
+    selected_summary = None
+    if isinstance(selected, Mapping):
+        action = selected.get("controller_action", {})
+        selected_summary = {
+            "action_id": selected.get("action_id"),
+            "evidence_kind": action.get("evidence_kind"),
+            "cost": action.get("cost"),
+            "target_hypothesis_ids": copy.deepcopy(
+                selected.get("target_hypothesis_ids", [])
+            ),
+        }
+    performance_summary = {
+        "window_duration_us": performance_model["window_duration_us"],
+        "minimum_effect_us": performance_model["minimum_effect_us"],
+        "observed_layers": copy.deepcopy(performance_model["observed_layers"]),
+        "missing_layers": copy.deepcopy(performance_model["missing_layers"]),
+        "critical_path": copy.deepcopy(performance_model["critical_path"]),
+        "layer_directions": copy.deepcopy(performance_model["layer_directions"]),
+        "uncertainties": copy.deepcopy(performance_model["uncertainties"]),
+    }
+    hypothesis_summary = [
+        {
+            "hypothesis_id": item["hypothesis_id"],
+            "mechanism": item["mechanism"],
+            "claim_layer": item["claim_layer"],
+            "confidence": item["confidence"],
+            "support_evidence_ids": copy.deepcopy(item["support_evidence_ids"]),
+            "oppose_evidence_ids": copy.deepcopy(item["oppose_evidence_ids"]),
+            "missing_evidence_kinds": copy.deepcopy(item["missing_evidence_kinds"]),
+        }
+        for item in active
+    ]
+    request = reviewer.build_review_request(
+        diagnosis={
+            "kind": "performance_direction",
+            "performance_summary": performance_summary,
+        },
+        change_set={
+            "kind": "diagnostic_hypotheses",
+            "hypotheses": hypothesis_summary,
+        },
+        redacted_diff="Source, raw inputs, hostnames, credentials, and raw logs are excluded.",
+        experiment={
+            "selection_status": selection.get("status"),
+            "selected_action": selected_summary,
+        },
+        artifact_hashes={
+            "performance_model.json": _canonical_digest(performance_model),
+            "hypothesis_result.json": _canonical_digest(hypothesis_result),
+            "evidence_selection.json": _canonical_digest(selection),
+        },
+    )
+    _atomic_json(active_root / "request.json", request)
+    remaining = float(state["deadline_epoch"]) - time.time()
+    if remaining < 1:
+        aggregate = {
+            "status": "unavailable",
+            "providers_requested": [],
+            "providers_completed": [],
+            "failed_providers": [],
+            "total_wait_seconds": 0.0,
+            "reviews": [],
+        }
+        _atomic_json(active_root / "review.json", aggregate)
+        return aggregate
+    configs = [
+        {
+            "provider": item["provider"],
+            "argv": item["argv"],
+            "timeout_seconds": item["timeout_seconds"],
+        }
+        for item in reviewers
+    ]
+    try:
+        return reviewer.run_prioritized_reviewers(
+            configs,
+            request,
+            active_root,
+            trigger=trigger,
+            total_timeout_seconds=min(180.0, remaining),
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        aggregate = {
+            "status": "unavailable",
+            "providers_requested": [],
+            "providers_completed": [],
+            "failed_providers": [],
+            "total_wait_seconds": 0.0,
+            "reviews": [],
+            "failure": str(error),
+        }
+        _atomic_json(active_root / "review.json", aggregate)
+        return aggregate
+
+
 def _register_active_diagnosis_proposal_unlocked(
     control: Mapping[str, Any],
     run_dir: os.PathLike[str] | str,
@@ -3137,10 +3270,19 @@ def _register_active_diagnosis_proposal_unlocked(
         performance_model = load_json_object(
             run_root / "active_diagnosis" / "performance_model.json"
         )
+        external_review = _review_diagnostic_direction(
+            normalized,
+            run_root,
+            state,
+            performance_model,
+            hypothesis_result,
+            selection,
+        )
         decision = _load_diagnostic_decision_module().decide_next_step(
             performance_model,
             hypothesis_result,
             selection,
+            external_review=external_review,
         )
     except ValueError as error:
         raise ValidationError(f"active diagnosis proposal rejected: {error}") from error
@@ -3177,6 +3319,9 @@ def _register_active_diagnosis_proposal_unlocked(
         "selection_sha256": _canonical_digest(selection),
         "decision_sha256": _canonical_digest(decision),
         "investment_brief_sha256": _canonical_digest(investment_brief),
+        "external_direction_review_sha256": (
+            None if external_review is None else _canonical_digest(external_review)
+        ),
     }
     _append_active_diagnosis_event(run_root, "proposal", proposal_binding)
     next_action = {
@@ -3201,6 +3346,10 @@ def _register_active_diagnosis_proposal_unlocked(
     )
     if decision["decision"] == "STOP":
         updated["status"] = "completed"
+    if external_review is not None:
+        updated["external_direction_review_sha256"] = _canonical_digest(
+            external_review
+        )
     updated.update(_active_ledger_binding(_verify_active_diagnosis_ledger(run_root)))
     if decision["decision"] == "MEASURE" and selection["selected_request"] is not None:
         updated["selected_request_signature"] = selection["selected_request"][

@@ -26,6 +26,23 @@ ARTIFACT_SCHEMA = "cuda-workload-optimizer/review-artifact-v1"
 AGGREGATE_SCHEMA = "cuda-workload-optimizer/review-aggregate-v1"
 _SHA256 = re.compile(r"[a-f0-9]{64}\Z")
 _PROVIDER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_PROVIDER_PRIORITY = (
+    "google-ai-mode",
+    "glm",
+    "kimi",
+    "deepseek",
+    "gemini",
+)
+_PROVIDER_ALIASES = {
+    "google-ai-mode": "google-ai-mode",
+    "glm": "glm",
+    "zhipu": "glm",
+    "zhipu-qingyan": "glm",
+    "kimi": "kimi",
+    "deepseek": "deepseek",
+    "gemini": "gemini",
+}
+_TRIGGER_TARGETS = {"ordinary": 1, "major": 2, "plateau": 3, "final": 3}
 _SECRET_NAME = re.compile(
     r"(^|[_-])(api[_-]?key|authorization|cookie|credential|password|secret|token)($|[_-])",
     re.IGNORECASE,
@@ -579,6 +596,148 @@ def run_reviewers(
         "failed_providers": failed,
         "total_timeout_seconds": float(total_timeout_seconds),
         "total_wait_seconds": float(elapsed),
+        "reviews": reviews,
+    }
+    _atomic_json(run_root / "review.json", aggregate)
+    return aggregate
+
+
+def _ordered_reviewer_configs(
+    configs: Sequence[Mapping[str, Any]],
+) -> list[dict]:
+    if not isinstance(configs, Sequence) or isinstance(
+        configs, (str, bytes, bytearray)
+    ) or not configs:
+        raise ReviewerError("reviewers must be a non-empty sequence")
+    if len(configs) > 8:
+        raise ReviewerError("reviewers must contain at most 8 providers")
+    normalized = []
+    providers = set()
+    priority = {provider: index for index, provider in enumerate(_PROVIDER_PRIORITY)}
+    for index, raw in enumerate(configs):
+        config = _object(raw, f"reviewers[{index}]")
+        _closed(config, {"provider", "argv", "timeout_seconds"}, f"reviewers[{index}]")
+        _required(config, {"provider", "argv", "timeout_seconds"}, f"reviewers[{index}]")
+        provider = _string(config["provider"], f"reviewers[{index}].provider", 64)
+        if _PROVIDER.fullmatch(provider) is None:
+            raise ReviewerError(f"reviewers[{index}].provider is invalid")
+        if provider in providers:
+            raise ReviewerError("reviewer providers must be unique")
+        providers.add(provider)
+        canonical = _PROVIDER_ALIASES.get(provider.lower())
+        if canonical is None:
+            continue
+        argv = config["argv"]
+        if type(argv) is not list or not argv or any(
+            type(item) is not str or not item for item in argv
+        ):
+            raise ReviewerError(f"reviewers[{index}].argv must be a non-empty string array")
+        timeout = config["timeout_seconds"]
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or not 1 <= float(timeout) <= 3600
+        ):
+            raise ReviewerError(
+                f"reviewers[{index}].timeout_seconds must be between 1 and 3600"
+            )
+        normalized.append(
+            {
+                "provider": provider,
+                "canonical_provider": canonical,
+                "argv": list(argv),
+                "timeout_seconds": float(timeout),
+            }
+        )
+    normalized.sort(
+        key=lambda item: (priority[item["canonical_provider"]], item["provider"])
+    )
+    return [
+        {
+            "provider": item["provider"],
+            "argv": item["argv"],
+            "timeout_seconds": item["timeout_seconds"],
+        }
+        for item in normalized
+    ]
+
+
+def select_reviewer_configs(
+    configs: Sequence[Mapping[str, Any]], trigger: str
+) -> list[dict]:
+    """Select the highest-priority configured providers for one trigger."""
+    if trigger not in _TRIGGER_TARGETS:
+        raise ReviewerError("review trigger is unsupported")
+    return _ordered_reviewer_configs(configs)[: _TRIGGER_TARGETS[trigger]]
+
+
+def run_prioritized_reviewers(
+    configs: Sequence[Mapping[str, Any]],
+    request: Mapping[str, Any],
+    run_dir: str | os.PathLike[str],
+    *,
+    trigger: str,
+    total_timeout_seconds: float = 180.0,
+) -> dict:
+    """Fill a trigger-sized advisory panel with bounded priority fallback."""
+    if trigger not in _TRIGGER_TARGETS:
+        raise ReviewerError("review trigger is unsupported")
+    if (
+        isinstance(total_timeout_seconds, bool)
+        or not isinstance(total_timeout_seconds, (int, float))
+        or not math.isfinite(float(total_timeout_seconds))
+        or not 1 <= float(total_timeout_seconds) <= 180
+    ):
+        raise ReviewerError("total_timeout_seconds must be between 1 and 180")
+    expected = request_digest(request)
+    if request.get("request_digest") != expected:
+        raise ReviewerError("review request digest is invalid")
+    ordered = _ordered_reviewer_configs(configs)
+    target = _TRIGGER_TARGETS[trigger]
+    run_root = Path(run_dir).expanduser().resolve(strict=False)
+    run_root.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    cursor = 0
+    reviews = []
+    while cursor < len(ordered):
+        completed_count = sum(item["status"] == "completed" for item in reviews)
+        if completed_count >= target:
+            break
+        remaining = float(total_timeout_seconds) - (time.monotonic() - started)
+        if remaining < 1:
+            break
+        width = target - completed_count
+        batch = ordered[cursor : cursor + width]
+        cursor += len(batch)
+        if not batch:
+            break
+        artifact = run_reviewers(
+            batch,
+            request,
+            run_root / "batches" / f"{len(reviews):04d}",
+            total_timeout_seconds=min(180.0, remaining),
+        )
+        reviews.extend(copy.deepcopy(artifact["reviews"]))
+    elapsed = max(0.0, time.monotonic() - started)
+    requested = [item["provider"] for item in reviews]
+    completed = [
+        item["provider"] for item in reviews if item["status"] == "completed"
+    ]
+    failed = [
+        item["provider"] for item in reviews if item["status"] != "completed"
+    ]
+    aggregate = {
+        "schema_version": AGGREGATE_SCHEMA,
+        "status": "completed" if completed else "unavailable",
+        "request_digest": expected,
+        "trigger": trigger,
+        "target_completed_provider_count": target,
+        "providers_requested": requested,
+        "providers_completed": completed,
+        "failed_providers": failed,
+        "total_timeout_seconds": float(total_timeout_seconds),
+        "total_wait_seconds": elapsed,
         "reviews": reviews,
     }
     _atomic_json(run_root / "review.json", aggregate)

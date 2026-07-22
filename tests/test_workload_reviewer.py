@@ -431,6 +431,75 @@ class ReviewerProcessTests(unittest.TestCase):
                 artifact,
             )
 
+    def test_direction_reviewer_selection_uses_fixed_priority_and_trigger_width(self) -> None:
+        configs = [
+            {"provider": provider, "argv": [provider], "timeout_seconds": 5}
+            for provider in ("gemini", "deepseek", "kimi", "glm", "google-ai-mode")
+        ]
+
+        expected = {
+            "ordinary": ["google-ai-mode"],
+            "major": ["google-ai-mode", "glm"],
+            "plateau": ["google-ai-mode", "glm", "kimi"],
+            "final": ["google-ai-mode", "glm", "kimi"],
+        }
+        for trigger, providers in expected.items():
+            with self.subTest(trigger=trigger):
+                selected = self.reviewer.select_reviewer_configs(configs, trigger)
+                self.assertEqual(
+                    [item["provider"] for item in selected], providers
+                )
+
+    def test_prioritized_review_falls_through_after_fast_provider_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            good = self._script(
+                root,
+                """
+                request = json.load(sys.stdin)
+                print(json.dumps({
+                    "schema_version": "cuda-workload-optimizer/review-v1",
+                    "request_digest": request["request_digest"],
+                    "verdict": "challenge",
+                    "concerns": [],
+                    "suggested_experiments": ["check one bounded trace"]
+                }))
+                """,
+            )
+            configs = [
+                {
+                    "provider": "google-ai-mode",
+                    "argv": [str(root / "missing-google")],
+                    "timeout_seconds": 2,
+                },
+                {
+                    "provider": "glm",
+                    "argv": [sys.executable, str(good)],
+                    "timeout_seconds": 2,
+                },
+                {
+                    "provider": "kimi",
+                    "argv": [str(root / "unused-kimi")],
+                    "timeout_seconds": 2,
+                },
+            ]
+
+            artifact = self.reviewer.run_prioritized_reviewers(
+                configs,
+                _request(self.reviewer),
+                root / "run",
+                trigger="ordinary",
+                total_timeout_seconds=3,
+            )
+
+            self.assertEqual(
+                artifact["providers_requested"], ["google-ai-mode", "glm"]
+            )
+            self.assertEqual(artifact["providers_completed"], ["glm"])
+            self.assertEqual(artifact["failed_providers"], ["google-ai-mode"])
+            self.assertEqual(artifact["target_completed_provider_count"], 1)
+            self.assertLessEqual(artifact["total_wait_seconds"], 3.25)
+
 
 if __name__ == "__main__":
     unittest.main()

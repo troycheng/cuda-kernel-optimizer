@@ -1738,6 +1738,64 @@ class WorkloadRoundTests(unittest.TestCase):
                     state["terminal_reason"], decision["terminal_reason"]
                 )
 
+    def test_initial_major_direction_uses_top_two_configured_reviewers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            reviewer = project / "direction-reviewer.py"
+            reviewer.write_text(
+                "import json, sys\n"
+                "request = json.load(sys.stdin)\n"
+                "print(json.dumps({\n"
+                " 'schema_version': 'cuda-workload-optimizer/review-v1',\n"
+                " 'request_digest': request['request_digest'],\n"
+                " 'verdict': 'challenge', 'concerns': [],\n"
+                " 'suggested_experiments': ['check one bounded trace']}))\n",
+                encoding="utf-8",
+            )
+            control["reviewers"] = [
+                {
+                    "provider": provider,
+                    "argv": [sys.executable, str(reviewer)],
+                    "timeout_seconds": 5,
+                }
+                for provider in ("gemini", "deepseek", "kimi", "glm", "google-ai-mode")
+            ]
+            self.controller.start_run(control, run_dir)
+            hypothesis, request = self._active_proposal(run_dir)
+
+            state = self.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+
+            decision = json.loads(
+                (run_dir / "active_diagnosis" / "decision.json").read_text("utf-8")
+            )
+            review = json.loads(
+                (
+                    run_dir
+                    / "active_diagnosis"
+                    / "direction_review"
+                    / "review.json"
+                ).read_text("utf-8")
+            )
+            challenge = decision["external_challenge"]
+            self.assertEqual(
+                challenge["providers_requested"], ["google-ai-mode", "glm"]
+            )
+            self.assertEqual(
+                challenge["providers_completed"], ["google-ai-mode", "glm"]
+            )
+            self.assertTrue(challenge["advisory_only"])
+            self.assertEqual(decision["decision"], "MEASURE")
+            self.assertEqual(len(review["reviews"]), 2)
+            self.assertEqual(
+                state["external_direction_review_sha256"],
+                self.controller._canonical_digest(review),
+            )
+
     def test_resume_collects_once_and_never_reexecutes_completed_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
