@@ -470,13 +470,18 @@ def _adaptive_actions(
                 allow_generic_bounds=False,
                 kind="refresh" if stale else "check",
             )
-            if record.get("implementation_status", record.get("status")) == "failed":
+            if (
+                not stale
+                and record.get("implementation_status", record.get("status"))
+                == "failed"
+            ):
                 action["implementation_status"] = "failed"
             if stale:
                 # A stale candidate bound cannot authorize a synthetic command.
                 # Refresh must be represented by an executable catalog action.
                 bounded = False
                 action["p90_seconds"] = None
+                action["implementation_status"] = "available"
                 action["reason"] = "refresh_action_unavailable"
             elif not bounded:
                 action["reason"] = "cost_unavailable"
@@ -642,8 +647,10 @@ def decide_next_step(
         raise ValidationError("evidence selection status is inconsistent with hypotheses")
 
     local_decision = decision
+    effective_selected_action = adaptive.get("selected_action")
+    suppressed_action_ids = []
     if local_decision in {"MEASURE", "PURSUE"}:
-        selected_investment = adaptive.get("selected_action")
+        selected_investment = effective_selected_action
         blocked_investment = adaptive.get("blocked_action")
         unavailable = next(
             (
@@ -669,6 +676,9 @@ def decide_next_step(
                     unavailable_info["hypothesis_id"]
                 ] < rank_by_hypothesis[selected_info["hypothesis_id"]]
         if unavailable is not None and unavailable_blocks_selected:
+            if isinstance(selected_investment, Mapping):
+                suppressed_action_ids.append(selected_investment["action_id"])
+                effective_selected_action = None
             unavailable_info = action_metadata[unavailable["action_id"]]
             unavailable_reason = unavailable["reason"]
             decision, reason, checkpoint = (
@@ -844,7 +854,7 @@ def decide_next_step(
             ),
             "bound_basis": "controller_elapsed_or_identity_matched_history",
         },
-        "selected_action": copy.deepcopy(adaptive.get("selected_action")),
+        "selected_action": copy.deepcopy(effective_selected_action),
         "blocked_action": blocked_summary,
         "skipped_action_ids": sorted(
             set(adaptive.get("skipped_actions", []))
@@ -853,13 +863,18 @@ def decide_next_step(
                 for item in unbounded_actions
                 if item.get("implementation_status") == "failed"
             }
+            | set(suppressed_action_ids)
         ),
         "bound_basis": {
             "identity_digest": identity,
             "benefit": "local_execution_map_timing_upper_bound",
             "knowledge_authority": "none",
         },
-        "next_feedback_point": adaptive.get("next_checkpoint"),
+        "next_feedback_point": (
+            result["next_checkpoint"]
+            if result["decision"] == "REVIEW_REQUIRED"
+            else adaptive.get("next_checkpoint")
+        ),
         "knowledge_adaptation": _knowledge_summary(knowledge_adaptation),
     }
     return result

@@ -756,6 +756,72 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 evidence_entries_before,
             )
 
+    def test_persisted_brief_clears_fallback_suppressed_by_unknown_primary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (
+                helper,
+                control,
+                run_dir,
+                _project,
+                hypothesis,
+                request,
+            ) = self._controller_with_two_supported_directions(root)
+            original_inputs = helper.controller._diagnostic_investment_inputs
+            model = json.loads(
+                (run_dir / "active_diagnosis" / "performance_model.json").read_text(
+                    "utf-8"
+                )
+            )
+            identity_digest = hashlib.sha256(
+                json.dumps(
+                    model["identities"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+            def mixed_inputs(*args, **kwargs):
+                inputs = original_inputs(*args, **kwargs)
+                inputs["candidate_history"] = [
+                    {
+                        "hypothesis_id": "h-kernel-bound",
+                        "action_id": "implement-h-kernel-bound",
+                        "implementation_status": "available",
+                        "identity_digest": identity_digest,
+                        "p90_seconds": 2.0,
+                    }
+                ]
+                return inputs
+
+            with mock.patch.object(
+                helper.controller,
+                "_diagnostic_investment_inputs",
+                side_effect=mixed_inputs,
+            ):
+                state = helper.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+
+            persisted = json.loads(
+                (run_dir / "active_diagnosis" / "investment_brief.json").read_text(
+                    "utf-8"
+                )
+            )
+            self.assertEqual(state["next_action"], "review_required")
+            self.assertIsNone(persisted["selected_action"])
+            self.assertEqual(
+                persisted["blocked_action"]["action_id"],
+                "implement-h-framework-gap",
+            )
+            self.assertEqual(
+                persisted["next_feedback_point"],
+                "after_authorization_decision",
+            )
+            self.assertIn(
+                "implement-h-kernel-bound", persisted["skipped_action_ids"]
+            )
+
     def test_failed_candidate_ledger_selects_supported_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
