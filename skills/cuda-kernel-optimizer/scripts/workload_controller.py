@@ -2985,6 +2985,7 @@ def _hypothesis_identity_registry(hypothesis_result: Mapping[str, Any]) -> dict:
                 "scope_node_ids": item["scope_node_ids"],
                 "statement": item["statement"],
                 "mechanism": item["mechanism"],
+                "claim_layer": item["claim_layer"],
             }
             for item in hypothesis_set["hypotheses"]
         },

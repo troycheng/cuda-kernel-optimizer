@@ -20,6 +20,7 @@ _KINDS = {"mechanism", "unmodeled"}
 _DISPOSITIONS = {"active", "rejected", "undifferentiable"}
 _CONFIDENCE = {"inconclusive", "plausible", "direction_supported"}
 _RELATIONS = {"exclusive", "depends_on", "coexists_with"}
+_CLAIM_LAYERS = {"kernel", "runtime", "workload", "serving"}
 
 
 class ValidationError(ValueError):
@@ -255,6 +256,7 @@ def validate_hypothesis_set(
                 "scope_node_ids",
                 "statement",
                 "mechanism",
+                "claim_layer",
                 "disposition",
                 "confidence",
                 "support_evidence_ids",
@@ -275,6 +277,8 @@ def validate_hypothesis_set(
         _text(item["statement"], f"hypotheses[{index}].statement")
         _identifier(item["mechanism"], f"hypotheses[{index}].mechanism")
         mechanism_key = canonical_mechanism_key(item["mechanism"])
+        if item["claim_layer"] not in _CLAIM_LAYERS:
+            raise ValidationError(f"hypotheses[{index}].claim_layer is unsupported")
         disposition = item["disposition"]
         confidence = item["confidence"]
         if disposition not in _DISPOSITIONS:

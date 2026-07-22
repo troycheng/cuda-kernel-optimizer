@@ -48,6 +48,7 @@ def hypothesis_fixture(module, map_module) -> dict:
                 "scope_node_ids": ["cpu-launch", "gpu-kernel"],
                 "statement": "CPU launch serialization delays the GPU kernel.",
                 "mechanism": "framework_launch_overhead",
+                "claim_layer": "runtime",
                 "disposition": "active",
                 "confidence": "plausible",
                 "support_evidence_ids": ["ev-cpu"],
@@ -61,6 +62,7 @@ def hypothesis_fixture(module, map_module) -> dict:
                 "scope_node_ids": ["gpu-kernel"],
                 "statement": "The kernel body dominates the critical GPU lane.",
                 "mechanism": "kernel_execution",
+                "claim_layer": "kernel",
                 "disposition": "active",
                 "confidence": "inconclusive",
                 "support_evidence_ids": [],
@@ -124,6 +126,13 @@ class HypothesisSpaceTests(unittest.TestCase):
                 self.module.ValidationError, "unknown"
             ):
                 self.validate(item)
+
+    def test_claim_layer_uses_the_existing_closed_taxonomy(self) -> None:
+        value = hypothesis_fixture(self.module, self.map_module)
+        value["hypotheses"][0]["claim_layer"] = "framework"
+
+        with self.assertRaisesRegex(self.module.ValidationError, "claim_layer"):
+            self.validate(value)
 
     def test_scope_and_evidence_references_must_be_current_and_real(self) -> None:
         value = hypothesis_fixture(self.module, self.map_module)
@@ -247,6 +256,7 @@ class HypothesisSpaceTests(unittest.TestCase):
                 "scope_node_ids": ["cpu-launch", "gpu-kernel"],
                 "statement": "An unmodeled dependency may explain the observed gap.",
                 "mechanism": "unmodeled_dependency",
+                "claim_layer": "runtime",
                 "disposition": "active",
                 "confidence": "inconclusive",
                 "support_evidence_ids": [],
