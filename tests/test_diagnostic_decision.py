@@ -225,7 +225,15 @@ class DiagnosticDecisionTests(unittest.TestCase):
             "total_wait_seconds": 2.0,
             "reviews": [
                 {"provider": "glm", "status": "completed", "response": {"verdict": "support"}},
-                {"provider": "kimi", "status": "completed", "response": {"verdict": "challenge"}},
+                {
+                    "provider": "kimi",
+                    "status": "completed",
+                    "response": {
+                        "verdict": "challenge",
+                        "concerns": ["The trace may mix warmup and steady state."],
+                        "suggested_experiments": ["Repeat one bounded steady-state trace."],
+                    },
+                },
             ],
         }
 
@@ -236,6 +244,69 @@ class DiagnosticDecisionTests(unittest.TestCase):
                 )
                 self.assertEqual(result["decision"], local["decision"])
                 self.assertTrue(result["external_challenge"]["advisory_only"])
+
+        challenged = self.decide(
+            model, hypotheses, selection, external_review=conflict
+        )["external_challenge"]
+        self.assertEqual(
+            challenged["challenges"],
+            [
+                {
+                    "provider": "kimi",
+                    "concerns": ["The trace may mix warmup and steady state."],
+                    "suggested_experiments": ["Repeat one bounded steady-state trace."],
+                }
+            ],
+        )
+        self.assertEqual(
+            challenged["local_adjudication"]["status"], "continue_measurement"
+        )
+
+    def test_supported_local_direction_explicitly_overrules_external_challenge(self) -> None:
+        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
+        framework, kernel = value["hypotheses"]
+        framework.update(
+            {
+                "confidence": "direction_supported",
+                "support_evidence_ids": ["ev-cpu", "ev-gpu"],
+                "missing_evidence_kinds": [],
+            }
+        )
+        kernel.update(
+            {
+                "disposition": "rejected",
+                "oppose_evidence_ids": ["ev-edge"],
+                "missing_evidence_kinds": [],
+            }
+        )
+        hypotheses = self.hypotheses(value)
+        external = {
+            "status": "completed",
+            "providers_requested": ["google-ai-mode"],
+            "providers_completed": ["google-ai-mode"],
+            "failed_providers": [],
+            "total_wait_seconds": 1.0,
+            "reviews": [
+                {
+                    "provider": "google-ai-mode",
+                    "status": "completed",
+                    "response": {
+                        "verdict": "challenge",
+                        "concerns": ["Check whether launch gaps are causal."],
+                        "suggested_experiments": [],
+                    },
+                }
+            ],
+        }
+
+        result = self.decide(
+            self.model(), hypotheses, self.selection(hypotheses), external_review=external
+        )
+
+        self.assertEqual(result["decision"], "PURSUE")
+        adjudication = result["external_challenge"]["local_adjudication"]
+        self.assertEqual(adjudication["status"], "overruled_by_bound_local_evidence")
+        self.assertEqual(adjudication["evidence_ids"], ["ev-cpu", "ev-gpu"])
 
 
 if __name__ == "__main__":

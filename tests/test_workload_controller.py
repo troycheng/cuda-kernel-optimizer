@@ -1987,6 +1987,175 @@ class WorkloadRoundTests(unittest.TestCase):
                 "equivalent_request_already_attempted",
             )
 
+    def test_observed_node_update_refreshes_the_execution_map_and_performance_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            contract_path = Path(control["analysis_contract"])
+            contract = json.loads(contract_path.read_text("utf-8"))
+            adapter = Path(contract["actions"][0]["adapter_path"])
+            adapter.write_text(
+                "import json, os\n"
+                "request = json.load(open(os.environ['CUDA_OPTIMIZER_EVIDENCE_REQUEST']))\n"
+                "payload = {\n"
+                " 'schema_version': 'cuda-optimizer/evidence-result-v1',\n"
+                " 'request_signature': request['request_signature'],\n"
+                " 'status': 'observed', 'outcome_id': 'gap-present',\n"
+                " 'observations': {'execution_map_node_updates': [\n"
+                "   {'node_id': 'cpu-launch', 'duration_us': 25.0,\n"
+                "    'first_start_us': 0.0, 'last_end_us': 25.0}\n"
+                " ]}, 'artifacts': []}\n"
+                "open(os.environ['CUDA_OPTIMIZER_EVIDENCE_OUTPUT'], 'w').write(json.dumps(payload))\n",
+                encoding="utf-8",
+            )
+            contract["actions"][0]["adapter_sha256"] = hashlib.sha256(
+                adapter.read_bytes()
+            ).hexdigest()
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            self.controller.start_run(control, run_dir)
+            active = run_dir / "active_diagnosis"
+            before = json.loads((active / "performance_model.json").read_text("utf-8"))
+            hypothesis, request = self._active_proposal(run_dir)
+            self.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+
+            self.controller.collect_active_diagnosis_evidence(control, run_dir)
+
+            execution_map = json.loads((active / "execution_map.json").read_text("utf-8"))
+            model = json.loads((active / "performance_model.json").read_text("utf-8"))
+            cpu_node = next(
+                item for item in execution_map["nodes"] if item["node_id"] == "cpu-launch"
+            )
+            cpu_direction = next(
+                item for item in model["node_directions"] if item["node_id"] == "cpu-launch"
+            )
+            self.assertEqual(cpu_node["duration_us"], 25.0)
+            self.assertEqual(cpu_node["last_end_us"], 25.0)
+            self.assertEqual(cpu_direction["benefit_ceiling_us"], 25.0)
+            self.assertTrue(any(item.startswith("ev-") for item in cpu_node["evidence_ids"]))
+            self.assertNotEqual(model["critical_path"], before["critical_path"])
+            self.assertNotEqual(model, before)
+
+    def test_rejected_mechanism_can_be_replaced_but_cannot_be_renamed_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            self.controller.start_run(control, run_dir)
+            hypothesis, request = self._active_proposal(run_dir)
+            self.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            self.controller.collect_active_diagnosis_evidence(control, run_dir)
+            hypothesis, request = self._active_proposal(run_dir)
+            hypothesis["set_id"] = "hypotheses-0002"
+            kernel = hypothesis["hypotheses"][1]
+            kernel.update(
+                {
+                    "disposition": "rejected",
+                    "confidence": "inconclusive",
+                    "missing_evidence_kinds": [],
+                }
+            )
+            hypothesis["hypotheses"].append(
+                {
+                    "hypothesis_id": "h-transfer-staging",
+                    "kind": "mechanism",
+                    "scope_node_ids": ["cpu-launch"],
+                    "statement": "Transfer staging may serialize launch preparation.",
+                    "mechanism": "transfer_staging",
+                    "claim_layer": "runtime",
+                    "disposition": "active",
+                    "confidence": "inconclusive",
+                    "support_evidence_ids": [],
+                    "oppose_evidence_ids": [],
+                    "missing_evidence_kinds": ["transfer_trace"],
+                    "falsification_question": "Is transfer staging absent from the launch gap?",
+                }
+            )
+            request["request_set_id"] = "requests-0002"
+            request["requests"][0].update(
+                {
+                    "target_hypothesis_ids": [
+                        "h-framework-gap",
+                        "h-transfer-staging",
+                    ],
+                    "exclusive_pairs": [],
+                    "outcomes": [
+                        {
+                            "outcome_id": "gap-present",
+                            "supports": ["h-framework-gap"],
+                            "opposes": ["h-transfer-staging"],
+                        },
+                        {
+                            "outcome_id": "kernel-dominant",
+                            "supports": ["h-transfer-staging"],
+                            "opposes": ["h-framework-gap"],
+                        },
+                    ],
+                }
+            )
+            validated = self.controller._load_hypothesis_space_module().validate_hypothesis_set(
+                hypothesis,
+                epoch=json.loads((run_dir / "active_diagnosis" / "epoch.json").read_text("utf-8")),
+                execution_map=json.loads((run_dir / "active_diagnosis" / "execution_map.json").read_text("utf-8")),
+                evidence_catalog=json.loads((run_dir / "active_diagnosis" / "evidence_catalog.json").read_text("utf-8")),
+            )
+            request["hypothesis_set_sha256"] = validated["hypothesis_set_sha256"]
+
+            state = self.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+
+            self.assertEqual(state["next_action"], "collect_evidence")
+            context = json.loads((run_dir / "diagnosis_context.json").read_text("utf-8"))
+            self.assertIn("kernelexecution", context["closed_mechanism_keys"])
+
+            self.controller.collect_active_diagnosis_evidence(control, run_dir)
+            revived = copy.deepcopy(hypothesis)
+            revived_request = copy.deepcopy(request)
+            refreshed_context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            revived["set_id"] = "hypotheses-0003"
+            revived["execution_map_sha256"] = refreshed_context["execution_map_sha256"]
+            revived["hypotheses"][1].update(
+                {
+                    "mechanism": "Kernel-Execution",
+                    "disposition": "active",
+                    "oppose_evidence_ids": [],
+                    "missing_evidence_kinds": ["ncu_kernel"],
+                }
+            )
+            with self.assertRaisesRegex(ValueError, "closed mechanism"):
+                self.controller.register_active_diagnosis_proposal(
+                    control, run_dir, revived, revived_request
+                )
+
+    def test_live_hypothesis_identity_stays_frozen_inside_the_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            self.controller.start_run(control, run_dir)
+            hypothesis, request = self._active_proposal(run_dir)
+            self.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            self.controller.collect_active_diagnosis_evidence(control, run_dir)
+            hypothesis, request = self._active_proposal(run_dir)
+            hypothesis["hypotheses"][0]["statement"] = "A rewritten live claim."
+
+            with self.assertRaisesRegex(ValueError, "live hypothesis identity"):
+                self.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+
     def test_hypothesis_renaming_cannot_escape_prior_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -2011,7 +2180,7 @@ class WorkloadRoundTests(unittest.TestCase):
                 }
             ]
 
-            with self.assertRaisesRegex(ValueError, "identity registry"):
+            with self.assertRaisesRegex(ValueError, "hypothesis identity"):
                 self.controller.register_active_diagnosis_proposal(
                     control, run_dir, hypothesis, request
                 )
@@ -2808,6 +2977,47 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(state["status"], "completed")
             self.assertEqual(state["next_action"], "done")
             self.assertTrue((run_dir / "evaluation.json").is_file())
+
+    def test_final_external_challenge_is_locally_adjudicated_by_workload_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            self.controller.start_run(control, run_dir)
+            self.controller.register_change(control, run_dir, self._change())
+            (project / "configs" / "value.json").write_text(
+                '{"workers": 8}\n', encoding="utf-8"
+            )
+            external = {
+                "status": "completed",
+                "reviews": [
+                    {
+                        "provider": "google-ai-mode",
+                        "status": "completed",
+                        "response": {
+                            "verdict": "challenge",
+                            "concerns": ["Confirm the workload sample is representative."],
+                            "suggested_experiments": [],
+                        },
+                    }
+                ],
+            }
+
+            with mock.patch.object(
+                self.controller, "review_change", return_value=external
+            ):
+                decision = self.controller.evaluate_change(run_dir)
+
+            adjudication = json.loads(
+                (run_dir / "review_adjudication.json").read_text("utf-8")
+            )
+            self.assertEqual(decision["status"], "promoted")
+            self.assertEqual(
+                adjudication["status"], "overruled_by_confirmed_workload_evidence"
+            )
+            self.assertEqual(adjudication["challenges"][0]["provider"], "google-ai-mode")
+            self.assertEqual(
+                adjudication["local_evidence"]["primary_status"], "confirmed_win"
+            )
 
     def test_short_screen_below_threshold_skips_formal_evaluation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

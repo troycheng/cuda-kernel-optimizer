@@ -173,8 +173,12 @@ separate. Neither page predicts the speedup of a new project.
   outcomes.
 - Produce an early investment brief before expensive profiling and stop when no
   admissible direction clears the project effect threshold.
-- Add bounded, advisory external direction challenges and four controlled RTX
-  5090 mechanism checks covering launch, memory access, GEMM, and transfer overlap.
+- Refresh the performance model from admitted node measurements, retain live
+  hypothesis identities, and allow evidence-closed mechanisms to be replaced
+  without letting renamed variants reopen them.
+- Preserve complete external challenges and record their local evidence
+  adjudication; add four end-to-end RTX 5090 decision checks and a separate,
+  explicitly authorized disposable NCU smoke path.
 
 ### V1.0.1
 

@@ -27,7 +27,8 @@ set. It covers:
   seals its trace and outcome, and returns to the next hypothesis round;
 - a V1.1 diagnosis-mechanism round covering CUDA Graph launch batching,
   coalesced versus strided memory access, FP16 GEMM, and pinned-memory transfer
-  overlap on real SM120 hardware;
+  overlap on real SM120 hardware, followed by production decision-engine
+  admission for all four observations;
 - a target-bounded Nsight Compute attempt. It must either collect real metrics
   with readable counters or record exactly `ERR_NVGPUCTRPERM`; no other
   degraded result is accepted. The test never adds capabilities or changes
@@ -40,7 +41,7 @@ The no-op check uses the production `run_paired`, `classify_pairs`, and
 
 ## Local and current-lane execution
 
-Without opt-in, 13 CPU helper regressions pass and all 10 GPU tests are
+Without opt-in, 14 CPU helper regressions pass and all 10 GPU tests are
 reported as skipped:
 
 ```bash
@@ -102,6 +103,25 @@ runs that exact ID with `--pull never`, and saves both `requested_ref` and
 `CUDA_CURRENT_IMAGE` or `CUDA_COMPAT_IMAGE` when a digest-pinned image is
 available.
 
+## Explicitly authorized NCU smoke
+
+The normal lane remains unprivileged and accepts `ERR_NVGPUCTRPERM` as an
+explicit diagnostic limitation. When the operator has authorized a temporary
+profiling capability, run the separate smoke command on an idle GPU:
+
+```bash
+CUDA_E2E_ALLOW_SYS_ADMIN=1 \
+CUDA_E2E_GPU=7 \
+CUDA_CURRENT_IMAGE=sha256:<validated-image-id> \
+tests/gpu/sm120/remote/run_ncu_authorized_smoke.sh
+```
+
+This command uses an immutable local image, disables networking, mounts the
+repository read-only, drops every capability before adding `SYS_ADMIN`, and
+removes the container on exit. It does not change the NVIDIA driver or
+`RmProfilingAdminOnly`. Do not add this capability to the normal acceptance
+lane or a long-running service container.
+
 Use a distinct `CUDA_E2E_ARTIFACTS` directory for every lane. Expected durable
 outputs include:
 
@@ -145,15 +165,18 @@ Large profiler reports remain in the isolated artifact tree. `ncu
 ## Recorded validation results
 
 The V1.1 lane ran on an idle physical RTX 5090 on 2026-07-22. A fresh artifact
-lane passed 23/23 checks in 97.484 seconds using immutable image
+lane passed 24/24 checks in 98.813 seconds using immutable image
 `sha256:b810841fe8962f6f65bb48a693773696be778653d48c7903dc65471ca37188a2`.
 The four controlled scenarios all passed correctness. CUDA Graph replay reduced
-the 33-launch path from a 208.449 us median to 43.376 us; strided gather took
-97.280 us versus 85.440 us for sequential access; the 4096x4096 FP16 GEMM took
-687.840 us; and overlapping a pinned-memory transfer with GEMM reduced the
-combined path from 999.852 us to 715.471 us. These numbers validate the test
-mechanisms, not the expected benefit for another workload. NCU returned
-`ERR_NVGPUCTRPERM`, and the lane did not change host policy.
+the 33-launch path from a 206.797 us median to 42.306 us; strided gather took
+95.040 us versus 83.328 us for sequential access; the 4096x4096 FP16 GEMM took
+665.472 us; and overlapping a pinned-memory transfer with GEMM reduced the
+combined path from 979.349 us to 692.755 us. The production decision engine
+accepted the expected mechanism for all four scenarios in 2.3--2.9 ms with no
+expensive profiler action. These numbers validate the test mechanisms and
+decision path, not the expected benefit for another workload. The unprivileged
+lane returned `ERR_NVGPUCTRPERM`; the separate authorized smoke completed nine
+NCU passes while leaving host policy unchanged.
 
 The V2.4 controller lane ran on a physical RTX 5090 on 2026-07-17. The current
 container passed 13/13 checks in 34.302 seconds using immutable image

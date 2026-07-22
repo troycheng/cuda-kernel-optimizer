@@ -1437,6 +1437,59 @@ def review_change(
     return reviewer.run_reviewer(reviewer_config, request, run_root)
 
 
+def _write_final_review_adjudication(
+    run_root: Path,
+    review_artifact: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+) -> dict:
+    """Preserve external challenges and state the local evidence decision."""
+    raw_reviews = review_artifact.get("reviews")
+    if type(raw_reviews) is not list:
+        raw_reviews = [review_artifact]
+    challenges = []
+    for item in raw_reviews:
+        if not isinstance(item, Mapping) or item.get("status") != "completed":
+            continue
+        response = item.get("response")
+        if not isinstance(response, Mapping) or response.get("verdict") != "challenge":
+            continue
+        concerns = response.get("concerns", [])
+        experiments = response.get("suggested_experiments", [])
+        challenges.append(
+            {
+                "provider": item.get("provider"),
+                "concerns": copy.deepcopy(concerns) if type(concerns) is list else [],
+                "suggested_experiments": (
+                    copy.deepcopy(experiments) if type(experiments) is list else []
+                ),
+            }
+        )
+    primary_status = evaluation.get("primary", {}).get("status")
+    constraints_passed = all(
+        item.get("status") == "passed"
+        for item in evaluation.get("constraints", [])
+    )
+    if challenges and primary_status == "confirmed_win" and constraints_passed:
+        status = "overruled_by_confirmed_workload_evidence"
+    elif challenges:
+        status = "retained_for_local_review"
+    else:
+        status = "not_required"
+    artifact = {
+        "schema_version": "cuda-workload-optimizer/review-adjudication-v1",
+        "status": status,
+        "advisory_only": True,
+        "challenges": challenges,
+        "local_evidence": {
+            "primary_status": primary_status,
+            "constraints_passed": constraints_passed,
+            "evaluation_sha256": _canonical_digest(evaluation),
+        },
+    }
+    _atomic_json(run_root / "review_adjudication.json", artifact)
+    return artifact
+
+
 def _scope_layout(control: Mapping[str, Any], scope: str) -> tuple[Path, list[str], str]:
     if scope == "project":
         return (
@@ -2403,6 +2456,7 @@ def _build_active_diagnosis_context(
             "requires_unmodeled_hypothesis"
         ],
         "evidence_results": [],
+        "closed_mechanism_keys": [],
     }
     _atomic_json(run_root / "diagnosis_context.json", context)
     _append_active_diagnosis_event(run_root, "context", context)
@@ -2455,6 +2509,16 @@ def _load_active_diagnosis_context(
     result_summaries = context.get("evidence_results", [])
     if type(result_summaries) is not list:
         raise ValidationError("diagnosis context evidence_results is invalid")
+    closed_mechanism_keys = context.get("closed_mechanism_keys", [])
+    if type(closed_mechanism_keys) is not list:
+        raise ValidationError("diagnosis context closed_mechanism_keys is invalid")
+    hypothesis_module = _load_hypothesis_space_module()
+    normalized_closed = [
+        hypothesis_module.canonical_mechanism_key(item)
+        for item in closed_mechanism_keys
+    ]
+    if normalized_closed != sorted(set(normalized_closed)):
+        raise ValidationError("diagnosis context closed_mechanism_keys is not canonical")
     for index, raw_summary in enumerate(result_summaries):
         summary = _object(raw_summary, f"evidence_results[{index}]")
         summary_fields = {
@@ -3051,21 +3115,70 @@ def register_active_diagnosis_proposal(
         )
 
 
-def _hypothesis_identity_registry(hypothesis_result: Mapping[str, Any]) -> dict:
-    hypothesis_set = hypothesis_result["hypothesis_set"]
-    return {
-        "hypotheses": {
-            item["hypothesis_id"]: {
-                "kind": item["kind"],
-                "scope_node_ids": item["scope_node_ids"],
-                "statement": item["statement"],
-                "mechanism": item["mechanism"],
-                "claim_layer": item["claim_layer"],
-            }
-            for item in hypothesis_set["hypotheses"]
-        },
-        "relationships": copy.deepcopy(hypothesis_set["relationships"]),
+def _validate_hypothesis_evolution(
+    prior_result: Mapping[str, Any] | None,
+    current_result: Mapping[str, Any],
+    closed_mechanism_keys: Sequence[str],
+) -> list[str]:
+    """Keep live identities stable while allowing evidence-closed slots to rotate."""
+    module = _load_hypothesis_space_module()
+    closed = {module.canonical_mechanism_key(item) for item in closed_mechanism_keys}
+    current_set = current_result["hypothesis_set"]
+    current_by_id = {
+        item["hypothesis_id"]: item for item in current_set["hypotheses"]
     }
+    if prior_result is not None:
+        prior_set = prior_result["hypothesis_set"]
+        prior_by_id = {
+            item["hypothesis_id"]: item for item in prior_set["hypotheses"]
+        }
+        identity_fields = (
+            "kind",
+            "scope_node_ids",
+            "statement",
+            "mechanism",
+            "claim_layer",
+        )
+        current_mechanisms = {
+            module.canonical_mechanism_key(item["mechanism"]): item["hypothesis_id"]
+            for item in current_set["hypotheses"]
+        }
+        retained_ids = set(prior_by_id) & set(current_by_id)
+        for hypothesis_id, prior in prior_by_id.items():
+            mechanism_key = module.canonical_mechanism_key(prior["mechanism"])
+            if prior["disposition"] != "active":
+                closed.add(mechanism_key)
+                continue
+            current = current_by_id.get(hypothesis_id)
+            if current is None:
+                if mechanism_key in current_mechanisms:
+                    raise ValidationError(
+                        "live hypothesis identity cannot be renamed inside an analysis epoch"
+                    )
+                closed.add(mechanism_key)
+                continue
+            if any(current[field] != prior[field] for field in identity_fields):
+                raise ValidationError(
+                    "live hypothesis identity cannot change inside an analysis epoch"
+                )
+        prior_relationships = {
+            (item["relation"], item["left"], item["right"])
+            for item in prior_set["relationships"]
+            if item["left"] in retained_ids and item["right"] in retained_ids
+        }
+        current_relationships = {
+            (item["relation"], item["left"], item["right"])
+            for item in current_set["relationships"]
+            if item["left"] in retained_ids and item["right"] in retained_ids
+        }
+        if current_relationships != prior_relationships:
+            raise ValidationError(
+                "relationships between retained hypotheses cannot change inside an analysis epoch"
+            )
+    for item in current_set["hypotheses"]:
+        if item["disposition"] != "active":
+            closed.add(module.canonical_mechanism_key(item["mechanism"]))
+    return sorted(closed)
 
 
 def _load_bound_diagnostic_artifacts(
@@ -3104,6 +3217,7 @@ def _load_bound_diagnostic_artifacts(
         "next_action": copy.deepcopy(decision.get("next_action")),
         "cost": copy.deepcopy(decision.get("cost")),
         "next_checkpoint": decision.get("next_checkpoint"),
+        "external_challenge": copy.deepcopy(decision.get("external_challenge")),
     }
     if brief != expected_brief:
         raise ValidationError("investment brief does not match diagnostic decision")
@@ -3261,7 +3375,7 @@ def _register_active_diagnosis_proposal_unlocked(
         action_catalog,
         selection_policy,
     ) = _load_active_diagnosis_context(normalized, run_root, state)
-    frozen_registry = None
+    prior_result = None
     frozen_hypothesis_sha = state.get("hypothesis_set_sha256")
     if frozen_hypothesis_sha is not None:
         prior_result = load_json_object(
@@ -3277,19 +3391,19 @@ def _register_active_diagnosis_proposal_unlocked(
             or _canonical_digest(prior_set) != frozen_hypothesis_sha
         ):
             raise ValidationError("frozen hypothesis result drifted from run state")
-        frozen_registry = _hypothesis_identity_registry(prior_result)
     try:
         hypothesis_result = _load_hypothesis_space_module().validate_hypothesis_set(
             hypothesis_set,
             epoch=epoch,
             execution_map=execution_map,
             evidence_catalog=evidence_catalog,
+            closed_mechanism_keys=context.get("closed_mechanism_keys", []),
         )
-        proposed_registry = _hypothesis_identity_registry(hypothesis_result)
-        if frozen_registry is not None and proposed_registry != frozen_registry:
-            raise ValidationError(
-                "hypothesis identity registry cannot change inside an analysis epoch"
-            )
+        next_closed_mechanism_keys = _validate_hypothesis_evolution(
+            prior_result,
+            hypothesis_result,
+            context.get("closed_mechanism_keys", []),
+        )
         selection = _load_evidence_selector_module().select_evidence_request(
             request_set,
             epoch=epoch,
@@ -3329,6 +3443,9 @@ def _register_active_diagnosis_proposal_unlocked(
     except ValueError as error:
         raise ValidationError(f"active diagnosis proposal rejected: {error}") from error
     active_root = run_root / "active_diagnosis"
+    context = copy.deepcopy(context)
+    context["closed_mechanism_keys"] = next_closed_mechanism_keys
+    _atomic_json(run_root / "diagnosis_context.json", context)
     _atomic_json(
         active_root
         / "hypothesis_generations"
@@ -3352,6 +3469,7 @@ def _register_active_diagnosis_proposal_unlocked(
         "next_action": copy.deepcopy(decision["next_action"]),
         "cost": copy.deepcopy(decision["cost"]),
         "next_checkpoint": decision["next_checkpoint"],
+        "external_challenge": copy.deepcopy(decision["external_challenge"]),
     }
     _atomic_json(active_root / "investment_brief.json", investment_brief)
     proposal_binding = {
@@ -3430,6 +3548,63 @@ def _validate_evidence_result(
     elif outcome_id is not None:
         raise ValidationError("non-observed evidence must use a null outcome_id")
     observations = _object(result["observations"], "evidence_result.observations")
+    raw_updates = observations.get("execution_map_node_updates")
+    if raw_updates is not None:
+        if result["status"] != "observed":
+            raise ValidationError(
+                "only observed evidence can update execution-map nodes"
+            )
+        if type(raw_updates) is not list or not raw_updates or len(raw_updates) > 256:
+            raise ValidationError(
+                "execution_map_node_updates must contain 1 to 256 entries"
+            )
+        seen_node_ids = set()
+        for index, raw_update in enumerate(raw_updates):
+            update = _object(
+                raw_update,
+                f"evidence_result.observations.execution_map_node_updates[{index}]",
+            )
+            _closed(
+                update,
+                {"node_id", "duration_us", "first_start_us", "last_end_us"},
+                f"evidence_result.observations.execution_map_node_updates[{index}]",
+            )
+            _required(
+                update,
+                {"node_id", "duration_us"},
+                f"evidence_result.observations.execution_map_node_updates[{index}]",
+            )
+            node_id = _identifier(update["node_id"], f"node update {index} node_id")
+            if node_id in seen_node_ids:
+                raise ValidationError("execution_map_node_updates contains duplicate nodes")
+            seen_node_ids.add(node_id)
+            duration = update["duration_us"]
+            if (
+                type(duration) not in {int, float}
+                or not math.isfinite(float(duration))
+                or float(duration) <= 0
+            ):
+                raise ValidationError("node update duration_us must be positive and finite")
+            has_start = "first_start_us" in update
+            has_end = "last_end_us" in update
+            if has_start != has_end:
+                raise ValidationError(
+                    "node update timing bounds must be supplied together"
+                )
+            if has_start:
+                start = update["first_start_us"]
+                end = update["last_end_us"]
+                if (
+                    type(start) not in {int, float}
+                    or type(end) not in {int, float}
+                    or not math.isfinite(float(start))
+                    or not math.isfinite(float(end))
+                    or float(start) < 0
+                    or float(end) <= float(start)
+                ):
+                    raise ValidationError(
+                        "node update timing bounds must be finite and increasing"
+                    )
     artifacts = result["artifacts"]
     if type(artifacts) is not list:
         raise ValidationError("evidence_result.artifacts must be an array")
@@ -3477,6 +3652,40 @@ def _validate_evidence_result(
         ),
         "artifacts": sealed_artifacts,
     }
+
+
+def _apply_execution_map_node_updates(
+    execution_map: Mapping[str, Any], result: Mapping[str, Any], evidence_id: str | None
+) -> dict:
+    """Apply only sealed, observed node durations to existing map nodes."""
+    updated = copy.deepcopy(dict(execution_map))
+    changes = result.get("observations", {}).get("execution_map_node_updates")
+    if changes is None:
+        return updated
+    if result.get("status") != "observed" or evidence_id is None:
+        raise ValidationError("execution-map updates require admitted observed evidence")
+    nodes = {item["node_id"]: item for item in updated["nodes"]}
+    for change in changes:
+        node = nodes.get(change["node_id"])
+        if node is None:
+            raise ValidationError("execution-map update references an unknown node")
+        if node["timing_status"] != "observed":
+            raise ValidationError("execution-map update requires observed node timing")
+        duration = float(change["duration_us"])
+        first_start = float(change.get("first_start_us", node["first_start_us"]))
+        last_end = float(change.get("last_end_us", node["last_end_us"]))
+        window = updated["window"]
+        if first_start < float(window["start_us"]) or last_end > float(window["end_us"]):
+            raise ValidationError("execution-map update leaves the analysis window")
+        if duration > last_end - first_start:
+            raise ValidationError("execution-map update exceeds the observed node span")
+        node["duration_us"] = duration
+        node["first_start_us"] = first_start
+        node["last_end_us"] = last_end
+        if evidence_id not in node["evidence_ids"]:
+            node["evidence_ids"].append(evidence_id)
+            node["evidence_ids"].sort()
+    return updated
 
 
 def _run_active_evidence_adapter(
@@ -3883,10 +4092,14 @@ def _collect_active_diagnosis_evidence_unlocked(
     result, execution = _run_active_evidence_adapter(
         normalized, run_root, state, action, selected, attempt_root
     )
-    _atomic_json(attempt_root / "result.json", result)
     evidence_id = None
     if result["status"] == "observed":
         evidence_id = f"ev-{signature[:16]}"
+    execution_map = _apply_execution_map_node_updates(
+        execution_map, result, evidence_id
+    )
+    _atomic_json(attempt_root / "result.json", result)
+    if result["status"] == "observed":
         outcome = next(
             item for item in selected["outcomes"] if item["outcome_id"] == result["outcome_id"]
         )
@@ -3897,6 +4110,17 @@ def _collect_active_diagnosis_evidence_unlocked(
             "supports_hypothesis_ids": sorted(outcome["supports"]),
             "opposes_hypothesis_ids": sorted(outcome["opposes"]),
         }
+    try:
+        execution_map = _load_execution_map_module().validate_execution_map(
+            execution_map,
+            epoch=epoch,
+            evidence_catalog=evidence_catalog,
+        )["execution_map"]
+    except ValueError as error:
+        raise ValidationError(
+            f"evidence produced an invalid execution-map update: {error}"
+        ) from error
+    _atomic_json(run_root / "active_diagnosis" / "execution_map.json", execution_map)
     _atomic_json(run_root / "active_diagnosis" / "evidence_catalog.json", evidence_catalog)
     history_path = run_root / "active_diagnosis" / "request_history.json"
     history = json.loads(history_path.read_text(encoding="utf-8"))
@@ -4641,12 +4865,13 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             time_gate=gate_result,
         )
 
-    review_change(
+    review_artifact = review_change(
         control,
         run_root,
         change,
         deadline_epoch=min(state["deadline_epoch"], time.time() + 180),
     )
+    _write_final_review_adjudication(run_root, review_artifact, evaluation)
     if time.time() > state["deadline_epoch"]:
         return _finish_rejected(
             run_root,

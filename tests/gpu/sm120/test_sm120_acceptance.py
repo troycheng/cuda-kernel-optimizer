@@ -22,6 +22,9 @@ BENCHMARK = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts" / "benchmark.p
 CHECK_ENV = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts" / "check_env.py"
 SCRIPTS = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts"
 RUNNER = Path(__file__).resolve().parent / "remote" / "run_lane.sh"
+NCU_AUTHORIZED_RUNNER = (
+    Path(__file__).resolve().parent / "remote" / "run_ncu_authorized_smoke.sh"
+)
 ARTIFACTS = Path(os.environ.get("CUDA_E2E_ARTIFACTS", "/tmp/cuda-sm120-acceptance"))
 WORKLOAD_CONTROLLER = SCRIPTS / "workload_controller.py"
 READINESS_SMOKE = FIXTURES / "readiness_smoke.py"
@@ -250,6 +253,20 @@ class Sm120AcceptanceHelperTests(unittest.TestCase):
         self.assertIn('"$resolved_image_id"', source)
         self.assertIn("must be empty", source)
 
+    def test_authorized_ncu_runner_is_explicit_ephemeral_and_does_not_change_host_policy(self) -> None:
+        source = NCU_AUTHORIZED_RUNNER.read_text(encoding="utf-8")
+
+        self.assertIn("CUDA_E2E_ALLOW_SYS_ADMIN", source)
+        self.assertIn("--cap-drop ALL", source)
+        self.assertIn("--cap-add SYS_ADMIN", source)
+        self.assertIn("--rm", source)
+        self.assertIn("--network none", source)
+        self.assertIn("resolved_image_id", source)
+        self.assertGreaterEqual(source.count("assert_gpu_idle"), 3)
+        self.assertNotIn("--privileged", source)
+        self.assertNotIn("sysctl", source)
+        self.assertNotIn("RmProfilingAdminOnly", source)
+
     def test_runner_restricts_cutlass_to_the_dedicated_checkout(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
 
@@ -368,6 +385,18 @@ class Sm120AcceptanceHelperTests(unittest.TestCase):
             "torch.mm",
         ):
             self.assertIn(marker, source)
+        acceptance_source = inspect.getsource(
+            Sm120AcceptanceTests.test_v1_1_controlled_diagnostic_scenarios_on_real_gpu
+        )
+        for marker in (
+            "performance_model",
+            "hypothesis_space",
+            "evidence_selector",
+            "diagnostic_decision",
+            "time_to_first_supported_direction_seconds",
+            "expensive_profiler_action_count",
+        ):
+            self.assertIn(marker, acceptance_source)
 
 
 @unittest.skipUnless(
@@ -407,6 +436,145 @@ class Sm120AcceptanceTests(unittest.TestCase):
             self.assertGreaterEqual(len(observation["samples_us"]), 5)
             self.assertTrue(all(value > 0 for value in observation["samples_us"]))
             self.assertTrue(observation["correctness_passed"])
+
+        from tests.test_analysis_epoch import epoch_fixture
+        from tests.test_evidence_selector import (
+            catalog_fixture,
+            policy_fixture,
+            request_fixture,
+        )
+        from tests.test_execution_map import evidence_catalog, map_fixture
+
+        execution_map_module = _load_script("execution_map")
+        performance_model = _load_script("performance_model")
+        hypothesis_space = _load_script("hypothesis_space")
+        evidence_selector = _load_script("evidence_selector")
+        diagnostic_decision = _load_script("diagnostic_decision")
+        epoch = epoch_fixture()
+        catalog = evidence_catalog()
+        frozen_baseline = {
+            "source": "pre-v1.1-controlled-workflow",
+            "time_to_first_supported_direction_seconds": 5.0,
+            "expensive_profiler_action_count": 1,
+        }
+        engine_results = []
+        for name, (mechanism, layer) in expected.items():
+            observation = scenarios[name]
+            started = time.monotonic()
+            execution_map = map_fixture(execution_map_module)
+            window_us = max(
+                observation["baseline_median_us"],
+                observation["comparison_median_us"],
+                1.0,
+            ) * 1.25
+            execution_map["window"].update({"start_us": 0.0, "end_us": window_us})
+            scope_node_id = "gpu-kernel" if layer == "kernel" else "cpu-launch"
+            for node in execution_map["nodes"]:
+                node["first_start_us"] = 0.0
+                node["last_end_us"] = window_us
+                if node["node_id"] == scope_node_id:
+                    node["duration_us"] = min(
+                        observation["comparison_median_us"], window_us
+                    )
+                else:
+                    node["duration_us"] = min(
+                        max(1.0, observation["comparison_median_us"] * 0.05),
+                        window_us,
+                    )
+            execution_map = execution_map_module.validate_execution_map(
+                execution_map, epoch=epoch, evidence_catalog=catalog
+            )["execution_map"]
+            hypothesis = {
+                "schema_version": "cuda-optimizer/hypothesis-set-v1",
+                "set_id": f"hypotheses-{name}",
+                "epoch_id": epoch["epoch_id"],
+                "epoch_sha256": execution_map_module.epoch_digest(epoch),
+                "execution_map_sha256": execution_map_module.execution_map_digest(
+                    execution_map, epoch=epoch, evidence_catalog=catalog
+                ),
+                "hypotheses": [
+                    {
+                        "hypothesis_id": f"h-{name}",
+                        "kind": "mechanism",
+                        "scope_node_ids": [scope_node_id],
+                        "statement": f"The controlled {name} workload exposes {mechanism}.",
+                        "mechanism": mechanism,
+                        "claim_layer": layer,
+                        "disposition": "active",
+                        "confidence": "direction_supported",
+                        "support_evidence_ids": ["ev-cpu", "ev-gpu"],
+                        "oppose_evidence_ids": [],
+                        "missing_evidence_kinds": [],
+                        "falsification_question": "Do the independent controlled measurements disagree?",
+                    }
+                ],
+                "relationships": [],
+            }
+            hypothesis_result = hypothesis_space.validate_hypothesis_set(
+                hypothesis,
+                epoch=epoch,
+                execution_map=execution_map,
+                evidence_catalog=catalog,
+            )
+            request = request_fixture()
+            request["epoch_sha256"] = execution_map_module.epoch_digest(epoch)
+            request["hypothesis_set_sha256"] = hypothesis_result[
+                "hypothesis_set_sha256"
+            ]
+            selection = evidence_selector.select_evidence_request(
+                request,
+                epoch=epoch,
+                execution_map=execution_map,
+                hypothesis_result=hypothesis_result,
+                evidence_catalog=catalog,
+                action_catalog=catalog_fixture(),
+                policy=policy_fixture(),
+                request_history=[],
+            )
+            model = performance_model.build_performance_model(
+                execution_map, minimum_effect_us=1.0
+            )
+            decision = diagnostic_decision.decide_next_step(
+                model, hypothesis_result, selection
+            )
+            elapsed = time.monotonic() - started
+            expensive_profiler_action_count = int(
+                selection.get("selected_request") is not None
+                and selection["selected_request"]["controller_action"]["cost"] == "high"
+            )
+            self.assertEqual(decision["decision"], "PURSUE")
+            self.assertEqual(decision["primary_diagnosis"]["mechanism"], mechanism)
+            self.assertLess(
+                elapsed,
+                frozen_baseline["time_to_first_supported_direction_seconds"],
+            )
+            self.assertLess(
+                expensive_profiler_action_count,
+                frozen_baseline["expensive_profiler_action_count"],
+            )
+            engine_results.append(
+                {
+                    "scenario": name,
+                    "mechanism": mechanism,
+                    "decision": decision["decision"],
+                    "time_to_first_supported_direction_seconds": elapsed,
+                    "expensive_profiler_action_count": expensive_profiler_action_count,
+                }
+            )
+        engine_output = ARTIFACTS / "diagnostic_scenarios" / "engine-acceptance.json"
+        engine_output.write_text(
+            json.dumps(
+                {
+                    "schema_version": "cuda-optimizer/sm120-engine-acceptance-v1",
+                    "scenarios": engine_results,
+                    "frozen_baseline": frozen_baseline,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         self.assertLess(
             scenarios["launch_graph"]["comparison_median_us"],

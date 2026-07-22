@@ -119,21 +119,36 @@ def _external_summary(value: Mapping[str, Any] | None) -> dict:
             "failed_providers": [],
             "total_wait_seconds": 0.0,
             "verdicts": [],
+            "challenges": [],
             "advisory_only": True,
         }
     root = _object(value, "external_review")
     verdicts = []
+    challenges = []
     for item in root.get("reviews", []):
         if not isinstance(item, Mapping):
             continue
         response = item.get("response")
+        verdict = response.get("verdict") if isinstance(response, Mapping) else None
         verdicts.append(
             {
                 "provider": item.get("provider"),
                 "status": item.get("status"),
-                "verdict": response.get("verdict") if isinstance(response, Mapping) else None,
+                "verdict": verdict,
             }
         )
+        if item.get("status") == "completed" and verdict == "challenge":
+            concerns = response.get("concerns", [])
+            experiments = response.get("suggested_experiments", [])
+            challenges.append(
+                {
+                    "provider": item.get("provider"),
+                    "concerns": copy.deepcopy(concerns) if type(concerns) is list else [],
+                    "suggested_experiments": (
+                        copy.deepcopy(experiments) if type(experiments) is list else []
+                    ),
+                }
+            )
     wait = root.get("total_wait_seconds", 0.0)
     return {
         "status": root.get("status", "unavailable"),
@@ -142,8 +157,28 @@ def _external_summary(value: Mapping[str, Any] | None) -> dict:
         "failed_providers": copy.deepcopy(root.get("failed_providers", [])),
         "total_wait_seconds": _number(wait, "external_review.total_wait_seconds"),
         "verdicts": verdicts,
+        "challenges": challenges,
         "advisory_only": True,
     }
+
+
+def _adjudicate_external_challenge(
+    summary: Mapping[str, Any], decision: str, primary: Mapping[str, Any] | None
+) -> dict:
+    """State how local evidence handled an advisory external challenge."""
+    if not summary.get("challenges"):
+        return {"status": "not_required", "evidence_ids": []}
+    if decision == "MEASURE":
+        return {"status": "continue_measurement", "evidence_ids": []}
+    if decision == "PURSUE":
+        evidence_ids = [] if primary is None else primary.get("support_evidence_ids", [])
+        return {
+            "status": "overruled_by_bound_local_evidence",
+            "evidence_ids": sorted(set(evidence_ids)),
+        }
+    if decision == "REVIEW_REQUIRED":
+        return {"status": "retained_for_local_review", "evidence_ids": []}
+    return {"status": "no_effect_on_terminal_decision", "evidence_ids": []}
 
 
 def _selected_action(selection: Mapping[str, Any]) -> tuple[dict, dict] | tuple[None, None]:
@@ -257,6 +292,10 @@ def decide_next_step(
     uncertainty = set(model.get("uncertainties", []))
     for item in active:
         uncertainty.update(item.get("missing_evidence_kinds", []))
+    external_summary = _external_summary(external_review)
+    external_summary["local_adjudication"] = _adjudicate_external_challenge(
+        external_summary, decision, primary
+    )
     return {
         "schema_version": DECISION_SCHEMA,
         "epoch_id": model.get("epoch_id"),
@@ -273,5 +312,5 @@ def decide_next_step(
         "next_action": next_action,
         "cost": _cost_for_action(model, action),
         "next_checkpoint": checkpoint,
-        "external_challenge": _external_summary(external_review),
+        "external_challenge": external_summary,
     }
