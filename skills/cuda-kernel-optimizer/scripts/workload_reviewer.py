@@ -52,6 +52,7 @@ _SECRET_NAME = re.compile(
 _SECRET_LOG = re.compile(
     r'''(?i)(["']?\b[A-Z0-9_]{0,128}(?:API[_-]?KEY|AUTH|COOKIE|CREDENTIAL|PASSWORD|SECRET|TOKEN)[A-Z0-9_]{0,128}\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n,;}]+)'''
 )
+_REQUEST_EXECUTION_FIELDS = {"callback", "command"}
 _SAFE_ENV = {
     "HOME",
     "LANG",
@@ -92,6 +93,8 @@ def _json_copy(value: Any, field: str) -> Any:
                 raise ReviewerError(f"{field} keys must be non-empty strings")
             if _SECRET_NAME.search(key):
                 raise ReviewerError(f"{field} must not contain credentials: {key}")
+            if key.lower() in _REQUEST_EXECUTION_FIELDS:
+                raise ReviewerError(f"{field} must not contain execution field: {key}")
             result[key] = _json_copy(item, f"{field}.{key}")
         return result
     raise ReviewerError(f"{field} must contain JSON-compatible values")
@@ -164,6 +167,46 @@ def request_digest(request: Mapping[str, Any]) -> str:
     return _digest(value)
 
 
+def validate_review_request(value: Mapping[str, Any]) -> dict:
+    """Reject unsafe or malformed advisory input before a provider can start."""
+    request = _object(value, "review request")
+    fields = {
+        "schema_version",
+        "diagnosis",
+        "change_set",
+        "redacted_diff",
+        "experiment",
+        "artifact_hashes",
+        "request_digest",
+    }
+    _closed(request, fields, "review request")
+    _required(request, fields, "review request")
+    if request["schema_version"] != REQUEST_SCHEMA:
+        raise ReviewerError(f"review request schema_version must be {REQUEST_SCHEMA}")
+    hashes = _object(request["artifact_hashes"], "artifact_hashes")
+    for name, digest in hashes.items():
+        _string(name, "artifact_hashes key", maximum=512)
+        if type(digest) is not str or _SHA256.fullmatch(digest) is None:
+            raise ReviewerError(f"artifact_hashes.{name} must be a SHA-256 digest")
+    diff = request["redacted_diff"]
+    if type(diff) is not str:
+        raise ReviewerError("redacted_diff must be a string")
+    if len(diff.encode("utf-8")) > 256 * 1024:
+        raise ReviewerError("redacted_diff exceeds 262144 bytes")
+    base = {
+        "schema_version": REQUEST_SCHEMA,
+        "diagnosis": _json_copy(_object(request["diagnosis"], "diagnosis"), "diagnosis"),
+        "change_set": _json_copy(_object(request["change_set"], "change_set"), "change_set"),
+        "redacted_diff": diff,
+        "experiment": _json_copy(_object(request["experiment"], "experiment"), "experiment"),
+        "artifact_hashes": copy.deepcopy(hashes),
+    }
+    expected = _digest(base)
+    if request["request_digest"] != expected:
+        raise ReviewerError("review request digest is invalid")
+    return {**base, "request_digest": expected}
+
+
 def validate_review_response(
     value: Mapping[str, Any], request: Mapping[str, Any]
 ) -> dict:
@@ -180,9 +223,8 @@ def validate_review_response(
     _required(response, fields, "review_response")
     if response["schema_version"] != RESPONSE_SCHEMA:
         raise ReviewerError(f"review_response.schema_version must be {RESPONSE_SCHEMA}")
-    expected_digest = request_digest(request)
-    if request.get("request_digest") != expected_digest:
-        raise ReviewerError("review request digest is invalid")
+    request = validate_review_request(request)
+    expected_digest = request["request_digest"]
     if response["request_digest"] != expected_digest:
         raise ReviewerError("review response digest does not match request digest")
     if response["verdict"] not in {"support", "challenge", "insufficient"}:
@@ -392,9 +434,8 @@ def run_reviewer(
         raise ReviewerError("output_limit_bytes must be an integer")
     if not 128 <= output_limit_bytes <= 1024 * 1024:
         raise ReviewerError("output_limit_bytes must be between 128 and 1048576")
-    expected = request_digest(request)
-    if request.get("request_digest") != expected:
-        raise ReviewerError("review request digest is invalid")
+    request = validate_review_request(request)
+    expected = request["request_digest"]
 
     run_root = Path(run_dir).expanduser().resolve(strict=False)
     run_root.mkdir(parents=True, exist_ok=True)
@@ -504,9 +545,8 @@ def run_reviewers(
         or not 1 <= float(total_timeout_seconds) <= 180
     ):
         raise ReviewerError("total_timeout_seconds must be between 1 and 180")
-    expected = request_digest(request)
-    if request.get("request_digest") != expected:
-        raise ReviewerError("review request digest is invalid")
+    request = validate_review_request(request)
+    expected = request["request_digest"]
 
     normalized = []
     run_keys = set()
@@ -754,9 +794,8 @@ def run_prioritized_reviewers(
         or not 1 <= float(total_timeout_seconds) <= 180
     ):
         raise ReviewerError("total_timeout_seconds must be between 1 and 180")
-    expected = request_digest(request)
-    if request.get("request_digest") != expected:
-        raise ReviewerError("review request digest is invalid")
+    request = validate_review_request(request)
+    expected = request["request_digest"]
     ordered = _ordered_reviewer_configs(configs)
     target = _TRIGGER_TARGETS[trigger]
     run_root = Path(run_dir).expanduser().resolve(strict=False)
@@ -811,6 +850,7 @@ def run_prioritized_reviewers(
 
 def write_skipped_review(request: Mapping[str, Any], run_dir: str | os.PathLike[str]) -> dict:
     """Record that no reviewer was configured without changing the decision path."""
+    request = validate_review_request(request)
     artifact = _artifact(
         request,
         status="skipped",

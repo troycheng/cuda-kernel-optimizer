@@ -155,6 +155,90 @@ class ReviewerProcessTests(unittest.TestCase):
         )
         return path
 
+    def test_run_reviewers_rejects_execution_or_sensitive_request_before_provider_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            marker = root / "provider-started"
+            provider = self._script(
+                root,
+                f"""
+                pathlib.Path({str(marker)!r}).write_text("started")
+                request = json.load(sys.stdin)
+                print(json.dumps({{
+                    "schema_version": "cuda-workload-optimizer/review-v1",
+                    "request_digest": request["request_digest"],
+                    "verdict": "support",
+                    "concerns": [],
+                    "suggested_experiments": []
+                }}))
+                """,
+            )
+            config = [{
+                "provider": "local-reviewer",
+                "argv": [sys.executable, str(provider)],
+                "timeout_seconds": 1,
+            }]
+            for field, value in (
+                ("command", ["python3", "change.py"]),
+                ("callback", "run_this"),
+                ("secret", "do-not-send"),
+                ("token", "do-not-send"),
+            ):
+                with self.subTest(field=field):
+                    marker.unlink(missing_ok=True)
+                    request = _request(self.reviewer)
+                    request["diagnosis"][field] = value
+                    request["request_digest"] = self.reviewer.request_digest(request)
+                    run_root = root / field
+                    with self.assertRaisesRegex(
+                        self.reviewer.ReviewerError,
+                        "command|callback|credential",
+                    ):
+                        self.reviewer.run_reviewers(
+                            config, request, run_root, total_timeout_seconds=1
+                        )
+                    self.assertFalse(marker.exists())
+                    self.assertFalse((run_root / "review.json").exists())
+
+    def test_aggregate_timeout_accepts_180_and_rejects_181(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            marker = root / "provider-started"
+            provider = self._script(
+                root,
+                f"""
+                pathlib.Path({str(marker)!r}).write_text("started")
+                request = json.load(sys.stdin)
+                print(json.dumps({{
+                    "schema_version": "cuda-workload-optimizer/review-v1",
+                    "request_digest": request["request_digest"],
+                    "verdict": "support",
+                    "concerns": [],
+                    "suggested_experiments": []
+                }}))
+                """,
+            )
+            config = [{
+                "provider": "local-reviewer",
+                "argv": [sys.executable, str(provider)],
+                "timeout_seconds": 1,
+            }]
+            accepted = self.reviewer.run_reviewers(
+                config, _request(self.reviewer), root / "accepted", total_timeout_seconds=180
+            )
+            self.assertEqual(accepted["total_timeout_seconds"], 180.0)
+            self.assertTrue(marker.exists())
+
+            marker.unlink()
+            with self.assertRaisesRegex(
+                self.reviewer.ReviewerError, "between 1 and 180"
+            ):
+                self.reviewer.run_reviewers(
+                    config, _request(self.reviewer), root / "rejected", total_timeout_seconds=181
+                )
+            self.assertFalse(marker.exists())
+            self.assertFalse((root / "rejected" / "review.json").exists())
+
     def test_cli_receives_json_stdin_in_empty_cwd_and_returns_advice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
