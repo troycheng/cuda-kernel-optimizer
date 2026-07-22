@@ -89,12 +89,20 @@ class HypothesisSpaceTests(unittest.TestCase):
         self.catalog = evidence_catalog()
         self.execution_map = map_fixture(self.map_module)
 
-    def validate(self, value: dict, *, execution_map: dict | None = None, catalog=None):
+    def validate(
+        self,
+        value: dict,
+        *,
+        execution_map: dict | None = None,
+        catalog=None,
+        closed_mechanism_keys=(),
+    ):
         return self.module.validate_hypothesis_set(
             value,
             epoch=self.epoch,
             execution_map=self.execution_map if execution_map is None else execution_map,
             evidence_catalog=self.catalog if catalog is None else catalog,
+            closed_mechanism_keys=list(closed_mechanism_keys),
         )
 
     def test_valid_set_is_canonical_and_hash_bound(self) -> None:
@@ -254,6 +262,46 @@ class HypothesisSpaceTests(unittest.TestCase):
         value["hypotheses"][0]["falsification_question"] = ""
         with self.assertRaisesRegex(self.module.ValidationError, "falsification"):
             self.validate(value)
+
+    def test_no_more_than_three_hypotheses_may_remain_active(self) -> None:
+        value = hypothesis_fixture(self.module, self.map_module)
+        for suffix in ("memory", "transfer"):
+            item = copy.deepcopy(value["hypotheses"][1])
+            item.update(
+                {
+                    "hypothesis_id": f"h-{suffix}",
+                    "mechanism": f"{suffix}_mechanism",
+                    "statement": f"The {suffix} mechanism may dominate.",
+                }
+            )
+            value["hypotheses"].append(item)
+
+        with self.assertRaisesRegex(self.module.ValidationError, "at most three active"):
+            self.validate(value)
+
+    def test_mechanism_rename_cannot_create_a_new_active_direction(self) -> None:
+        value = hypothesis_fixture(self.module, self.map_module)
+        item = copy.deepcopy(value["hypotheses"][1])
+        item.update(
+            {
+                "hypothesis_id": "h-kernel-renamed",
+                "mechanism": "Kernel-Execution",
+                "statement": "Renaming the same kernel mechanism must not admit it again.",
+            }
+        )
+        value["hypotheses"].append(item)
+
+        with self.assertRaisesRegex(self.module.ValidationError, "duplicate active mechanism"):
+            self.validate(value)
+
+    def test_closed_mechanism_cannot_reenter_in_a_later_round(self) -> None:
+        value = hypothesis_fixture(self.module, self.map_module)
+
+        with self.assertRaisesRegex(self.module.ValidationError, "closed mechanism"):
+            self.validate(
+                value,
+                closed_mechanism_keys=["Framework-Launch-Overhead"],
+            )
 
     def test_symmetric_relationships_are_canonical_and_not_conflicting(self) -> None:
         value = hypothesis_fixture(self.module, self.map_module)

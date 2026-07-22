@@ -8,7 +8,7 @@ import hashlib
 import importlib.util
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,15 @@ _RELATIONS = {"exclusive", "depends_on", "coexists_with"}
 
 class ValidationError(ValueError):
     """Raised when a hypothesis set can invent or misbind evidence."""
+
+
+def canonical_mechanism_key(value: Any) -> str:
+    """Return the stable key used to block cosmetic mechanism renames."""
+    text = _identifier(value, "mechanism")
+    key = re.sub(r"[^a-z0-9]+", "", text.lower())
+    if not key:
+        raise ValidationError("mechanism has no canonical key")
+    return key
 
 
 def _load_sibling(filename: str, name: str):
@@ -180,6 +189,7 @@ def validate_hypothesis_set(
     epoch: Mapping[str, Any],
     execution_map: Mapping[str, Any],
     evidence_catalog: Mapping[str, Any],
+    closed_mechanism_keys: Sequence[str] = (),
 ) -> dict:
     """Replay map and evidence identities, then admit a canonical hypothesis graph."""
     try:
@@ -217,6 +227,16 @@ def validate_hypothesis_set(
     if _sha(root["execution_map_sha256"], "hypothesis_set.execution_map_sha256") != expected_map_digest:
         raise ValidationError("hypothesis_set execution map digest does not match Controller")
 
+    if not isinstance(closed_mechanism_keys, Sequence) or isinstance(
+        closed_mechanism_keys, (str, bytes, bytearray)
+    ):
+        raise ValidationError("closed_mechanism_keys must be an array")
+    closed_keys = {
+        canonical_mechanism_key(item) for item in closed_mechanism_keys
+    }
+    if len(closed_keys) != len(closed_mechanism_keys):
+        raise ValidationError("closed_mechanism_keys must not contain duplicates")
+
     map_nodes = {
         item["node_id"] for item in map_result["execution_map"]["nodes"]
     }
@@ -225,6 +245,7 @@ def validate_hypothesis_set(
         raise ValidationError("hypothesis_set must contain 1 to 12 hypotheses")
     hypotheses = []
     by_id = {}
+    active_mechanisms = set()
     for index, raw in enumerate(raw_hypotheses):
         item = _closed(
             raw,
@@ -253,12 +274,19 @@ def validate_hypothesis_set(
             raise ValidationError("hypothesis scope references an unknown execution-map node")
         _text(item["statement"], f"hypotheses[{index}].statement")
         _identifier(item["mechanism"], f"hypotheses[{index}].mechanism")
+        mechanism_key = canonical_mechanism_key(item["mechanism"])
         disposition = item["disposition"]
         confidence = item["confidence"]
         if disposition not in _DISPOSITIONS:
             raise ValidationError(f"hypotheses[{index}].disposition is unsupported")
         if confidence not in _CONFIDENCE:
             raise ValidationError(f"hypotheses[{index}].confidence is unsupported")
+        if disposition == "active":
+            if mechanism_key in closed_keys:
+                raise ValidationError("active hypothesis reopens a closed mechanism")
+            if mechanism_key in active_mechanisms:
+                raise ValidationError("duplicate active mechanism is not admissible")
+            active_mechanisms.add(mechanism_key)
         support = _evidence_list(
             item["support_evidence_ids"], f"hypotheses[{index}].support_evidence_ids", catalog
         )
@@ -323,6 +351,9 @@ def validate_hypothesis_set(
         hypotheses.append(normalized)
         by_id[hypothesis_id] = normalized
     hypotheses.sort(key=lambda item: item["hypothesis_id"])
+
+    if sum(item["disposition"] == "active" for item in hypotheses) > 3:
+        raise ValidationError("hypothesis set may contain at most three active hypotheses")
 
     if map_result["requires_unmodeled_hypothesis"] and not any(
         item["kind"] == "unmodeled" and item["disposition"] == "active"

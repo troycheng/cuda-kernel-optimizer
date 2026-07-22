@@ -3050,6 +3050,7 @@ def _register_active_diagnosis_proposal_unlocked(
         selection = _load_evidence_selector_module().select_evidence_request(
             request_set,
             epoch=epoch,
+            execution_map=execution_map,
             hypothesis_result=hypothesis_result,
             evidence_catalog=evidence_catalog,
             action_catalog=action_catalog,

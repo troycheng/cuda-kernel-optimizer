@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import re
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 
@@ -22,6 +24,20 @@ _LEVELS = {"none": 0, "low": 1, "medium": 2, "high": 3}
 
 class ValidationError(ValueError):
     """Raised when a request or Controller policy is not replayable."""
+
+
+def _load_execution_map_module():
+    path = Path(__file__).with_name("execution_map.py")
+    name = "cuda_optimizer_execution_map_evidence_selector"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load execution map module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_EXECUTION_MAP = _load_execution_map_module()
 
 
 def _closed(value: Any, fields: set[str], label: str) -> dict:
@@ -204,6 +220,7 @@ def select_evidence_request(
     value: Mapping[str, Any],
     *,
     epoch: Mapping[str, Any],
+    execution_map: Mapping[str, Any],
     hypothesis_result: Mapping[str, Any],
     evidence_catalog: Mapping[str, Any],
     action_catalog: Mapping[str, Any],
@@ -221,6 +238,20 @@ def select_evidence_request(
     if _canonical_digest(epoch) != epoch_sha:
         raise ValidationError("request_set epoch digest does not match Controller")
     hypotheses, hypothesis_digest = _trusted_hypotheses(hypothesis_result)
+    try:
+        map_result = _EXECUTION_MAP.validate_execution_map(
+            execution_map, epoch=epoch, evidence_catalog=evidence_catalog
+        )
+        map_digest = _EXECUTION_MAP.execution_map_digest(
+            execution_map, epoch=epoch, evidence_catalog=evidence_catalog
+        )
+    except ValueError as error:
+        raise ValidationError(f"invalid Controller execution map: {error}") from error
+    if hypotheses.get("execution_map_sha256") != map_digest:
+        raise ValidationError("hypothesis result is bound to a different execution map")
+    map_nodes = {
+        item["node_id"]: item for item in map_result["execution_map"]["nodes"]
+    }
     catalog, actions = _validate_catalog(action_catalog)
     controller_policy = _validate_policy(policy)
     if not isinstance(evidence_catalog, Mapping):
@@ -402,10 +433,28 @@ def select_evidence_request(
         action = actions[request["action_id"]]
         missing = set(action["required_capability_ids"]) - available
         reason = None
-        if missing:
+        if action["evidence_kind"] == "ncu_kernel":
+            scoped_node_ids = {
+                node_id
+                for hypothesis_id in request["target_hypothesis_ids"]
+                for node_id in active[hypothesis_id]["scope_node_ids"]
+            }
+            if len(scoped_node_ids) != 1:
+                reason = "ncu_requires_one_kernel_node"
+            else:
+                target_node = map_nodes[next(iter(scoped_node_ids))]
+                if target_node["layer"] != "gpu" or target_node["kind"] != "kernel":
+                    reason = "ncu_requires_one_kernel_node"
+        if (
+            reason is None
+            and action["evidence_kind"] in {"nsys_timeline", "global_scan"}
+            and action["evidence_kind"] in set(evidence_kinds.values())
+        ):
+            reason = "equivalent_evidence_already_available"
+        if reason is None and missing:
             reason = "required_capability_unavailable"
             missing_capabilities.update(missing)
-        else:
+        elif reason is None:
             for field, policy_field in (
                 ("cost", "max_cost"),
                 ("perturbation", "max_perturbation"),

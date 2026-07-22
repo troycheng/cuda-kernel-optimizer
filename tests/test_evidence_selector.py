@@ -152,12 +152,25 @@ class EvidenceSelectorTests(unittest.TestCase):
         return value
 
     def select(
-        self, value: dict, *, catalog=None, policy=None, history=(), completed_actions=()
+        self,
+        value: dict,
+        *,
+        catalog=None,
+        policy=None,
+        history=(),
+        completed_actions=(),
+        hypothesis_result=None,
+        execution_map=None,
     ):
         return self.module.select_evidence_request(
             value,
             epoch=self.epoch,
-            hypothesis_result=self.hypothesis_result,
+            execution_map=self.execution_map if execution_map is None else execution_map,
+            hypothesis_result=(
+                self.hypothesis_result
+                if hypothesis_result is None
+                else hypothesis_result
+            ),
             evidence_catalog=self.evidence,
             action_catalog=catalog_fixture() if catalog is None else catalog,
             policy=policy_fixture() if policy is None else policy,
@@ -281,6 +294,61 @@ class EvidenceSelectorTests(unittest.TestCase):
         value["requests"] = [first, second]
         result = self.select(value)
         self.assertEqual(result["selected_request"]["request_id"], "req-a")
+
+    def test_ncu_cannot_target_a_cross_layer_or_non_kernel_scope(self) -> None:
+        value = self.requests()
+        request = value["requests"][1]
+        request["target_hypothesis_ids"] = ["h-framework-gap"]
+        request["outcomes"] = [
+            {
+                "outcome_id": "launch-stall",
+                "supports": ["h-framework-gap"],
+                "opposes": [],
+            },
+            {
+                "outcome_id": "no-launch-stall",
+                "supports": [],
+                "opposes": ["h-framework-gap"],
+            },
+        ]
+        value["requests"] = [request]
+
+        result = self.select(value)
+
+        self.assertEqual(result["status"], "evidence_gap")
+        self.assertEqual(result["rejections"][0]["reason"], "ncu_requires_one_kernel_node")
+
+    def test_existing_global_trace_is_not_profiled_again_in_same_epoch(self) -> None:
+        catalog = catalog_fixture()
+        catalog["actions"].append(
+            {
+                "action_id": "global-profile",
+                "evidence_kind": "nsys_timeline",
+                "required_capability_ids": ["nsys.timeline"],
+                "cost": "high",
+                "perturbation": "high",
+                "risk": "none",
+                "control_scope": "read_only",
+                "repeatable": True,
+            }
+        )
+        value = self.requests()
+        request = value["requests"][1]
+        request.update(
+            {
+                "request_id": "req-global-repeat",
+                "action_id": "global-profile",
+            }
+        )
+        value["requests"] = [request]
+
+        result = self.select(value, catalog=catalog)
+
+        self.assertEqual(result["status"], "evidence_gap")
+        self.assertEqual(
+            result["rejections"][0]["reason"],
+            "equivalent_evidence_already_available",
+        )
 
 
 if __name__ == "__main__":

@@ -230,6 +230,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
         selected = self.selector_module.select_evidence_request(
             request,
             epoch=self.epoch,
+            execution_map=execution_map,
             hypothesis_result=admitted,
             evidence_catalog=self.evidence,
             action_catalog=catalog_fixture(),
@@ -257,6 +258,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
         selected_without_relationships = self.selector_module.select_evidence_request(
             ablated_request,
             epoch=self.epoch,
+            execution_map=execution_map,
             hypothesis_result=ablated,
             evidence_catalog=self.evidence,
             action_catalog=catalog_fixture(),
@@ -288,6 +290,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             return self.selector_module.select_evidence_request(
                 request,
                 epoch=self.epoch,
+                execution_map=execution_map,
                 hypothesis_result=admitted,
                 evidence_catalog=self.evidence,
                 action_catalog=catalog_fixture(),
