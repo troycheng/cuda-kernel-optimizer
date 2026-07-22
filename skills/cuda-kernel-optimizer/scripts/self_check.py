@@ -91,6 +91,7 @@ _V3_1_SCRIPTS = (
     "hypothesis_space.py",
     "evidence_selector.py",
     "diagnostic_knowledge.py",
+    "knowledge_adapter.py",
 )
 _V3_1_SCHEMAS = (
     "readiness_contract.schema.json",
