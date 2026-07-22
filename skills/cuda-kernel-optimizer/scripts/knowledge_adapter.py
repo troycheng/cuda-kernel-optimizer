@@ -89,7 +89,9 @@ def _context(value: Mapping[str, Any]) -> dict:
         raise ValidationError("context authorization is unsupported")
     return {
         "architecture": _identifier(value["architecture"], "context.architecture"),
-        "software_version": _text(value["software_version"], "context.software_version"),
+        "software_version": _identifier(
+            value["software_version"], "context.software_version"
+        ),
         "execution_node_ids": _ids(value["execution_node_ids"], "context.execution_node_ids"),
         "uncovered_interval_ids": _ids(
             value["uncovered_interval_ids"],
@@ -132,7 +134,7 @@ def _normalize(
     if set(raw) - {"external_gain_pct"} != required:
         return None, "invalid_suggestion"
     try:
-        source = _text(raw["source"], "suggestion.source")
+        source = _identifier(raw["source"], "suggestion.source")
         mechanism_id = _identifier(raw["mechanism_id"], "suggestion.mechanism_id")
         statement = _text(raw["statement"], "suggestion.statement")
         applicability = raw["applicability"]
@@ -145,7 +147,7 @@ def _normalize(
             applicability["architectures"], "suggestion.applicability.architectures"
         )
         versions = [
-            _text(item, f"suggestion.applicability.software_versions[{index}]")
+            _identifier(item, f"suggestion.applicability.software_versions[{index}]")
             for index, item in enumerate(applicability["software_versions"])
         ]
         if not versions or len(versions) != len(set(versions)):
@@ -169,7 +171,7 @@ def _normalize(
         control_scope = action["control_scope"]
         if action_risk not in _LEVELS or control_scope not in _SCOPES:
             raise ValidationError("suggestion.evidence_action authorization is unsupported")
-        version = _text(raw["knowledge_version"], "suggestion.knowledge_version")
+        version = _identifier(raw["knowledge_version"], "suggestion.knowledge_version")
         freshness = raw["freshness"]
         digest = _identifier(raw["query_digest"], "suggestion.query_digest")
     except ValidationError:
@@ -197,6 +199,17 @@ def _normalize(
     normalized_statement = (
         statement if origin == "bundled" else f"Mechanism candidate: {mechanism_id}."
     )
+    normalized_question = question
+    if origin != "bundled":
+        local_scope = (
+            f"scope {', '.join(scope_ids)}"
+            if scope_ids
+            else f"uncovered interval {interval_id}"
+        )
+        normalized_question = (
+            f"Does local evidence action {action_id} falsify mechanism "
+            f"{mechanism_id} at {local_scope}?"
+        )
     return {
         "mechanism_id": mechanism_id,
         "statement": normalized_statement,
@@ -206,7 +219,7 @@ def _normalize(
         },
         "scope_node_ids": scope_ids,
         "unmodeled_interval_id": interval_id,
-        "falsification_question": question,
+        "falsification_question": normalized_question,
         "evidence_action": {
             "action_id": action_id,
             "evidence_kind": evidence_kind,

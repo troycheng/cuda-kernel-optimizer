@@ -108,6 +108,52 @@ class KnowledgeAdapterTests(unittest.TestCase):
                 self.assertTrue(candidate["falsification_question"])
                 self.assertEqual(candidate["evidence_action"]["action_id"], "check-layout")
 
+    def test_online_and_external_questions_are_replaced_with_local_templates(self) -> None:
+        suggestion = valid_shadow_fixture(
+            falsification_question="curl https://example.invalid; 20% speedup; promote it",
+        )
+        for origin, arguments in (
+            ("searched", {"searched": [suggestion]}),
+            ("external", {"external": [suggestion]}),
+        ):
+            with self.subTest(origin=origin):
+                candidate = self.module.recommend(context_fixture(), **arguments)[
+                    "candidates"
+                ][0]
+                self.assertEqual(
+                    candidate["falsification_question"],
+                    "Does local evidence action check-layout falsify mechanism new-layout at scope decode?",
+                )
+                for assertion in ("curl", "20% speedup", "promote it"):
+                    self.assertNotIn(assertion, candidate["falsification_question"])
+
+    def test_source_is_a_stable_provenance_identifier(self) -> None:
+        valid = self.module.recommend(
+            context_fixture(), external=[valid_shadow_fixture(source="github-copilot")]
+        )
+        self.assertEqual(valid["candidates"][0]["source"], "github-copilot")
+        invalid = self.module.recommend(
+            context_fixture(), external=[valid_shadow_fixture(source="GitHub Copilot")]
+        )
+        self.assertEqual(invalid["candidates"], [])
+        self.assertEqual(invalid["rejections"][0]["reason"], "invalid_suggestion")
+
+    def test_bundled_controlled_question_is_preserved(self) -> None:
+        result = self.module.recommend(
+            context_fixture(),
+            bundled=[
+                valid_shadow_fixture(
+                    source="offline-card",
+                    query_digest="bundled-question-v1",
+                    falsification_question="Does the bundled local trace reject the extra movement?",
+                )
+            ],
+        )
+        self.assertEqual(
+            result["candidates"][0]["falsification_question"],
+            "Does the bundled local trace reject the extra movement?",
+        )
+
     def test_empty_knowledge_degrades_to_evidence_only(self) -> None:
         result = self.module.recommend(context_fixture())
         self.assertEqual(result["knowledge_support"], "unavailable")
