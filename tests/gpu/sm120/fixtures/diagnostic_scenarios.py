@@ -50,6 +50,7 @@ def _observation(
     comparison: list[float],
     *,
     correctness_passed: bool,
+    expected_comparison: str,
     **details,
 ) -> dict:
     return {
@@ -60,6 +61,7 @@ def _observation(
         "comparison_median_us": statistics.median(comparison),
         "samples_us": comparison,
         "correctness_passed": correctness_passed,
+        "expected_comparison": expected_comparison,
         **details,
     }
 
@@ -96,6 +98,7 @@ def launch_graph() -> dict:
         eager_samples,
         graph_samples,
         correctness_passed=correct,
+        expected_comparison="faster",
         launches_per_replay=operations + 1,
     )
 
@@ -124,31 +127,51 @@ def memory_coalescing() -> dict:
         sequential_samples,
         strided_samples,
         correctness_passed=correct,
+        expected_comparison="slower",
         bytes_read=size * source.element_size(),
     )
 
 
 def compute_gemm() -> dict:
     size = 4096
-    left = torch.randn((size, size), device="cuda", dtype=torch.float16)
-    right = torch.randn((size, size), device="cuda", dtype=torch.float16)
-    output = torch.empty((size, size), device="cuda", dtype=torch.float16)
+    left = torch.randn((size, size), device="cuda", dtype=torch.float32)
+    right = torch.randn((size, size), device="cuda", dtype=torch.float32)
+    precise = torch.empty((size, size), device="cuda", dtype=torch.float32)
+    tensor_core = torch.empty_like(precise)
 
-    def gemm():
+    def gemm(*, allow_tf32: bool, output: torch.Tensor):
+        torch.backends.cuda.matmul.allow_tf32 = allow_tf32
         torch.mm(left, right, out=output)
 
-    samples = _event_samples(gemm)
-    gemm()
+    precise_samples = _event_samples(
+        lambda: gemm(allow_tf32=False, output=precise)
+    )
+    tensor_core_samples = _event_samples(
+        lambda: gemm(allow_tf32=True, output=tensor_core)
+    )
+    gemm(allow_tf32=False, output=precise)
+    gemm(allow_tf32=True, output=tensor_core)
     torch.cuda.synchronize()
-    median_us = statistics.median(samples)
+    relative_error = float(
+        (
+            torch.linalg.vector_norm(precise - tensor_core)
+            / torch.linalg.vector_norm(precise)
+        ).item()
+    )
+    median_us = statistics.median(tensor_core_samples)
     observed_tflops = (2.0 * size**3) / (median_us * 1_000_000.0)
     return _observation(
         "compute_gemm",
-        "gemm_tile_occupancy",
+        "tf32_tensor_core_path",
         "kernel",
-        samples,
-        samples,
-        correctness_passed=bool(torch.isfinite(output).all().item()),
+        precise_samples,
+        tensor_core_samples,
+        correctness_passed=bool(
+            torch.isfinite(tensor_core).all().item()
+            and relative_error <= 0.01
+        ),
+        expected_comparison="faster",
+        relative_frobenius_error=relative_error,
         observed_tflops=observed_tflops,
         shape=[size, size, size],
     )
@@ -184,8 +207,38 @@ def transfer_overlap() -> dict:
         serial_samples,
         overlap_samples,
         correctness_passed=correct,
+        expected_comparison="faster",
         transfer_bytes=elements * host.element_size(),
     )
+
+
+SCENARIOS = {
+    "launch_graph": launch_graph,
+    "memory_coalescing": memory_coalescing,
+    "compute_gemm": compute_gemm,
+    "transfer_overlap": transfer_overlap,
+}
+
+
+def run_scenario(name: str) -> dict:
+    try:
+        function = SCENARIOS[name]
+    except KeyError as error:
+        raise ValueError(f"unknown controlled scenario: {name}") from error
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is unavailable")
+    capability = list(torch.cuda.get_device_capability())
+    if capability != [12, 0]:
+        raise RuntimeError(f"expected SM120, got {capability}")
+    return {
+        "device": {
+            "name": torch.cuda.get_device_name(),
+            "capability": capability,
+            "torch": torch.__version__,
+            "cuda": torch.version.cuda,
+        },
+        "observation": function(),
+    }
 
 
 def main() -> int:
@@ -205,12 +258,7 @@ def main() -> int:
             "torch": torch.__version__,
             "cuda": torch.version.cuda,
         },
-        "scenarios": [
-            launch_graph(),
-            memory_coalescing(),
-            compute_gemm(),
-            transfer_overlap(),
-        ],
+        "scenarios": [function() for function in SCENARIOS.values()],
     }
     output = Path(args.json_out)
     output.parent.mkdir(parents=True, exist_ok=True)

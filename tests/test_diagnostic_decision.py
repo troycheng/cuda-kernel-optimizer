@@ -144,6 +144,65 @@ class DiagnosticDecisionTests(unittest.TestCase):
         self.assertEqual(result["terminal_reason"], "benefit_ceiling_below_minimum_effect")
         self.assertIsNone(result["next_action"])
 
+    def test_overlapping_scoped_nodes_use_union_not_summed_duration(self) -> None:
+        execution_map = copy.deepcopy(self.execution_map)
+        for node in execution_map["nodes"]:
+            node.update(
+                {
+                    "duration_us": 700.0,
+                    "first_start_us": 0.0,
+                    "last_end_us": 700.0,
+                }
+            )
+        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
+        value["execution_map_sha256"] = self.map_module.execution_map_digest(
+            execution_map,
+            epoch=self.epoch,
+            evidence_catalog=self.evidence,
+        )
+        value["hypotheses"] = [
+            {
+                "hypothesis_id": "h-overlapping-path",
+                "kind": "mechanism",
+                "scope_node_ids": ["cpu-launch", "gpu-kernel"],
+                "statement": "One mechanism affects two fully overlapping nodes.",
+                "mechanism": "shared_overlapping_path",
+                "claim_layer": "runtime",
+                "disposition": "active",
+                "confidence": "direction_supported",
+                "support_evidence_ids": ["ev-cpu", "ev-gpu"],
+                "oppose_evidence_ids": [],
+                "missing_evidence_kinds": [],
+                "falsification_question": "Does either node remain after the shared mechanism is removed?",
+            }
+        ]
+        value["relationships"] = []
+        hypotheses = self.hypothesis_module.validate_hypothesis_set(
+            value,
+            epoch=self.epoch,
+            execution_map=execution_map,
+            evidence_catalog=self.evidence,
+        )
+        selection = {
+            "status": "sufficient",
+            "selected_request": None,
+            "rejections": [],
+            "missing_capability_ids": [],
+            "gap_reason": "hypotheses_sufficiently_supported",
+        }
+
+        result = self.decide(
+            self.model(execution_map, minimum_effect_us=800.0),
+            hypotheses,
+            selection,
+        )
+
+        self.assertEqual(result["benefit_ceiling"]["microseconds"], 700.0)
+        self.assertEqual(result["decision"], "STOP")
+        self.assertEqual(
+            result["terminal_reason"], "benefit_ceiling_below_minimum_effect"
+        )
+
     def test_high_value_action_outside_authorization_requires_review(self) -> None:
         hypotheses = self.hypotheses()
         policy = policy_fixture()
@@ -262,7 +321,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
             challenged["local_adjudication"]["status"], "continue_measurement"
         )
 
-    def test_supported_local_direction_explicitly_overrules_external_challenge(self) -> None:
+    def test_supported_local_direction_retains_unmapped_external_challenge(self) -> None:
         value = hypothesis_fixture(self.hypothesis_module, self.map_module)
         framework, kernel = value["hypotheses"]
         framework.update(
@@ -305,8 +364,10 @@ class DiagnosticDecisionTests(unittest.TestCase):
 
         self.assertEqual(result["decision"], "PURSUE")
         adjudication = result["external_challenge"]["local_adjudication"]
-        self.assertEqual(adjudication["status"], "overruled_by_bound_local_evidence")
-        self.assertEqual(adjudication["evidence_ids"], ["ev-cpu", "ev-gpu"])
+        self.assertEqual(
+            adjudication["status"], "retained_for_candidate_validation"
+        )
+        self.assertEqual(adjudication["evidence_ids"], [])
 
 
 if __name__ == "__main__":

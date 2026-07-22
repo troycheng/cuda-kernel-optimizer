@@ -150,6 +150,20 @@ class HypothesisSpaceTests(unittest.TestCase):
         with self.assertRaisesRegex(self.module.ValidationError, "current epoch"):
             self.validate(hypothesis_fixture(self.module, self.map_module), catalog=catalog)
 
+    def test_active_hypothesis_must_touch_the_current_hot_path(self) -> None:
+        execution_map = copy.deepcopy(self.execution_map)
+        execution_map["hot_path"] = ["gpu-kernel"]
+        value = hypothesis_fixture(self.module, self.map_module)
+        value["execution_map_sha256"] = self.map_module.execution_map_digest(
+            execution_map,
+            epoch=self.epoch,
+            evidence_catalog=self.catalog,
+        )
+        value["hypotheses"][1]["scope_node_ids"] = ["cpu-launch"]
+
+        with self.assertRaisesRegex(self.module.ValidationError, "hot path"):
+            self.validate(value, execution_map=execution_map)
+
     def test_single_evidence_kind_cannot_support_direction(self) -> None:
         value = hypothesis_fixture(self.module, self.map_module)
         item = value["hypotheses"][0]

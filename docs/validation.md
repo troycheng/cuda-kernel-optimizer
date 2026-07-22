@@ -5,7 +5,7 @@ predict the speedup of a new workload.
 
 ## Automated checks
 
-The local CPU/static suite ran 1,179 tests on 2026-07-22: 1,169 passed, 10 physical RTX 5090 opt-in tests were skipped, and none failed. It covers input
+The local CPU/static suite ran 1,190 tests on 2026-07-22: 1,180 passed, 10 physical RTX 5090 opt-in tests were skipped, and none failed. It covers input
 validation, state recovery, evidence binding, shared-host guards, timeouts, restoration, capability retrieval,
 stability calibration, audit cadence, performance-model accounting, bounded
 hypothesis admission, targeted evidence selection, and deterministic decision logic. Pre-V1
@@ -18,17 +18,23 @@ validate the reader's CUDA environment.
 
 ## Physical GPU lane
 
-The V1.1 lane passed 24 of 24 checks in 98.813 seconds on a physical RTX 5090
+The V1.1 lane passed 24 of 24 checks in 134.726 seconds on a physical RTX 5090
 on 2026-07-22. It used immutable compatibility image
 `sha256:b810841fe8962f6f65bb48a693773696be778653d48c7903dc65471ca37188a2`.
 Four controlled workloads exercised CUDA Graph launch batching, coalesced versus
-strided memory access, 4096x4096 FP16 GEMM, and pinned-memory transfer overlap.
-Each real observation then passed through the production performance model,
-hypothesis admission, evidence selector, and decision logic. All four reached the
-expected supported direction in 2.3--2.9 milliseconds without an expensive
-profiler action.
-The measurements confirm that these mechanisms and the target path execute; they
-do not predict a new workload's speedup. The complete lane also replayed the
+strided memory access, TF32-disabled versus TF32-enabled 4096x4096 GEMM, and
+pinned-memory transfer overlap. For each known fixture hypothesis, the Controller
+ran a global measurement, admitted a separate project-copy direction experiment,
+reran the GPU workload, sealed the new observation, and only then allowed
+`direction_supported` and `PURSUE`. The four paths completed in 9.221--9.659
+seconds without a high-cost profiler action.
+After the final closed-scope history hardening, the four Controller scenarios
+were rerun against the same immutable image and passed in 44.308 seconds.
+
+This is a Controller evidence-admission test. The hypotheses and benchmark-derived
+map fixtures are supplied by the test, so the result does not show that an AI can
+infer the mechanism from an unfamiliar profile. It also does not predict a new
+workload's speedup. The complete lane replayed the
 existing readiness, active-diagnosis, paired-measurement, restoration, and
 promotion paths. The default unprivileged lane returned `ERR_NVGPUCTRPERM`.
 A separate, explicitly authorized disposable container added only `SYS_ADMIN`,

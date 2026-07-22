@@ -54,17 +54,50 @@ def _active_hypotheses(result: Mapping[str, Any]) -> list[dict]:
 
 
 def _rank_hypotheses(model: Mapping[str, Any], active: list[dict]) -> list[dict]:
-    node_ceiling = {
-        item["node_id"]: _number(item["benefit_ceiling_us"], "benefit_ceiling_us")
-        for item in model.get("node_directions", [])
+    node_directions = {
+        item["node_id"]: item for item in model.get("node_directions", [])
     }
     window = _number(model.get("window_duration_us"), "window_duration_us", positive=True)
     ranked = []
     for item in active:
-        ceiling = min(
-            window,
-            sum(node_ceiling.get(node_id, 0.0) for node_id in item["scope_node_ids"]),
+        scoped = [
+            node_directions[node_id]
+            for node_id in item["scope_node_ids"]
+            if node_id in node_directions
+        ]
+        if not scoped:
+            raise ValidationError(
+                "active hypothesis scope has no modeled hot-path node"
+            )
+        summed_duration = sum(
+            _number(node["benefit_ceiling_us"], "benefit_ceiling_us")
+            for node in scoped
         )
+        intervals = []
+        for node in scoped:
+            if node.get("first_start_us") is None or node.get("last_end_us") is None:
+                intervals = []
+                break
+            start = _number(node["first_start_us"], "first_start_us")
+            end = _number(node["last_end_us"], "last_end_us")
+            if end <= start:
+                raise ValidationError("node timing envelope must be positive")
+            intervals.append((start, end))
+        if intervals:
+            covered = 0.0
+            current_start, current_end = sorted(intervals)[0]
+            for start, end in sorted(intervals)[1:]:
+                if start <= current_end:
+                    current_end = max(current_end, end)
+                else:
+                    covered += current_end - current_start
+                    current_start, current_end = start, end
+            covered += current_end - current_start
+            ceiling = min(window, summed_duration, covered)
+            ceiling_basis = "scoped_timing_union_upper_bound"
+        else:
+            ceiling = min(window, summed_duration)
+            ceiling_basis = "scoped_active_time_upper_bound_without_envelopes"
         ranked.append(
             {
                 "hypothesis_id": item["hypothesis_id"],
@@ -73,7 +106,7 @@ def _rank_hypotheses(model: Mapping[str, Any], active: list[dict]) -> list[dict]
                 "statement": item["statement"],
                 "confidence": item["confidence"],
                 "benefit_ceiling_us": ceiling,
-                "benefit_ceiling_basis": "scoped_hot_path_active_time_capped_by_window",
+                "benefit_ceiling_basis": ceiling_basis,
                 "support_evidence_ids": copy.deepcopy(item["support_evidence_ids"]),
                 "oppose_evidence_ids": copy.deepcopy(item["oppose_evidence_ids"]),
                 "missing_evidence_kinds": copy.deepcopy(item["missing_evidence_kinds"]),
@@ -171,10 +204,9 @@ def _adjudicate_external_challenge(
     if decision == "MEASURE":
         return {"status": "continue_measurement", "evidence_ids": []}
     if decision == "PURSUE":
-        evidence_ids = [] if primary is None else primary.get("support_evidence_ids", [])
         return {
-            "status": "overruled_by_bound_local_evidence",
-            "evidence_ids": sorted(set(evidence_ids)),
+            "status": "retained_for_candidate_validation",
+            "evidence_ids": [],
         }
     if decision == "REVIEW_REQUIRED":
         return {"status": "retained_for_local_review", "evidence_ids": []}

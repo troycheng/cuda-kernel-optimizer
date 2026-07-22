@@ -284,7 +284,7 @@ def _validate_active_diagnosis_contract(value: Mapping[str, Any]) -> dict:
         "selection_policy",
     }
     _closed(contract, fields, "analysis_contract")
-    _required(contract, fields, "analysis_contract")
+    _required(contract, fields - {"minimum_effect_us"}, "analysis_contract")
     if contract["schema_version"] != _ACTIVE_DIAGNOSIS_CONTRACT_SCHEMA:
         raise ValidationError(
             f"analysis_contract.schema_version must be {_ACTIVE_DIAGNOSIS_CONTRACT_SCHEMA}"
@@ -295,7 +295,7 @@ def _validate_active_diagnosis_contract(value: Mapping[str, Any]) -> dict:
         contract["analysis_policy_sha256"],
         "analysis_contract.analysis_policy_sha256",
     )
-    minimum_effect_us = contract["minimum_effect_us"]
+    minimum_effect_us = contract.get("minimum_effect_us", 1.0)
     if (
         type(minimum_effect_us) not in {int, float}
         or not math.isfinite(float(minimum_effect_us))
@@ -1470,7 +1470,7 @@ def _write_final_review_adjudication(
         for item in evaluation.get("constraints", [])
     )
     if challenges and primary_status == "confirmed_win" and constraints_passed:
-        status = "overruled_by_confirmed_workload_evidence"
+        status = "retained_but_non_blocking"
     elif challenges:
         status = "retained_for_local_review"
     else:
@@ -2457,6 +2457,7 @@ def _build_active_diagnosis_context(
         ],
         "evidence_results": [],
         "closed_mechanism_keys": [],
+        "closed_scope_records": [],
     }
     _atomic_json(run_root / "diagnosis_context.json", context)
     _append_active_diagnosis_event(run_root, "context", context)
@@ -2519,6 +2520,66 @@ def _load_active_diagnosis_context(
     ]
     if normalized_closed != sorted(set(normalized_closed)):
         raise ValidationError("diagnosis context closed_mechanism_keys is not canonical")
+    closed_scope_records = context.get("closed_scope_records", [])
+    if type(closed_scope_records) is not list:
+        raise ValidationError("diagnosis context closed_scope_records is invalid")
+    seen_closed_scope_records = set()
+    for index, raw_record in enumerate(closed_scope_records):
+        record = _object(raw_record, f"closed_scope_records[{index}]")
+        fields = {
+            "hypothesis_id",
+            "mechanism_key",
+            "kind",
+            "claim_layer",
+            "scope_node_ids",
+            "known_evidence_ids",
+        }
+        _closed(record, fields, f"closed_scope_records[{index}]")
+        _required(record, fields, f"closed_scope_records[{index}]")
+        for field in ("hypothesis_id", "kind", "claim_layer"):
+            if type(record[field]) is not str or not record[field]:
+                raise ValidationError(
+                    f"closed_scope_records[{index}].{field} is invalid"
+                )
+        mechanism_key = hypothesis_module.canonical_mechanism_key(
+            record["mechanism_key"]
+        )
+        if mechanism_key != record["mechanism_key"]:
+            raise ValidationError(
+                "diagnosis context closed_scope_records mechanism key is not canonical"
+            )
+        scope = record["scope_node_ids"]
+        if (
+            type(scope) is not list
+            or not scope
+            or any(type(item) is not str or not item for item in scope)
+            or scope != sorted(set(scope))
+        ):
+            raise ValidationError(
+                "diagnosis context closed_scope_records scope is not canonical"
+            )
+        known_evidence = record["known_evidence_ids"]
+        if (
+            type(known_evidence) is not list
+            or any(type(item) is not str or not item for item in known_evidence)
+            or known_evidence != sorted(set(known_evidence))
+            or not set(known_evidence).issubset(evidence_catalog)
+        ):
+            raise ValidationError(
+                "diagnosis context closed_scope_records evidence history is invalid"
+            )
+        record_key = (
+            record["hypothesis_id"],
+            mechanism_key,
+            record["kind"],
+            record["claim_layer"],
+            tuple(scope),
+        )
+        if record_key in seen_closed_scope_records:
+            raise ValidationError(
+                "diagnosis context closed_scope_records contains duplicates"
+            )
+        seen_closed_scope_records.add(record_key)
     for index, raw_summary in enumerate(result_summaries):
         summary = _object(raw_summary, f"evidence_results[{index}]")
         summary_fields = {
@@ -3119,10 +3180,54 @@ def _validate_hypothesis_evolution(
     prior_result: Mapping[str, Any] | None,
     current_result: Mapping[str, Any],
     closed_mechanism_keys: Sequence[str],
-) -> list[str]:
+    *,
+    closed_scope_records: Sequence[Mapping[str, Any]] = (),
+    evidence_catalog: Mapping[str, Any] | None = None,
+    execution_map: Mapping[str, Any] | None = None,
+) -> dict:
     """Keep live identities stable while allowing evidence-closed slots to rotate."""
     module = _load_hypothesis_space_module()
+    catalog = {} if evidence_catalog is None else evidence_catalog
+    scoped_evidence = {}
+    if execution_map is not None:
+        scoped_evidence = {
+            item["node_id"]: set(item.get("evidence_ids", []))
+            for item in execution_map.get("nodes", [])
+        }
     closed = {module.canonical_mechanism_key(item) for item in closed_mechanism_keys}
+    records = [copy.deepcopy(dict(item)) for item in closed_scope_records]
+    record_keys = {
+        (
+            item["hypothesis_id"],
+            item["mechanism_key"],
+            item["kind"],
+            item["claim_layer"],
+            tuple(item["scope_node_ids"]),
+        )
+        for item in records
+    }
+
+    def remember_closed(item: Mapping[str, Any]) -> None:
+        mechanism_key = module.canonical_mechanism_key(item["mechanism"])
+        record = {
+            "hypothesis_id": item["hypothesis_id"],
+            "mechanism_key": mechanism_key,
+            "kind": item["kind"],
+            "claim_layer": item["claim_layer"],
+            "scope_node_ids": sorted(item["scope_node_ids"]),
+            "known_evidence_ids": sorted(catalog),
+        }
+        key = (
+            record["hypothesis_id"],
+            record["mechanism_key"],
+            record["kind"],
+            record["claim_layer"],
+            tuple(record["scope_node_ids"]),
+        )
+        if key not in record_keys:
+            records.append(record)
+            record_keys.add(key)
+
     current_set = current_result["hypothesis_set"]
     current_by_id = {
         item["hypothesis_id"]: item for item in current_set["hypotheses"]
@@ -3148,6 +3253,15 @@ def _validate_hypothesis_evolution(
             mechanism_key = module.canonical_mechanism_key(prior["mechanism"])
             if prior["disposition"] != "active":
                 closed.add(mechanism_key)
+                remember_closed(prior)
+                current = current_by_id.get(hypothesis_id)
+                if current is not None and (
+                    current["disposition"] == "active"
+                    or any(current[field] != prior[field] for field in identity_fields)
+                ):
+                    raise ValidationError(
+                        "closed hypothesis identity cannot be reused or reactivated"
+                    )
                 continue
             current = current_by_id.get(hypothesis_id)
             if current is None:
@@ -3156,11 +3270,14 @@ def _validate_hypothesis_evolution(
                         "live hypothesis identity cannot be renamed inside an analysis epoch"
                     )
                 closed.add(mechanism_key)
+                remember_closed(prior)
                 continue
             if any(current[field] != prior[field] for field in identity_fields):
                 raise ValidationError(
                     "live hypothesis identity cannot change inside an analysis epoch"
                 )
+            if current["disposition"] != "active":
+                remember_closed(prior)
         prior_relationships = {
             (item["relation"], item["left"], item["right"])
             for item in prior_set["relationships"]
@@ -3178,7 +3295,71 @@ def _validate_hypothesis_evolution(
     for item in current_set["hypotheses"]:
         if item["disposition"] != "active":
             closed.add(module.canonical_mechanism_key(item["mechanism"]))
-    return sorted(closed)
+            remember_closed(item)
+    prior_ids = set() if prior_result is None else set(prior_by_id)
+    historical_closed_ids = {record["hypothesis_id"] for record in records}
+    for item in current_set["hypotheses"]:
+        if item["disposition"] != "active" or item["hypothesis_id"] in prior_ids:
+            continue
+        if item["hypothesis_id"] in historical_closed_ids:
+            raise ValidationError(
+                "historical hypothesis identity cannot be reused after closure"
+            )
+        mechanism_key = module.canonical_mechanism_key(item["mechanism"])
+        if mechanism_key in closed:
+            raise ValidationError(
+                "closed mechanism cannot be reactivated with a new hypothesis id"
+            )
+        item_scope = set(item["scope_node_ids"])
+        matching_records = [
+            record
+            for record in records
+            if item_scope & set(record["scope_node_ids"])
+        ]
+        if not matching_records:
+            continue
+        for record in matching_records:
+            fresh_support = set(item["support_evidence_ids"]) - set(
+                record["known_evidence_ids"]
+            )
+            overlap = item_scope & set(record["scope_node_ids"])
+            has_material_support = False
+            for evidence_id in fresh_support:
+                evidence = catalog.get(evidence_id, {})
+                if item["hypothesis_id"] in evidence.get(
+                    "supports_hypothesis_ids", []
+                ):
+                    has_material_support = True
+                    break
+                if evidence.get("supports_hypothesis_ids", []) or evidence.get(
+                    "opposes_hypothesis_ids", []
+                ):
+                    continue
+                if any(
+                    evidence_id in scoped_evidence.get(node_id, set())
+                    for node_id in overlap
+                ):
+                    has_material_support = True
+                    break
+            if not has_material_support:
+                raise ValidationError(
+                    "new mechanism on a closed scope requires materially new evidence "
+                    "that is outcome-bound to the replacement hypothesis or "
+                    "Controller-scoped to the overlapping execution-map nodes"
+                )
+    records.sort(
+        key=lambda item: (
+            item["kind"],
+            item["claim_layer"],
+            item["scope_node_ids"],
+            item["mechanism_key"],
+            item["hypothesis_id"],
+        )
+    )
+    return {
+        "closed_mechanism_keys": sorted(closed),
+        "closed_scope_records": records,
+    }
 
 
 def _load_bound_diagnostic_artifacts(
@@ -3399,10 +3580,13 @@ def _register_active_diagnosis_proposal_unlocked(
             evidence_catalog=evidence_catalog,
             closed_mechanism_keys=context.get("closed_mechanism_keys", []),
         )
-        next_closed_mechanism_keys = _validate_hypothesis_evolution(
+        evolution = _validate_hypothesis_evolution(
             prior_result,
             hypothesis_result,
             context.get("closed_mechanism_keys", []),
+            closed_scope_records=context.get("closed_scope_records", []),
+            evidence_catalog=evidence_catalog,
+            execution_map=execution_map,
         )
         selection = _load_evidence_selector_module().select_evidence_request(
             request_set,
@@ -3444,7 +3628,8 @@ def _register_active_diagnosis_proposal_unlocked(
         raise ValidationError(f"active diagnosis proposal rejected: {error}") from error
     active_root = run_root / "active_diagnosis"
     context = copy.deepcopy(context)
-    context["closed_mechanism_keys"] = next_closed_mechanism_keys
+    context["closed_mechanism_keys"] = evolution["closed_mechanism_keys"]
+    context["closed_scope_records"] = evolution["closed_scope_records"]
     _atomic_json(run_root / "diagnosis_context.json", context)
     _atomic_json(
         active_root
@@ -4139,9 +4324,12 @@ def _collect_active_diagnosis_evidence_unlocked(
     completed_actions.sort()
     _atomic_json(completed_path, completed_actions)
     selection_policy = copy.deepcopy(selection_policy)
-    selection_policy["remaining_profile_actions"] = max(
-        0, int(selection_policy["remaining_profile_actions"]) - 1
-    )
+    if _load_evidence_selector_module().action_consumes_profile_budget(
+        selected["controller_action"]
+    ):
+        selection_policy["remaining_profile_actions"] = max(
+            0, int(selection_policy["remaining_profile_actions"]) - 1
+        )
     _atomic_json(
         run_root / "active_diagnosis" / "selection_policy.json", selection_policy
     )

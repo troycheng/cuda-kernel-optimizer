@@ -378,7 +378,7 @@ class Sm120AcceptanceHelperTests(unittest.TestCase):
         for marker in (
             "cuda_graph_launch_batching",
             "memory_coalescing",
-            "gemm_tile_occupancy",
+            "tf32_tensor_core_path",
             "async_transfer_overlap",
             "torch.cuda.CUDAGraph",
             "pin_memory=True",
@@ -386,17 +386,20 @@ class Sm120AcceptanceHelperTests(unittest.TestCase):
         ):
             self.assertIn(marker, source)
         acceptance_source = inspect.getsource(
-            Sm120AcceptanceTests.test_v1_1_controlled_diagnostic_scenarios_on_real_gpu
+            Sm120AcceptanceTests.test_v1_1_controller_admits_fresh_controlled_gpu_evidence
         )
         for marker in (
-            "performance_model",
-            "hypothesis_space",
-            "evidence_selector",
-            "diagnostic_decision",
+            "controller.start_run",
+            "register_active_diagnosis_proposal",
+            "collect_active_diagnosis_evidence",
+            '"confidence": "plausible"',
+            '"confidence": "direction_supported"',
             "time_to_first_supported_direction_seconds",
             "expensive_profiler_action_count",
         ):
             self.assertIn(marker, acceptance_source)
+        self.assertNotIn("frozen_baseline", acceptance_source)
+        self.assertNotIn('["ev-cpu", "ev-gpu"]', acceptance_source)
 
 
 @unittest.skipUnless(
@@ -405,152 +408,271 @@ class Sm120AcceptanceHelperTests(unittest.TestCase):
 )
 class Sm120AcceptanceTests(unittest.TestCase):
 
-    def test_v1_1_controlled_diagnostic_scenarios_on_real_gpu(self) -> None:
-        output = ARTIFACTS / "diagnostic_scenarios" / "observations.json"
-        result = _run(
-            [
-                sys.executable,
-                str(DIAGNOSTIC_SCENARIOS),
-                "--json-out",
-                str(output),
-            ],
-            output,
-        )
-
-        self.assertEqual(result["device"]["capability"], [12, 0])
-        scenarios = {item["name"]: item for item in result["scenarios"]}
-        self.assertEqual(
-            set(scenarios),
-            {"launch_graph", "memory_coalescing", "compute_gemm", "transfer_overlap"},
-        )
+    def test_v1_1_controller_admits_fresh_controlled_gpu_evidence(self) -> None:
         expected = {
             "launch_graph": ("cuda_graph_launch_batching", "runtime"),
             "memory_coalescing": ("memory_coalescing", "kernel"),
-            "compute_gemm": ("gemm_tile_occupancy", "kernel"),
+            "compute_gemm": ("tf32_tensor_core_path", "kernel"),
             "transfer_overlap": ("async_transfer_overlap", "runtime"),
         }
+        controller = _load_script("workload_controller")
+        engine_results = []
         for name, (mechanism, layer) in expected.items():
-            observation = scenarios[name]
+            started = time.monotonic()
+            case_root = ARTIFACTS / "diagnostic_scenarios" / name
+            workspace = _stage_fixture_workspace("workspace", artifacts=case_root)
+            (workspace / "scenario-config.json").write_text(
+                json.dumps({"scenario": name}), encoding="utf-8"
+            )
+            global_scan = workspace / "scenario_global_scan.py"
+            direction_adapter = workspace / "scenario_direction_evidence.py"
+            requirement = self._readiness_requirement(
+                workspace,
+                case_root / "probe-work",
+                "workload.smoke",
+                "workload-smoke",
+                necessity="required",
+                phase="workload",
+                kind="workload_smoke",
+                extra=("--workload", str(workspace / "triton_vector.py")),
+            )
+            control, run_dir = self._readiness_control(
+                case_root, workspace, [requirement]
+            )
+            analysis_contract = workspace / "active-diagnosis.json"
+            analysis_contract.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "cuda-optimizer/active-diagnosis-contract-v1",
+                        "global_scan_probe_id": "timeline",
+                        "adapter_path": str(global_scan),
+                        "analysis_policy_sha256": "a" * 64,
+                        "minimum_effect_us": 1.0,
+                        "source": {
+                            "profiler": "custom",
+                            "profiler_version": "controlled-sm120-v2",
+                            "export_schema": "controlled-scenario-v2",
+                            "adapter_id": "sm120-controlled-scan",
+                            "adapter_version": "2.0.0",
+                            "adapter_sha256": _fixture_hash(global_scan),
+                        },
+                        "actions": [
+                            {
+                                "action_id": "direction-experiment-project-copy",
+                                "adapter_path": str(direction_adapter),
+                                "adapter_sha256": _fixture_hash(direction_adapter),
+                                "argv": [sys.executable, str(direction_adapter)],
+                                "timeout_seconds": 120,
+                            }
+                        ],
+                        "selection_policy": {
+                            "schema_version": "cuda-optimizer/evidence-selection-policy-v1",
+                            "max_cost": "high",
+                            "max_perturbation": "high",
+                            "max_risk": "low",
+                            "remaining_profile_actions": 0,
+                            "available_capability_ids": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            control["analysis_contract"] = str(analysis_contract)
+            control["probes"][0]["argv"] = [sys.executable, str(global_scan)]
+
+            state = controller.start_run(control, run_dir)
+            self.assertEqual(state["next_action"], "propose_hypotheses")
+            active = run_dir / "active_diagnosis"
+            raw_scan = json.loads(
+                (active / "global-scan-observation.json").read_text("utf-8")
+            )
+            observation = raw_scan["observation"]
+            self.assertEqual(raw_scan["device"]["capability"], [12, 0])
             self.assertEqual(observation["mechanism"], mechanism)
             self.assertEqual(observation["claim_layer"], layer)
             self.assertGreaterEqual(len(observation["samples_us"]), 5)
-            self.assertTrue(all(value > 0 for value in observation["samples_us"]))
             self.assertTrue(observation["correctness_passed"])
 
-        from tests.test_analysis_epoch import epoch_fixture
-        from tests.test_evidence_selector import (
-            catalog_fixture,
-            policy_fixture,
-            request_fixture,
-        )
-        from tests.test_execution_map import evidence_catalog, map_fixture
-
-        execution_map_module = _load_script("execution_map")
-        performance_model = _load_script("performance_model")
-        hypothesis_space = _load_script("hypothesis_space")
-        evidence_selector = _load_script("evidence_selector")
-        diagnostic_decision = _load_script("diagnostic_decision")
-        epoch = epoch_fixture()
-        catalog = evidence_catalog()
-        frozen_baseline = {
-            "source": "pre-v1.1-controlled-workflow",
-            "time_to_first_supported_direction_seconds": 5.0,
-            "expensive_profiler_action_count": 1,
-        }
-        engine_results = []
-        for name, (mechanism, layer) in expected.items():
-            observation = scenarios[name]
-            started = time.monotonic()
-            execution_map = map_fixture(execution_map_module)
-            window_us = max(
-                observation["baseline_median_us"],
-                observation["comparison_median_us"],
-                1.0,
-            ) * 1.25
-            execution_map["window"].update({"start_us": 0.0, "end_us": window_us})
+            epoch = json.loads((active / "epoch.json").read_text("utf-8"))
+            context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
             scope_node_id = "gpu-kernel" if layer == "kernel" else "cpu-launch"
-            for node in execution_map["nodes"]:
-                node["first_start_us"] = 0.0
-                node["last_end_us"] = window_us
-                if node["node_id"] == scope_node_id:
-                    node["duration_us"] = min(
-                        observation["comparison_median_us"], window_us
-                    )
-                else:
-                    node["duration_us"] = min(
-                        max(1.0, observation["comparison_median_us"] * 0.05),
-                        window_us,
-                    )
-            execution_map = execution_map_module.validate_execution_map(
-                execution_map, epoch=epoch, evidence_catalog=catalog
-            )["execution_map"]
             hypothesis = {
                 "schema_version": "cuda-optimizer/hypothesis-set-v1",
-                "set_id": f"hypotheses-{name}",
+                "set_id": f"hypotheses-{name}-initial",
                 "epoch_id": epoch["epoch_id"],
-                "epoch_sha256": execution_map_module.epoch_digest(epoch),
-                "execution_map_sha256": execution_map_module.execution_map_digest(
-                    execution_map, epoch=epoch, evidence_catalog=catalog
-                ),
+                "epoch_sha256": context["epoch_sha256"],
+                "execution_map_sha256": context["execution_map_sha256"],
                 "hypotheses": [
                     {
-                        "hypothesis_id": f"h-{name}",
+                        "hypothesis_id": f"h-{name}-mechanism",
                         "kind": "mechanism",
                         "scope_node_ids": [scope_node_id],
                         "statement": f"The controlled {name} workload exposes {mechanism}.",
                         "mechanism": mechanism,
                         "claim_layer": layer,
                         "disposition": "active",
-                        "confidence": "direction_supported",
-                        "support_evidence_ids": ["ev-cpu", "ev-gpu"],
+                        "confidence": "plausible",
+                        "support_evidence_ids": ["ev-global-scan"],
                         "oppose_evidence_ids": [],
-                        "missing_evidence_kinds": [],
-                        "falsification_question": "Do the independent controlled measurements disagree?",
+                        "missing_evidence_kinds": ["direction_experiment"],
+                        "falsification_question": "Does an independent controlled rerun fail to reproduce the expected direction?",
+                    },
+                    {
+                        "hypothesis_id": f"h-{name}-alternative",
+                        "kind": "mechanism",
+                        "scope_node_ids": [scope_node_id],
+                        "statement": f"The controlled {name} effect is not caused by {mechanism}.",
+                        "mechanism": f"{name}_unexplained_alternative",
+                        "claim_layer": layer,
+                        "disposition": "active",
+                        "confidence": "inconclusive",
+                        "support_evidence_ids": [],
+                        "oppose_evidence_ids": [],
+                        "missing_evidence_kinds": ["direction_experiment"],
+                        "falsification_question": "Does an independent controlled rerun reproduce the expected direction?",
+                    },
+                ],
+                "relationships": [
+                    {
+                        "relation": "exclusive",
+                        "left": f"h-{name}-alternative",
+                        "right": f"h-{name}-mechanism",
                     }
                 ],
-                "relationships": [],
             }
-            hypothesis_result = hypothesis_space.validate_hypothesis_set(
+            hypothesis_result = controller._load_hypothesis_space_module().validate_hypothesis_set(
                 hypothesis,
                 epoch=epoch,
-                execution_map=execution_map,
-                evidence_catalog=catalog,
+                execution_map=json.loads(
+                    (active / "execution_map.json").read_text("utf-8")
+                ),
+                evidence_catalog=json.loads(
+                    (active / "evidence_catalog.json").read_text("utf-8")
+                ),
             )
-            request = request_fixture()
-            request["epoch_sha256"] = execution_map_module.epoch_digest(epoch)
-            request["hypothesis_set_sha256"] = hypothesis_result[
+            request = {
+                "schema_version": "cuda-optimizer/evidence-request-set-v1",
+                "request_set_id": f"requests-{name}-initial",
+                "epoch_id": epoch["epoch_id"],
+                "epoch_sha256": context["epoch_sha256"],
+                "hypothesis_set_sha256": hypothesis_result[
+                    "hypothesis_set_sha256"
+                ],
+                "requests": [
+                    {
+                        "request_id": f"direction-{name}",
+                        "action_id": "direction-experiment-project-copy",
+                        "question": "Does an independent controlled rerun reproduce the expected direction?",
+                        "target_hypothesis_ids": [
+                            f"h-{name}-alternative",
+                            f"h-{name}-mechanism",
+                        ],
+                        "exclusive_pairs": [
+                            {
+                                "left": f"h-{name}-alternative",
+                                "right": f"h-{name}-mechanism",
+                            }
+                        ],
+                        "outcomes": [
+                            {
+                                "outcome_id": "alternative-supported",
+                                "supports": [f"h-{name}-alternative"],
+                                "opposes": [f"h-{name}-mechanism"],
+                            },
+                            {
+                                "outcome_id": "mechanism-supported",
+                                "supports": [f"h-{name}-mechanism"],
+                                "opposes": [f"h-{name}-alternative"],
+                            },
+                        ],
+                    }
+                ],
+            }
+            state = controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            self.assertEqual(state["next_action"], "collect_evidence")
+            initial_selection = json.loads(
+                (active / "evidence_selection.json").read_text("utf-8")
+            )
+            self.assertEqual(
+                initial_selection["selected_request"]["action_id"],
+                "direction-experiment-project-copy",
+            )
+
+            collected = controller.collect_active_diagnosis_evidence(
+                control, run_dir
+            )
+            self.assertEqual(collected["next_action"], "propose_hypotheses")
+            refreshed_context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            evidence_result = refreshed_context["evidence_results"][-1]
+            self.assertEqual(evidence_result["outcome_id"], "mechanism-supported")
+            evidence_catalog = json.loads(
+                (active / "evidence_catalog.json").read_text("utf-8")
+            )
+            evidence_id = next(
+                evidence_id
+                for evidence_id, item in evidence_catalog.items()
+                if item["kind"] == "direction_experiment"
+            )
+
+            confirmed = json.loads(json.dumps(hypothesis))
+            confirmed["set_id"] = f"hypotheses-{name}-confirmed"
+            confirmed["execution_map_sha256"] = refreshed_context[
+                "execution_map_sha256"
+            ]
+            by_id = {
+                item["hypothesis_id"]: item for item in confirmed["hypotheses"]
+            }
+            by_id[f"h-{name}-mechanism"].update(
+                {
+                    "confidence": "direction_supported",
+                    "support_evidence_ids": ["ev-global-scan", evidence_id],
+                    "missing_evidence_kinds": [],
+                }
+            )
+            by_id[f"h-{name}-alternative"].update(
+                {
+                    "disposition": "rejected",
+                    "oppose_evidence_ids": [evidence_id],
+                    "missing_evidence_kinds": [],
+                }
+            )
+            confirmed_result = controller._load_hypothesis_space_module().validate_hypothesis_set(
+                confirmed,
+                epoch=epoch,
+                execution_map=json.loads(
+                    (active / "execution_map.json").read_text("utf-8")
+                ),
+                evidence_catalog=evidence_catalog,
+            )
+            confirmed_request = json.loads(json.dumps(request))
+            confirmed_request["request_set_id"] = f"requests-{name}-confirmed"
+            confirmed_request["hypothesis_set_sha256"] = confirmed_result[
                 "hypothesis_set_sha256"
             ]
-            selection = evidence_selector.select_evidence_request(
-                request,
-                epoch=epoch,
-                execution_map=execution_map,
-                hypothesis_result=hypothesis_result,
-                evidence_catalog=catalog,
-                action_catalog=catalog_fixture(),
-                policy=policy_fixture(),
-                request_history=[],
+            final_state = controller.register_active_diagnosis_proposal(
+                control, run_dir, confirmed, confirmed_request
             )
-            model = performance_model.build_performance_model(
-                execution_map, minimum_effect_us=1.0
-            )
-            decision = diagnostic_decision.decide_next_step(
-                model, hypothesis_result, selection
-            )
+            decision = json.loads((active / "decision.json").read_text("utf-8"))
             elapsed = time.monotonic() - started
             expensive_profiler_action_count = int(
-                selection.get("selected_request") is not None
-                and selection["selected_request"]["controller_action"]["cost"] == "high"
+                initial_selection["selected_request"]["controller_action"]["cost"]
+                == "high"
             )
+            self.assertEqual(final_state["next_action"], "register_change")
             self.assertEqual(decision["decision"], "PURSUE")
             self.assertEqual(decision["primary_diagnosis"]["mechanism"], mechanism)
-            self.assertLess(
-                elapsed,
-                frozen_baseline["time_to_first_supported_direction_seconds"],
-            )
-            self.assertLess(
-                expensive_profiler_action_count,
-                frozen_baseline["expensive_profiler_action_count"],
+            self.assertEqual(expensive_profiler_action_count, 0)
+            self.assertTrue(
+                any(
+                    path.name == "controlled-observation.json"
+                    for path in (active / "evidence").glob("**/*.json")
+                )
             )
             engine_results.append(
                 {
@@ -561,13 +683,15 @@ class Sm120AcceptanceTests(unittest.TestCase):
                     "expensive_profiler_action_count": expensive_profiler_action_count,
                 }
             )
-        engine_output = ARTIFACTS / "diagnostic_scenarios" / "engine-acceptance.json"
-        engine_output.write_text(
+        controller_output = (
+            ARTIFACTS / "diagnostic_scenarios" / "controller-acceptance.json"
+        )
+        controller_output.write_text(
             json.dumps(
                 {
-                    "schema_version": "cuda-optimizer/sm120-engine-acceptance-v1",
+                    "schema_version": "cuda-optimizer/sm120-controller-acceptance-v1",
+                    "claim_scope": "controller_evidence_admission_only",
                     "scenarios": engine_results,
-                    "frozen_baseline": frozen_baseline,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -576,11 +700,8 @@ class Sm120AcceptanceTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        self.assertLess(
-            scenarios["launch_graph"]["comparison_median_us"],
-            scenarios["launch_graph"]["baseline_median_us"],
-        )
-        self.assertGreater(scenarios["compute_gemm"]["observed_tflops"], 0)
+        self.assertEqual(len(engine_results), 4)
+
     def _readiness_control(
         self,
         case_root: Path,

@@ -241,6 +241,7 @@ def validate_hypothesis_set(
     map_nodes = {
         item["node_id"] for item in map_result["execution_map"]["nodes"]
     }
+    hot_path_nodes = set(map_result["execution_map"]["hot_path"])
     raw_hypotheses = root["hypotheses"]
     if type(raw_hypotheses) is not list or not 1 <= len(raw_hypotheses) <= 12:
         raise ValidationError("hypothesis_set must contain 1 to 12 hypotheses")
@@ -286,6 +287,10 @@ def validate_hypothesis_set(
         if confidence not in _CONFIDENCE:
             raise ValidationError(f"hypotheses[{index}].confidence is unsupported")
         if disposition == "active":
+            if not (set(scope) & hot_path_nodes):
+                raise ValidationError(
+                    "active hypothesis scope must intersect the current hot path"
+                )
             if mechanism_key in closed_keys:
                 raise ValidationError("active hypothesis reopens a closed mechanism")
             if mechanism_key in active_mechanisms:

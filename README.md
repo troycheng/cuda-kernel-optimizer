@@ -177,7 +177,8 @@ separate. Neither page predicts the speedup of a new project.
   hypothesis identities, and allow evidence-closed mechanisms to be replaced
   without letting renamed variants reopen them.
 - Preserve complete external challenges and record their local evidence
-  adjudication; add four end-to-end RTX 5090 decision checks and a separate,
+  status without claiming that unrelated workload evidence answered them; add
+  four end-to-end RTX 5090 Controller evidence-admission checks and a separate,
   explicitly authorized disposable NCU smoke path.
 
 ### V1.0.1

@@ -20,10 +20,22 @@ SELECTION_SCHEMA = "cuda-optimizer/evidence-selection-v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _LEVELS = {"none": 0, "low": 1, "medium": 2, "high": 3}
+_PROFILE_EVIDENCE_KINDS = {
+    "framework_trace",
+    "global_scan",
+    "ncu_kernel",
+    "nsys_timeline",
+    "os_runtime",
+}
 
 
 class ValidationError(ValueError):
     """Raised when a request or Controller policy is not replayable."""
+
+
+def action_consumes_profile_budget(action: Mapping[str, Any]) -> bool:
+    """Return whether an evidence action spends the bounded profiler allowance."""
+    return action.get("evidence_kind") in _PROFILE_EVIDENCE_KINDS
 
 
 def _load_execution_map_module():
@@ -307,12 +319,6 @@ def select_evidence_request(
             "sufficient", epoch_id, hypothesis_digest, catalog, controller_policy,
             None, [], [], gap_reason
         )
-    if controller_policy["remaining_profile_actions"] == 0:
-        return _selection(
-            "evidence_gap", epoch_id, hypothesis_digest, catalog, controller_policy,
-            None, [], [], "profile_budget_exhausted"
-        )
-
     normalized_requests = []
     seen_ids = set()
     for index, raw in enumerate(root["requests"]):
@@ -468,6 +474,12 @@ def select_evidence_request(
             reason = "action_is_not_repeatable"
         if reason is None and signature in history:
             reason = "equivalent_request_already_attempted"
+        if (
+            reason is None
+            and controller_policy["remaining_profile_actions"] == 0
+            and action_consumes_profile_budget(action)
+        ):
+            reason = "profile_budget_exhausted"
         if reason is not None:
             rejections.append(
                 {
@@ -492,20 +504,26 @@ def select_evidence_request(
             if action["evidence_kind"] not in existing:
                 independent_gain += 1
         rank = (
+            _LEVELS[action["cost"]],
+            _LEVELS[action["perturbation"]],
+            _LEVELS[action["risk"]],
             -len(request["exclusive_pairs"]),
             -len(falsifiable),
             -independent_gain,
-            _LEVELS[action["perturbation"]],
-            _LEVELS[action["risk"]],
-            _LEVELS[action["cost"]],
             request["request_id"],
         )
         candidates.append((rank, request, action, signature, len(falsifiable), independent_gain))
     rejections.sort(key=lambda item: item["request_id"])
     if not candidates:
+        gap_reason = (
+            "profile_budget_exhausted"
+            if rejections
+            and all(item["reason"] == "profile_budget_exhausted" for item in rejections)
+            else "no_admissible_discriminator"
+        )
         return _selection(
             "evidence_gap", epoch_id, hypothesis_digest, catalog, controller_policy,
-            None, rejections, sorted(missing_capabilities), "no_admissible_discriminator"
+            None, rejections, sorted(missing_capabilities), gap_reason
         )
     candidates.sort(key=lambda item: item[0])
     _, request, action, signature, falsifiable_count, independent_gain = candidates[0]

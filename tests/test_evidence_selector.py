@@ -202,6 +202,61 @@ class EvidenceSelectorTests(unittest.TestCase):
         result = self.select(value)
         self.assertEqual(result["selected_request"]["request_id"], "req-framework")
 
+    def test_cheapest_admissible_falsifier_wins_before_broader_costly_action(self) -> None:
+        value = self.requests()
+        cheap = copy.deepcopy(value["requests"][1])
+        cheap.update(
+            {
+                "request_id": "req-cheap-single",
+                "action_id": "framework-targeted",
+            }
+        )
+        costly = copy.deepcopy(value["requests"][0])
+        costly.update(
+            {
+                "request_id": "req-costly-pair",
+                "action_id": "os-runtime-targeted",
+            }
+        )
+        value["requests"] = [cheap, costly]
+
+        result = self.select(value)
+
+        self.assertEqual(result["selected_request"]["request_id"], "req-cheap-single")
+        self.assertEqual(result["selected_request"]["controller_action"]["cost"], "low")
+
+    def test_zero_profile_budget_still_allows_non_profile_falsifier(self) -> None:
+        catalog = catalog_fixture()
+        catalog["actions"].append(
+            {
+                "action_id": "compiler-static",
+                "evidence_kind": "compiler_sass",
+                "required_capability_ids": ["cuda.disassembler"],
+                "cost": "low",
+                "perturbation": "none",
+                "risk": "none",
+                "control_scope": "read_only",
+                "repeatable": True,
+            }
+        )
+        value = self.requests()
+        request = copy.deepcopy(value["requests"][1])
+        request.update(
+            {
+                "request_id": "req-static",
+                "action_id": "compiler-static",
+            }
+        )
+        value["requests"] = [request]
+        policy = policy_fixture()
+        policy["remaining_profile_actions"] = 0
+        policy["available_capability_ids"].append("cuda.disassembler")
+
+        result = self.select(value, catalog=catalog, policy=policy)
+
+        self.assertEqual(result["status"], "selected")
+        self.assertEqual(result["selected_request"]["action_id"], "compiler-static")
+
     def test_missing_capability_yields_evidence_gap_without_host_action(self) -> None:
         value = self.requests()
         value["requests"] = [value["requests"][1]]

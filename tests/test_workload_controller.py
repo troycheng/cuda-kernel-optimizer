@@ -1596,6 +1596,27 @@ class WorkloadRoundTests(unittest.TestCase):
 
             self.assertFalse((run_dir / "baseline" / "observation.json").exists())
 
+    def test_v1_active_diagnosis_contract_defaults_missing_mechanism_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            contract_path = Path(control["analysis_contract"])
+            contract = json.loads(contract_path.read_text("utf-8"))
+            contract.pop("minimum_effect_us")
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+            state = self.controller.start_run(control, run_dir)
+
+            self.assertEqual(state["next_action"], "propose_hypotheses")
+            frozen = json.loads(
+                (run_dir / "active_diagnosis" / "analysis_contract.json").read_text(
+                    "utf-8"
+                )
+            )
+            self.assertEqual(frozen["minimum_effect_us"], 1.0)
+
     def test_active_diagnosis_resume_does_not_repeat_global_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -2039,6 +2060,234 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertNotEqual(model["critical_path"], before["critical_path"])
             self.assertNotEqual(model, before)
 
+    def test_controller_scoped_neutral_evidence_opens_a_distinct_mechanism(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            contract_path = Path(control["analysis_contract"])
+            contract = json.loads(contract_path.read_text("utf-8"))
+            adapter = Path(contract["actions"][0]["adapter_path"])
+            adapter.write_text(
+                "import json, os\n"
+                "request = json.load(open(os.environ['CUDA_OPTIMIZER_EVIDENCE_REQUEST']))\n"
+                "scope_refresh = request['request_id'] == 'req-scope-refresh'\n"
+                "payload = {\n"
+                " 'schema_version': 'cuda-optimizer/evidence-result-v1',\n"
+                " 'request_signature': request['request_signature'],\n"
+                " 'status': 'observed',\n"
+                " 'outcome_id': 'scope-neutral' if scope_refresh else 'gap-present',\n"
+                " 'observations': ({'execution_map_node_updates': [\n"
+                "   {'node_id': 'gpu-kernel', 'duration_us': 70.0,\n"
+                "    'first_start_us': 20.0, 'last_end_us': 90.0}\n"
+                " ]} if scope_refresh else {'launch_gap_us': 12.5}),\n"
+                " 'artifacts': []}\n"
+                "open(os.environ['CUDA_OPTIMIZER_EVIDENCE_OUTPUT'], 'w').write(json.dumps(payload))\n",
+                encoding="utf-8",
+            )
+            contract["actions"][0]["adapter_sha256"] = hashlib.sha256(
+                adapter.read_bytes()
+            ).hexdigest()
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            self.controller.start_run(control, run_dir)
+
+            first_hypothesis, first_request = self._active_proposal(run_dir)
+            self.controller.register_active_diagnosis_proposal(
+                control, run_dir, first_hypothesis, first_request
+            )
+            self.controller.collect_active_diagnosis_evidence(control, run_dir)
+
+            active = run_dir / "active_diagnosis"
+            second_hypothesis, second_request = self._active_proposal(run_dir)
+            second_hypothesis["set_id"] = "hypotheses-close-kernel-scope"
+            evidence_catalog = json.loads(
+                (active / "evidence_catalog.json").read_text("utf-8")
+            )
+            framework_evidence_id = next(
+                evidence_id
+                for evidence_id, item in evidence_catalog.items()
+                if "h-framework-gap" in item.get("supports_hypothesis_ids", [])
+            )
+            framework = next(
+                item
+                for item in second_hypothesis["hypotheses"]
+                if item["hypothesis_id"] == "h-framework-gap"
+            )
+            framework["support_evidence_ids"] = sorted(
+                set(framework["support_evidence_ids"]) | {framework_evidence_id}
+            )
+            kernel = next(
+                item
+                for item in second_hypothesis["hypotheses"]
+                if item["hypothesis_id"] == "h-kernel-bound"
+            )
+            kernel.update(
+                {
+                    "disposition": "rejected",
+                    "confidence": "inconclusive",
+                    "missing_evidence_kinds": [],
+                }
+            )
+            epoch = json.loads((active / "epoch.json").read_text("utf-8"))
+            execution_map = json.loads(
+                (active / "execution_map.json").read_text("utf-8")
+            )
+            second_result = self.controller._load_hypothesis_space_module().validate_hypothesis_set(
+                second_hypothesis,
+                epoch=epoch,
+                execution_map=execution_map,
+                evidence_catalog=evidence_catalog,
+            )
+            second_request.update(
+                {
+                    "request_set_id": "requests-scope-refresh",
+                    "hypothesis_set_sha256": second_result[
+                        "hypothesis_set_sha256"
+                    ],
+                    "requests": [
+                        {
+                            "request_id": "req-scope-refresh",
+                            "action_id": "pytorch-operator-trace",
+                            "question": "Does a neutral scan expose new evidence on the closed GPU scope?",
+                            "target_hypothesis_ids": ["h-framework-gap"],
+                            "exclusive_pairs": [],
+                            "outcomes": [
+                                {
+                                    "outcome_id": "scope-neutral",
+                                    "supports": [],
+                                    "opposes": [],
+                                },
+                                {
+                                    "outcome_id": "scope-absent",
+                                    "supports": [],
+                                    "opposes": ["h-framework-gap"],
+                                },
+                            ],
+                        }
+                    ],
+                }
+            )
+            pending = self.controller.register_active_diagnosis_proposal(
+                control, run_dir, second_hypothesis, second_request
+            )
+            self.assertEqual(pending["next_action"], "collect_evidence")
+            self.controller.collect_active_diagnosis_evidence(control, run_dir)
+
+            context = json.loads((run_dir / "diagnosis_context.json").read_text("utf-8"))
+            evidence_catalog = json.loads(
+                (active / "evidence_catalog.json").read_text("utf-8")
+            )
+            neutral_evidence_id = context["evidence_results"][-1]["evidence_id"]
+            self.assertEqual(
+                evidence_catalog[neutral_evidence_id]["supports_hypothesis_ids"], []
+            )
+            self.assertEqual(
+                evidence_catalog[neutral_evidence_id]["opposes_hypothesis_ids"], []
+            )
+            execution_map = json.loads(
+                (active / "execution_map.json").read_text("utf-8")
+            )
+            gpu_kernel = next(
+                item for item in execution_map["nodes"] if item["node_id"] == "gpu-kernel"
+            )
+            self.assertIn(neutral_evidence_id, gpu_kernel["evidence_ids"])
+
+            third_hypothesis = copy.deepcopy(second_hypothesis)
+            third_hypothesis["set_id"] = "hypotheses-new-scoped-mechanism"
+            third_hypothesis["execution_map_sha256"] = context[
+                "execution_map_sha256"
+            ]
+            third_hypothesis["hypotheses"] = [
+                item
+                for item in third_hypothesis["hypotheses"]
+                if item["hypothesis_id"] != "h-kernel-bound"
+            ]
+            third_hypothesis["hypotheses"].append(
+                {
+                    "hypothesis_id": "h-kernel-stall-new",
+                    "kind": "mechanism",
+                    "scope_node_ids": ["gpu-kernel"],
+                    "statement": "Fresh scoped evidence may expose a distinct kernel stall.",
+                    "mechanism": "kernel_stall_pipeline",
+                    "claim_layer": "kernel",
+                    "disposition": "active",
+                    "confidence": "inconclusive",
+                    "support_evidence_ids": [neutral_evidence_id],
+                    "oppose_evidence_ids": [],
+                    "missing_evidence_kinds": ["ncu_kernel"],
+                    "falsification_question": "Does targeted kernel evidence reject the new stall?",
+                }
+            )
+            third_hypothesis["relationships"] = [
+                {
+                    "relation": "exclusive",
+                    "left": "h-framework-gap",
+                    "right": "h-kernel-stall-new",
+                }
+            ]
+            third_result = self.controller._load_hypothesis_space_module().validate_hypothesis_set(
+                third_hypothesis,
+                epoch=epoch,
+                execution_map=execution_map,
+                evidence_catalog=evidence_catalog,
+            )
+            third_request = copy.deepcopy(second_request)
+            third_request.update(
+                {
+                    "request_set_id": "requests-new-scoped-mechanism",
+                    "hypothesis_set_sha256": third_result[
+                        "hypothesis_set_sha256"
+                    ],
+                    "requests": [
+                        {
+                            "request_id": "req-new-scoped-mechanism",
+                            "action_id": "pytorch-operator-trace",
+                            "question": "Which mechanism explains the refreshed GPU scope?",
+                            "target_hypothesis_ids": [
+                                "h-framework-gap",
+                                "h-kernel-stall-new",
+                            ],
+                            "exclusive_pairs": [
+                                {
+                                    "left": "h-framework-gap",
+                                    "right": "h-kernel-stall-new",
+                                }
+                            ],
+                            "outcomes": [
+                                {
+                                    "outcome_id": "framework-gap",
+                                    "supports": ["h-framework-gap"],
+                                    "opposes": ["h-kernel-stall-new"],
+                                },
+                                {
+                                    "outcome_id": "kernel-stall",
+                                    "supports": ["h-kernel-stall-new"],
+                                    "opposes": ["h-framework-gap"],
+                                },
+                            ],
+                        }
+                    ],
+                }
+            )
+
+            final_state = self.controller.register_active_diagnosis_proposal(
+                control, run_dir, third_hypothesis, third_request
+            )
+            admitted = json.loads(
+                (active / "hypothesis_result.json").read_text("utf-8")
+            )
+            self.assertTrue(
+                any(
+                    item["hypothesis_id"] == "h-kernel-stall-new"
+                    for item in admitted["hypothesis_set"]["hypotheses"]
+                )
+            )
+            self.assertIn(
+                final_state["next_action"],
+                {"collect_evidence", "review_required", "done"},
+            )
+
     def test_rejected_mechanism_can_be_replaced_but_cannot_be_renamed_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -2114,6 +2363,13 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(state["next_action"], "collect_evidence")
             context = json.loads((run_dir / "diagnosis_context.json").read_text("utf-8"))
             self.assertIn("kernelexecution", context["closed_mechanism_keys"])
+            self.assertTrue(
+                any(
+                    item["mechanism_key"] == "kernelexecution"
+                    and item["scope_node_ids"] == ["gpu-kernel"]
+                    for item in context["closed_scope_records"]
+                )
+            )
 
             self.controller.collect_active_diagnosis_evidence(control, run_dir)
             revived = copy.deepcopy(hypothesis)
@@ -2135,6 +2391,550 @@ class WorkloadRoundTests(unittest.TestCase):
                 self.controller.register_active_diagnosis_proposal(
                     control, run_dir, revived, revived_request
                 )
+
+    def test_closed_mechanism_cannot_be_reactivated_with_a_new_id_in_same_generation(self) -> None:
+        from tests.test_analysis_epoch import epoch_fixture
+        from tests.test_execution_map import evidence_catalog, map_fixture
+        from tests.test_hypothesis_space import hypothesis_fixture
+
+        hypothesis_module = self.controller._load_hypothesis_space_module()
+        execution_map_module = self.controller._load_execution_map_module()
+        epoch = epoch_fixture()
+        catalog = evidence_catalog()
+        execution_map = map_fixture(execution_map_module)
+        prior = hypothesis_module.validate_hypothesis_set(
+            hypothesis_fixture(hypothesis_module, execution_map_module),
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+        catalog["ev-kernel-opposed"] = {
+            "epoch_id": epoch["epoch_id"],
+            "kind": "framework_trace",
+            "artifact_sha256": "a" * 64,
+            "supports_hypothesis_ids": [],
+            "opposes_hypothesis_ids": ["h-kernel-bound"],
+        }
+
+        for mechanism in ("kernel_execution", "kernel_execution_stall"):
+            with self.subTest(mechanism=mechanism):
+                current = copy.deepcopy(prior["hypothesis_set"])
+                current["set_id"] = f"hypotheses-{mechanism}"
+                old = next(
+                    item
+                    for item in current["hypotheses"]
+                    if item["hypothesis_id"] == "h-kernel-bound"
+                )
+                old.update(
+                    {
+                        "disposition": "rejected",
+                        "confidence": "inconclusive",
+                        "oppose_evidence_ids": ["ev-kernel-opposed"],
+                        "missing_evidence_kinds": [],
+                    }
+                )
+                replacement = copy.deepcopy(old)
+                replacement.update(
+                    {
+                        "hypothesis_id": f"h-reopened-{mechanism}",
+                        "mechanism": mechanism,
+                        "disposition": "active",
+                        "oppose_evidence_ids": [],
+                        "missing_evidence_kinds": ["ncu_kernel"],
+                    }
+                )
+                current["hypotheses"].append(replacement)
+                validated = hypothesis_module.validate_hypothesis_set(
+                    current,
+                    epoch=epoch,
+                    execution_map=execution_map,
+                    evidence_catalog=catalog,
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError, "closed mechanism|materially new evidence"
+                ):
+                    self.controller._validate_hypothesis_evolution(
+                        prior, validated, []
+                    )
+
+    def test_prior_closed_scope_cannot_be_reopened_by_a_semantic_alias_without_new_evidence(self) -> None:
+        from tests.test_analysis_epoch import epoch_fixture
+        from tests.test_execution_map import evidence_catalog, map_fixture
+        from tests.test_hypothesis_space import hypothesis_fixture
+
+        hypothesis_module = self.controller._load_hypothesis_space_module()
+        execution_map_module = self.controller._load_execution_map_module()
+        epoch = epoch_fixture()
+        catalog = evidence_catalog()
+        execution_map = map_fixture(execution_map_module)
+        catalog["ev-kernel-opposed"] = {
+            "epoch_id": epoch["epoch_id"],
+            "kind": "framework_trace",
+            "artifact_sha256": "a" * 64,
+            "supports_hypothesis_ids": [],
+            "opposes_hypothesis_ids": ["h-kernel-bound"],
+        }
+        prior_value = hypothesis_fixture(hypothesis_module, execution_map_module)
+        prior_kernel = next(
+            item
+            for item in prior_value["hypotheses"]
+            if item["hypothesis_id"] == "h-kernel-bound"
+        )
+        prior_kernel.update(
+            {
+                "disposition": "rejected",
+                "oppose_evidence_ids": ["ev-kernel-opposed"],
+                "missing_evidence_kinds": [],
+            }
+        )
+        prior = hypothesis_module.validate_hypothesis_set(
+            prior_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+        current = copy.deepcopy(prior["hypothesis_set"])
+        current["set_id"] = "hypotheses-semantic-reopen"
+        replacement = copy.deepcopy(prior_kernel)
+        replacement.update(
+            {
+                "hypothesis_id": "h-kernel-stall-alias",
+                "mechanism": "kernel_stall_pipeline",
+                "disposition": "active",
+                "oppose_evidence_ids": [],
+                "missing_evidence_kinds": ["ncu_kernel"],
+            }
+        )
+        current["hypotheses"].append(replacement)
+        validated = hypothesis_module.validate_hypothesis_set(
+            current,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+
+        with self.assertRaisesRegex(ValueError, "materially new evidence"):
+            self.controller._validate_hypothesis_evolution(prior, validated, [])
+
+    def test_closed_scope_history_survives_an_absent_generation(self) -> None:
+        from tests.test_analysis_epoch import epoch_fixture
+        from tests.test_execution_map import evidence_catalog, map_fixture
+        from tests.test_hypothesis_space import hypothesis_fixture
+
+        hypothesis_module = self.controller._load_hypothesis_space_module()
+        execution_map_module = self.controller._load_execution_map_module()
+        epoch = epoch_fixture()
+        catalog = evidence_catalog()
+        execution_map = map_fixture(execution_map_module)
+        catalog["ev-kernel-opposed"] = {
+            "epoch_id": epoch["epoch_id"],
+            "kind": "framework_trace",
+            "artifact_sha256": "a" * 64,
+            "supports_hypothesis_ids": [],
+            "opposes_hypothesis_ids": ["h-kernel-bound"],
+        }
+        first_value = hypothesis_fixture(hypothesis_module, execution_map_module)
+        first_kernel = next(
+            item
+            for item in first_value["hypotheses"]
+            if item["hypothesis_id"] == "h-kernel-bound"
+        )
+        first_kernel.update(
+            {
+                "disposition": "rejected",
+                "oppose_evidence_ids": ["ev-kernel-opposed"],
+                "missing_evidence_kinds": [],
+            }
+        )
+        first = hypothesis_module.validate_hypothesis_set(
+            first_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+
+        second_value = copy.deepcopy(first["hypothesis_set"])
+        second_value["set_id"] = "hypotheses-without-closed-scope"
+        second_value["hypotheses"] = [
+            item
+            for item in second_value["hypotheses"]
+            if item["hypothesis_id"] != "h-kernel-bound"
+        ]
+        second_value["relationships"] = [
+            item
+            for item in second_value["relationships"]
+            if "h-kernel-bound" not in {item["left"], item["right"]}
+        ]
+        second = hypothesis_module.validate_hypothesis_set(
+            second_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+        evolution = self.controller._validate_hypothesis_evolution(
+            first,
+            second,
+            [],
+            closed_scope_records=[],
+            evidence_catalog=catalog,
+        )
+
+        third_value = copy.deepcopy(second["hypothesis_set"])
+        third_value["set_id"] = "hypotheses-semantic-reopen-after-gap"
+        third_value["hypotheses"].append(
+            {
+                **copy.deepcopy(first_kernel),
+                "hypothesis_id": "h-kernel-stall-after-gap",
+                "mechanism": "kernel_stall_pipeline",
+                "disposition": "active",
+                "oppose_evidence_ids": [],
+                "missing_evidence_kinds": ["ncu_kernel"],
+            }
+        )
+        third = hypothesis_module.validate_hypothesis_set(
+            third_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+
+        with self.assertRaisesRegex(ValueError, "materially new evidence"):
+            self.controller._validate_hypothesis_evolution(
+                second,
+                third,
+                evolution["closed_mechanism_keys"],
+                closed_scope_records=evolution["closed_scope_records"],
+                evidence_catalog=catalog,
+            )
+
+        changed_layer_value = copy.deepcopy(third_value)
+        changed_layer_value["set_id"] = "hypotheses-same-scope-changed-layer"
+        changed_layer_value["hypotheses"][-1].update(
+            {
+                "hypothesis_id": "h-kernel-stall-runtime-layer",
+                "claim_layer": "runtime",
+            }
+        )
+        changed_layer = hypothesis_module.validate_hypothesis_set(
+            changed_layer_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+        with self.assertRaisesRegex(ValueError, "materially new evidence"):
+            self.controller._validate_hypothesis_evolution(
+                second,
+                changed_layer,
+                evolution["closed_mechanism_keys"],
+                closed_scope_records=evolution["closed_scope_records"],
+                evidence_catalog=catalog,
+                execution_map=execution_map,
+            )
+
+        expanded_scope_value = copy.deepcopy(third_value)
+        expanded_scope_value["set_id"] = "hypotheses-overlapping-expanded-scope"
+        expanded_scope_value["hypotheses"][-1].update(
+            {
+                "hypothesis_id": "h-kernel-stall-expanded-scope",
+                "claim_layer": "runtime",
+                "scope_node_ids": ["cpu-launch", "gpu-kernel"],
+            }
+        )
+        expanded_scope = hypothesis_module.validate_hypothesis_set(
+            expanded_scope_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+        with self.assertRaisesRegex(ValueError, "materially new evidence"):
+            self.controller._validate_hypothesis_evolution(
+                second,
+                expanded_scope,
+                evolution["closed_mechanism_keys"],
+                closed_scope_records=evolution["closed_scope_records"],
+                evidence_catalog=catalog,
+                execution_map=execution_map,
+            )
+
+        catalog["ev-unbound-after-close"] = {
+            "epoch_id": epoch["epoch_id"],
+            "kind": "compiler_report",
+            "artifact_sha256": "b" * 64,
+            "supports_hypothesis_ids": [],
+            "opposes_hypothesis_ids": [],
+        }
+        third_value["execution_map_sha256"] = (
+            execution_map_module.execution_map_digest(
+                execution_map,
+                epoch=epoch,
+                evidence_catalog=catalog,
+            )
+        )
+        third_value["hypotheses"][-1]["support_evidence_ids"] = [
+            "ev-unbound-after-close"
+        ]
+        third = hypothesis_module.validate_hypothesis_set(
+            third_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+
+        with self.assertRaisesRegex(ValueError, "outcome-bound"):
+            self.controller._validate_hypothesis_evolution(
+                second,
+                third,
+                evolution["closed_mechanism_keys"],
+                closed_scope_records=evolution["closed_scope_records"],
+                evidence_catalog=catalog,
+            )
+
+        scoped_map = copy.deepcopy(execution_map)
+        for node in scoped_map["nodes"]:
+            if node["node_id"] == "gpu-kernel":
+                node["evidence_ids"] = sorted(
+                    set(node["evidence_ids"]) | {"ev-unbound-after-close"}
+                )
+        reused_value = copy.deepcopy(third_value)
+        reused_value["set_id"] = "hypotheses-reused-historical-id-after-gap"
+        reused_value["execution_map_sha256"] = (
+            execution_map_module.execution_map_digest(
+                scoped_map,
+                epoch=epoch,
+                evidence_catalog=catalog,
+            )
+        )
+        reused_value["hypotheses"][-1].update(
+            {
+                "hypothesis_id": "h-kernel-bound",
+                "oppose_evidence_ids": ["ev-kernel-opposed"],
+            }
+        )
+        reused = hypothesis_module.validate_hypothesis_set(
+            reused_value,
+            epoch=epoch,
+            execution_map=scoped_map,
+            evidence_catalog=catalog,
+        )
+        with self.assertRaisesRegex(ValueError, "historical hypothesis identity"):
+            self.controller._validate_hypothesis_evolution(
+                second,
+                reused,
+                evolution["closed_mechanism_keys"],
+                closed_scope_records=evolution["closed_scope_records"],
+                evidence_catalog=catalog,
+                execution_map=scoped_map,
+            )
+
+    def test_closed_hypothesis_id_cannot_be_reused_for_a_new_mechanism(self) -> None:
+        from tests.test_analysis_epoch import epoch_fixture
+        from tests.test_execution_map import evidence_catalog, map_fixture
+        from tests.test_hypothesis_space import hypothesis_fixture
+
+        hypothesis_module = self.controller._load_hypothesis_space_module()
+        execution_map_module = self.controller._load_execution_map_module()
+        epoch = epoch_fixture()
+        catalog = evidence_catalog()
+        execution_map = map_fixture(execution_map_module)
+        catalog["ev-kernel-opposed"] = {
+            "epoch_id": epoch["epoch_id"],
+            "kind": "framework_trace",
+            "artifact_sha256": "a" * 64,
+            "supports_hypothesis_ids": [],
+            "opposes_hypothesis_ids": ["h-kernel-bound"],
+        }
+        prior_value = hypothesis_fixture(hypothesis_module, execution_map_module)
+        prior_kernel = next(
+            item
+            for item in prior_value["hypotheses"]
+            if item["hypothesis_id"] == "h-kernel-bound"
+        )
+        prior_kernel.update(
+            {
+                "disposition": "rejected",
+                "oppose_evidence_ids": ["ev-kernel-opposed"],
+                "missing_evidence_kinds": [],
+            }
+        )
+        prior = hypothesis_module.validate_hypothesis_set(
+            prior_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+        current_value = copy.deepcopy(prior["hypothesis_set"])
+        current_value["set_id"] = "hypotheses-reused-closed-id"
+        current_kernel = next(
+            item
+            for item in current_value["hypotheses"]
+            if item["hypothesis_id"] == "h-kernel-bound"
+        )
+        current_kernel.update(
+            {
+                "mechanism": "kernel_stall_pipeline",
+                "disposition": "active",
+                "missing_evidence_kinds": ["ncu_kernel"],
+            }
+        )
+        current = hypothesis_module.validate_hypothesis_set(
+            current_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+
+        with self.assertRaisesRegex(ValueError, "closed hypothesis identity"):
+            self.controller._validate_hypothesis_evolution(
+                prior,
+                current,
+                [],
+                closed_scope_records=[],
+                evidence_catalog=catalog,
+                execution_map=execution_map,
+            )
+
+        reopened_value = copy.deepcopy(prior["hypothesis_set"])
+        reopened_value["set_id"] = "hypotheses-reactivated-closed-id"
+        next(
+            item
+            for item in reopened_value["hypotheses"]
+            if item["hypothesis_id"] == "h-kernel-bound"
+        ).update(
+            {
+                "disposition": "active",
+                "missing_evidence_kinds": ["ncu_kernel"],
+            }
+        )
+        reopened = hypothesis_module.validate_hypothesis_set(
+            reopened_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+        with self.assertRaisesRegex(ValueError, "closed hypothesis identity"):
+            self.controller._validate_hypothesis_evolution(
+                prior,
+                reopened,
+                [],
+                closed_scope_records=[],
+                evidence_catalog=catalog,
+                execution_map=execution_map,
+            )
+
+    def test_fresh_controller_scoped_evidence_can_open_a_distinct_mechanism(self) -> None:
+        from tests.test_analysis_epoch import epoch_fixture
+        from tests.test_execution_map import evidence_catalog, map_fixture
+        from tests.test_hypothesis_space import hypothesis_fixture
+
+        hypothesis_module = self.controller._load_hypothesis_space_module()
+        execution_map_module = self.controller._load_execution_map_module()
+        epoch = epoch_fixture()
+        catalog = evidence_catalog()
+        execution_map = map_fixture(execution_map_module)
+        catalog["ev-kernel-opposed"] = {
+            "epoch_id": epoch["epoch_id"],
+            "kind": "framework_trace",
+            "artifact_sha256": "a" * 64,
+            "supports_hypothesis_ids": [],
+            "opposes_hypothesis_ids": ["h-kernel-bound"],
+        }
+        prior_value = hypothesis_fixture(hypothesis_module, execution_map_module)
+        prior_kernel = next(
+            item
+            for item in prior_value["hypotheses"]
+            if item["hypothesis_id"] == "h-kernel-bound"
+        )
+        prior_kernel.update(
+            {
+                "disposition": "rejected",
+                "oppose_evidence_ids": ["ev-kernel-opposed"],
+                "missing_evidence_kinds": [],
+            }
+        )
+        prior = hypothesis_module.validate_hypothesis_set(
+            prior_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+        without_kernel = copy.deepcopy(prior["hypothesis_set"])
+        without_kernel["set_id"] = "hypotheses-before-new-scope-evidence"
+        without_kernel["hypotheses"] = [
+            item
+            for item in without_kernel["hypotheses"]
+            if item["hypothesis_id"] != "h-kernel-bound"
+        ]
+        without_kernel["relationships"] = [
+            item
+            for item in without_kernel["relationships"]
+            if "h-kernel-bound" not in {item["left"], item["right"]}
+        ]
+        second = hypothesis_module.validate_hypothesis_set(
+            without_kernel,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+        evolution = self.controller._validate_hypothesis_evolution(
+            prior,
+            second,
+            [],
+            closed_scope_records=[],
+            evidence_catalog=catalog,
+            execution_map=execution_map,
+        )
+
+        catalog["ev-scoped-after-close"] = {
+            "epoch_id": epoch["epoch_id"],
+            "kind": "compiler_report",
+            "artifact_sha256": "b" * 64,
+            "supports_hypothesis_ids": [],
+            "opposes_hypothesis_ids": [],
+        }
+        for node in execution_map["nodes"]:
+            if node["node_id"] == "gpu-kernel":
+                node["evidence_ids"] = sorted(
+                    set(node["evidence_ids"]) | {"ev-scoped-after-close"}
+                )
+        third_value = copy.deepcopy(second["hypothesis_set"])
+        third_value["set_id"] = "hypotheses-with-fresh-scoped-mechanism"
+        third_value["execution_map_sha256"] = (
+            execution_map_module.execution_map_digest(
+                execution_map,
+                epoch=epoch,
+                evidence_catalog=catalog,
+            )
+        )
+        third_value["hypotheses"].append(
+            {
+                **copy.deepcopy(prior_kernel),
+                "hypothesis_id": "h-kernel-stall-scoped",
+                "mechanism": "kernel_stall_pipeline",
+                "disposition": "active",
+                "support_evidence_ids": ["ev-scoped-after-close"],
+                "oppose_evidence_ids": [],
+                "missing_evidence_kinds": ["ncu_kernel"],
+            }
+        )
+        third = hypothesis_module.validate_hypothesis_set(
+            third_value,
+            epoch=epoch,
+            execution_map=execution_map,
+            evidence_catalog=catalog,
+        )
+
+        accepted = self.controller._validate_hypothesis_evolution(
+            second,
+            third,
+            evolution["closed_mechanism_keys"],
+            closed_scope_records=evolution["closed_scope_records"],
+            evidence_catalog=catalog,
+            execution_map=execution_map,
+        )
+        self.assertEqual(
+            accepted["closed_scope_records"], evolution["closed_scope_records"]
+        )
 
     def test_live_hypothesis_identity_stays_frozen_inside_the_epoch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2338,6 +3138,12 @@ class WorkloadRoundTests(unittest.TestCase):
                 (run_dir / "active_diagnosis" / "evidence_catalog.json").read_text("utf-8")
             )
             self.assertIn("direction_experiment", {item["kind"] for item in catalog.values()})
+            policy = json.loads(
+                (run_dir / "active_diagnosis" / "selection_policy.json").read_text(
+                    "utf-8"
+                )
+            )
+            self.assertEqual(policy["remaining_profile_actions"], 2)
 
     def test_read_only_evidence_cannot_modify_files_outside_mutation_roots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2978,7 +3784,7 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(state["next_action"], "done")
             self.assertTrue((run_dir / "evaluation.json").is_file())
 
-    def test_final_external_challenge_is_locally_adjudicated_by_workload_evidence(self) -> None:
+    def test_final_external_challenge_is_retained_when_workload_win_does_not_answer_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             control, run_dir, project = self._workspace(root)
@@ -3012,7 +3818,7 @@ class WorkloadRoundTests(unittest.TestCase):
             )
             self.assertEqual(decision["status"], "promoted")
             self.assertEqual(
-                adjudication["status"], "overruled_by_confirmed_workload_evidence"
+                adjudication["status"], "retained_but_non_blocking"
             )
             self.assertEqual(adjudication["challenges"][0]["provider"], "google-ai-mode")
             self.assertEqual(

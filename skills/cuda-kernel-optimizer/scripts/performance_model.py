@@ -130,6 +130,8 @@ def build_performance_model(
                 "node_id": node["node_id"],
                 "layer": node["layer"],
                 "benefit_ceiling_us": duration,
+                "first_start_us": node["first_start_us"],
+                "last_end_us": node["last_end_us"],
                 "qualifies_minimum_effect": duration >= threshold,
                 "basis": "observed_active_time_upper_bound",
                 "evidence_ids": sorted(node["evidence_ids"]),

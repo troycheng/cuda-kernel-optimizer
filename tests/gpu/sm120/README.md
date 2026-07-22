@@ -25,10 +25,11 @@ set. It covers:
   required check, dependency identity, or time budget fails;
 - a protocol-generation 3.1 active-diagnosis round that runs a real PyTorch CPU/CUDA profile action,
   seals its trace and outcome, and returns to the next hypothesis round;
-- a V1.1 diagnosis-mechanism round covering CUDA Graph launch batching,
-  coalesced versus strided memory access, FP16 GEMM, and pinned-memory transfer
-  overlap on real SM120 hardware, followed by production decision-engine
-  admission for all four observations;
+- a V1.1 Controller evidence-admission round covering CUDA Graph launch
+  batching, coalesced versus strided memory access, TF32-disabled versus
+  TF32-enabled GEMM, and pinned-memory transfer overlap on real SM120 hardware;
+  each known fixture hypothesis must acquire a fresh direction experiment
+  before it can reach `PURSUE`;
 - a target-bounded Nsight Compute attempt. It must either collect real metrics
   with readable counters or record exactly `ERR_NVGPUCTRPERM`; no other
   degraded result is accepted. The test never adds capabilities or changes
@@ -165,16 +166,23 @@ Large profiler reports remain in the isolated artifact tree. `ncu
 ## Recorded validation results
 
 The V1.1 lane ran on an idle physical RTX 5090 on 2026-07-22. A fresh artifact
-lane passed 24/24 checks in 98.813 seconds using immutable image
+lane passed 24/24 checks in 134.726 seconds using immutable image
 `sha256:b810841fe8962f6f65bb48a693773696be778653d48c7903dc65471ca37188a2`.
 The four controlled scenarios all passed correctness. CUDA Graph replay reduced
-the 33-launch path from a 206.797 us median to 42.306 us; strided gather took
-95.040 us versus 83.328 us for sequential access; the 4096x4096 FP16 GEMM took
-665.472 us; and overlapping a pinned-memory transfer with GEMM reduced the
-combined path from 979.349 us to 692.755 us. The production decision engine
-accepted the expected mechanism for all four scenarios in 2.3--2.9 ms with no
-expensive profiler action. These numbers validate the test mechanisms and
-decision path, not the expected benefit for another workload. The unprivileged
+the 33-launch path from a 211.053 us median to 42.143 us; strided gather took
+95.296 us versus 85.536 us for sequential access; enabling TF32 reduced the
+4096x4096 GEMM from 1,973.984 us to 1,450.144 us with 0.0294% relative
+Frobenius error; and overlapping a pinned-memory transfer with GEMM reduced the
+combined path from 964.653 us to 691.626 us. Each Controller path acquired a
+second real GPU observation and reached `PURSUE` in 9.221--9.659 seconds with
+no high-cost profiler action.
+After the final closed-scope history hardening, the four Controller scenarios
+were rerun against the same immutable image and passed in 44.308 seconds.
+
+The test starts from known fixture hypotheses and a benchmark-derived map. It
+validates evidence gating, replay, sealing, and state transitions; it does not
+validate autonomous mechanism discovery from an unfamiliar profile. The
+unprivileged
 lane returned `ERR_NVGPUCTRPERM`; the separate authorized smoke completed nine
 NCU passes while leaving host policy unchanged.
 
