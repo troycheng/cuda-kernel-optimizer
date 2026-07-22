@@ -50,11 +50,13 @@ may produce useful hypotheses, but not a performance result.
 1. Freeze the workload, objective, constraints, environment, allowed paths, and
    measurement policy.
 2. Run the project's original business baseline before testing a candidate.
-3. Evaluate each candidate from the cheapest falsifier through correctness,
+3. Build a performance model from the first global scan and report the benefit
+   ceiling, uncertainty, next action, and whether deeper work is worth its cost.
+4. Evaluate each candidate from the cheapest falsifier through correctness,
    short paired timing, profiling when needed, and formal workload evidence.
-4. Keep a change only when its declared claim passes; otherwise restore the
+5. Keep a change only when its declared claim passes; otherwise restore the
    previous implementation and record the stop reason.
-5. Report progress during long work and finish with the exact run directory.
+6. Report progress during long work and finish with the exact run directory.
 
 ## Choose a budget
 
@@ -89,6 +91,11 @@ stop reason, retained or restored change, strongest supported claim, and missing
 evidence. Use `<run-dir>/itervN/decision.json` for the machine-readable
 correctness, performance, constraint, and evidence-integrity decision. Raw
 paired samples and manifests remain in the same run directory for audit.
+
+During diagnosis, `<run-dir>/active_diagnosis/investment_brief.json` is the
+shortest useful checkpoint. It records the current mechanism, supported benefit
+ceiling, uncertainty, cost class, and the one admitted next action. The adjacent
+`performance_model.json` contains the deterministic timing accounting behind it.
 
 A change is **merge-ready** only when the declared workload objective,
 correctness reference, constraints, and evidence integrity all pass. A

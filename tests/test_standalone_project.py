@@ -12,9 +12,10 @@ OLD_PUBLIC_REPOSITORY = "github.com/troycheng/cuda-optimized-skill"
 
 class StandaloneProjectTests(unittest.TestCase):
     def test_public_version_uses_the_v1_release_line(self) -> None:
-        self.assertEqual((ROOT / "VERSION").read_text("utf-8").strip(), "1.0.1")
+        self.assertEqual((ROOT / "VERSION").read_text("utf-8").strip(), "1.1.0")
         for name in ("README.md", "README.zh-CN.md"):
             text = (ROOT / name).read_text("utf-8")
+            self.assertIn("### V1.1.0", text)
             self.assertIn("### V1.0.1", text)
             self.assertIn("### V1.0.0", text)
             self.assertNotRegex(text, r"(?m)^### V(?:2|3)\.")
@@ -129,7 +130,7 @@ class StandaloneProjectTests(unittest.TestCase):
         self.assertIn(f"{len(cases):,} tests", validation)
         self.assertIn(f"{passed:,} passed", validation)
         self.assertIn(
-            "nine physical RTX 5090 opt-in tests were skipped", validation
+            f"{skipped:,} physical RTX 5090 opt-in tests were skipped", validation
         )
 
 

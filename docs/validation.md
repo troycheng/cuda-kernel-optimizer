@@ -5,9 +5,10 @@ predict the speedup of a new workload.
 
 ## Automated checks
 
-The local CPU/static suite ran 1,141 tests on 2026-07-22: 1,132 passed, nine physical RTX 5090 opt-in tests were skipped, and none failed. It covers input
+The local CPU/static suite ran 1,171 tests on 2026-07-22: 1,161 passed, 10 physical RTX 5090 opt-in tests were skipped, and none failed. It covers input
 validation, state recovery, evidence binding, shared-host guards, timeouts, restoration, capability retrieval,
-stability calibration, audit cadence, and deterministic decision logic. Pre-V1
+stability calibration, audit cadence, performance-model accounting, bounded
+hypothesis admission, targeted evidence selection, and deterministic decision logic. Pre-V1
 protocol generation 3.1 added
 closed-loop adapter execution, outcome-bound support/opposition, cross-round request
 history, content-based project identity, frozen launcher identity, result and artifact
@@ -16,6 +17,17 @@ replay, and project-copy direction experiments. These checks do not
 validate the reader's CUDA environment.
 
 ## Physical GPU lane
+
+The V1.1 lane passed 23 of 23 checks in 97.484 seconds on a physical RTX 5090
+on 2026-07-22. It used immutable compatibility image
+`sha256:b810841fe8962f6f65bb48a693773696be778653d48c7903dc65471ca37188a2`.
+Four controlled workloads exercised CUDA Graph launch batching, coalesced versus
+strided memory access, 4096x4096 FP16 GEMM, and pinned-memory transfer overlap.
+The measurements confirm that these mechanisms and the target path execute; they
+do not predict a new workload's speedup. The complete lane also replayed the
+existing readiness, active-diagnosis, paired-measurement, restoration, and
+promotion paths. NCU returned `ERR_NVGPUCTRPERM`; no counter permission, driver,
+package, or host setting was changed.
 
 The final protocol-generation 3.1 completion lane passed 20 of 20 checks in 58.876 seconds on a physical
 RTX 5090 on 2026-07-20. It used immutable image

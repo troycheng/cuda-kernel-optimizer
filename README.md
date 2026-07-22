@@ -35,6 +35,12 @@ checks the required capabilities, compares competing explanations, and runs only
 evidence actions needed to decide what should happen next. Signed evidence and an
 append-only ledger keep interrupted, noisy, or drifted runs from silently changing the
 experiment or spending the same budget twice.
+
+After the first global scan, the diagnosis engine builds a performance model of
+the critical path, benefit ceiling, and remaining uncertainty. It reports an
+early investment brief before expensive profiling begins, so the user can see
+what is known, what one action comes next, and whether further work is worth the
+cost.
 Automatic pre-baseline readiness: The AI checks required build, GPU, profiler,
 and workload-smoke capabilities before performance work begins.
 The user still supplies the real workload and authorization. The only automatic repair
@@ -114,6 +120,13 @@ permits a candidate, `yellow` pauses for better measurement or baseline replay,
 and `red` stops the run. The contract also limits how many candidates may run
 between baseline audits.
 
+The AI may propose at most three competing mechanism hypotheses. The Controller
+computes the timing facts and returns exactly one decision: `MEASURE`, `PURSUE`,
+`REVIEW_REQUIRED`, or `STOP`. Only the action named by that decision may run.
+The current benefit ceiling, uncertainty, cost class, and next checkpoint are
+written to `active_diagnosis/investment_brief.json`; numeric time estimates are
+included only when the same action has identity-matched timing history.
+
 Verified observations query only a few matching capability cards; cards supply methods, counterexamples, and checks, but do not decide results. Every admitted round starts with a falsifiable performance hypothesis.
 Only a rehashed V2.5 evidence closure counts as an evaluated candidate. Environment readiness finishes before optimization timing starts; three minutes or 10% of the total budget is a progress review point, not a timer that kills an install or repair.
 The Controller terminates the process group only when the command timeout or readiness hard deadline is reached. Tool work is not a performance improvement.
@@ -150,6 +163,18 @@ RTX 5090 lane, tool permissions, and the real-pair stability result.
 separate. Neither page predicts the speedup of a new project.
 
 ## Release notes
+
+### V1.1.0
+
+- Add a deterministic performance model for critical-path accounting, per-layer
+  headroom, missing evidence, and identity-matched action timing.
+- Limit active diagnosis to three competing mechanisms and one admitted next
+  action, with explicit `MEASURE`, `PURSUE`, `REVIEW_REQUIRED`, and `STOP`
+  outcomes.
+- Produce an early investment brief before expensive profiling and stop when no
+  admissible direction clears the project effect threshold.
+- Add bounded, advisory external direction challenges and four controlled RTX
+  5090 mechanism checks covering launch, memory access, GEMM, and transfer overlap.
 
 ### V1.0.1
 

@@ -244,10 +244,37 @@ class ReadmeSyncTests(unittest.TestCase):
         self.assertIn(reference, self.english)
         self.assertIn(reference, self.chinese)
 
+    def test_readmes_explain_the_v1_1_diagnosis_and_early_investment_decision(self) -> None:
+        english = " ".join(self.english.split())
+        chinese = "".join(self.chinese.split())
+        for marker in (
+            "performance model",
+            "benefit ceiling",
+            "uncertainty",
+            "MEASURE",
+            "PURSUE",
+            "REVIEW_REQUIRED",
+            "STOP",
+            "investment_brief.json",
+        ):
+            self.assertIn(marker, english)
+        for marker in (
+            "性能模型",
+            "收益上限",
+            "不确定性",
+            "MEASURE",
+            "PURSUE",
+            "REVIEW_REQUIRED",
+            "STOP",
+            "investment_brief.json",
+        ):
+            self.assertIn(marker, chinese)
+
     def test_readmes_publish_one_matching_standalone_release(self) -> None:
         english = self.english[self.english.index("## Release notes"):]
         chinese = self.chinese[self.chinese.index("## 版本记录"):]
         for text in (english, chinese):
+            self.assertEqual(text.count("### V1.1.0"), 1)
             self.assertEqual(text.count("### V1.0.0"), 1)
             self.assertNotRegex(text, r"(?m)^### V(?:2|3)\.")
         self.assertIn("first standalone release", english)

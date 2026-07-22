@@ -46,6 +46,12 @@ the support/opposition effect of every possible outcome. The model does not assi
 cost, risk, perturbation, or an information-gain score. The Controller obtains those
 facts from its catalog and selects deterministically.
 
+Before anything runs, the Controller writes `performance_model.json`,
+`decision.json`, and `investment_brief.json`. The decision is `MEASURE`, `PURSUE`,
+`REVIEW_REQUIRED`, or `STOP`; only a `MEASURE` decision can launch the single
+selected evidence action. A failed or below-threshold direction cannot fall through
+to a later profiler or formal test.
+
 The adapter writes one `cuda-optimizer/evidence-result-v1` object. An `observed`
 result must name one preregistered outcome; non-observed results use a null outcome.
 The Controller binds the selected outcome to the evidence catalog, so the next model
