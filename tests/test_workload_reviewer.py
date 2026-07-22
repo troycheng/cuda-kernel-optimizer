@@ -450,7 +450,7 @@ class ReviewerProcessTests(unittest.TestCase):
                     [item["provider"] for item in selected], providers
                 )
 
-    def test_copilot_is_second_for_repository_review(self) -> None:
+    def test_copilot_is_second_in_provider_priority(self) -> None:
         configs = [
             {"provider": provider, "argv": [provider], "timeout_seconds": 5}
             for provider in ("gemini", "github-copilot", "glm", "google-ai-mode")

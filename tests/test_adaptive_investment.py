@@ -124,6 +124,29 @@ class AdaptiveInvestmentTests(unittest.TestCase):
         self.assertEqual(result["blocked_action"]["action_id"], "next")
         self.assertEqual(result["projected_spend"]["p90_seconds"], 101.0)
 
+    def test_fifty_small_actions_cannot_bypass_cumulative_authorization(self):
+        current_spend = spend()
+        for index in range(1, 51):
+            action_id = f"renamed-small-action-{index}"
+            result = self.decide(
+                [direction_fixture()],
+                [evidence_action(action_id, direction="z", p90_seconds=1.0)],
+                auth=authorization(max_seconds=49.5),
+                current_spend=current_spend,
+            )
+            if index < 50:
+                self.assertEqual(result["decision"], "ACT")
+                self.assertEqual(result["selected_action"]["action_id"], action_id)
+                current_spend = {
+                    "elapsed_seconds": result["projected_spend"]["p90_seconds"]
+                }
+                continue
+
+            self.assertEqual(current_spend["elapsed_seconds"], 49.0)
+            self.assertEqual(result["decision"], "REVIEW_REQUIRED")
+            self.assertEqual(result["blocked_action"]["action_id"], action_id)
+            self.assertEqual(result["projected_spend"]["p90_seconds"], 50.0)
+
     def test_no_decision_changing_outcome_means_action_is_skipped(self):
         action = evidence_action("repeat", direction="z")
         action["outcomes"] = [
