@@ -39,21 +39,31 @@ Skill 不会自动修改宿主机配置。驱动、counter 权限、频率、功
 
 ## 快速开始
 
-安装由 ChatGPT 的编程代理完成。让它从
-[troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer)
-按最新发布标签安装或更新 `skills/cuda-kernel-optimizer`。只有需要试用尚未发布的修改时，
-才使用持续变化的 `main` 分支。安装完成后开启新会话，让新指令生效。
+安装由 ChatGPT 的编程代理完成，读者不需要手工运行项目脚本。在 ChatGPT 编程会话中发送：
 
-请提供可运行目标、正确性 reference、目标环境、性能目标、约束和允许修改的范围。
-真实 workload 必须由用户提供；skill 不会自行下载或编造。缺少基础条件时，它会先说明
-当前最多能得到什么结论，并帮助补齐项目内测试，不会把静态判断写成提速成果。
+> 从 [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer) 的最新发布版本安装 `skills/cuda-kernel-optimizer`。只把这个 skill 安装到当前 skills 目录，执行 CPU/static `self_check`，并报告安装标签、commit 和目标目录。除非我明确要求，否则不要使用 `main`。
+
+安装完成后开启新会话，让新指令生效。
+
+正式使用 45 分钟的 `quick` 预算前，先做一次 **10 分钟适配检查**：
+
+> 使用 cuda-kernel-optimizer 对当前项目做只读适配检查，最多用 10 分钟。不要修改源码、安装依赖或调整宿主机。确认可运行目标、正确性 reference、benchmark、目标 GPU 和 profiler 权限。报告当前能支持的结论、阻塞项、缺失证据和最低成本的下一步，不产出提速结论。
+
+这一步只判断项目是否具备优化条件，不产出提速结论。真实 workload 必须由用户提供，
+skill 不会自行下载或编造。基础条件满足后，再提供性能目标、约束和允许修改的范围，
+并选择 `quick`、`balanced` 或 `thorough`。
+
+AI 会冻结任务，运行项目原始 baseline，按照从低成本检查到昂贵测试的顺序评估候选，
+并恢复被否决的修改。结束时必须报告准确的运行目录。先看 `summary.md`，需要机器可读
+结论时查看 `itervN/decision.json`。只有真实 workload 目标、正确性、约束和证据完整性
+全部通过，修改才适合合入。
 
 `quick` 最长 45 分钟，`balanced` 是默认的 3 小时，`thorough` 最长 10 小时。
 证据已经明确或没有值得继续的方向时，任务会提前结束。
 
 > 使用 cuda-kernel-optimizer 优化这个 Triton workload。先确认 reference、真实输入、目标指标、允许修改的文件和目标环境。保持宿主机设置不变，只有正确性与成对性能证据都通过时才保留修改。
 
-输入清单见[快速开始](docs/getting-started.md)。
+完整的首次运行流程见[快速开始](docs/getting-started.md)。
 
 ## 选择工作流
 

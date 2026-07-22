@@ -29,29 +29,6 @@ The acceptance runner bound each lane to the recorded immutable image ID,
 required a dedicated read-only CUTLASS 4.6.1 checkout, failed closed when GPU
 occupancy could not be queried, and started from fresh artifact directories.
 
-## Observed real-workload lane
-
-An isolated user-provided vLLM binary workload ran in full mode with a
-`balanced` policy limited to one round, two branches, one outer candidate, and
-10,800 seconds. It completed in 2,232.43 seconds:
-
-| Surface | Valid pairs | Estimate | 95% CI | Threshold | Status |
-|---|---:|---:|---:|---:|---|
-| Kernel paired timing | 100 | +26.3287% | [22.1801%, 30.6322%] | +0.5% | `confirmed_win` |
-| `latency_us` workload | 100 | -0.0097% | [-0.0390%, 0.0365%] | +2.0% | `inconclusive` |
-
-The authoritative full-mode verdict was `kernel_only_win`, so the baseline
-remained the global best. The final checkpoint was `complete`, resume was
-idempotent, and raw kernel and workload JSONL reproduced the stored statistics.
-Host NCU 2026.1.1 had counter access and collected 140 metrics without
-degradation. The adapter compared prebuilt baseline/optimized binaries; the
-captured dispatch headers were byte-identical, so the result is binary A/B
-evidence rather than source-level promotion proof. No source tree was modified.
-
-The validation records were captured in an isolated artifact lane. Maintainer
-filesystem paths are intentionally omitted because they are not part of the
-portable evidence contract.
-
 ## Architecture capability rules
 
 Architecture capabilities are explicit sets. **Never infer** TMA, WGMMA,

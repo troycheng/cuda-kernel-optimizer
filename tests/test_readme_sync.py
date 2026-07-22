@@ -95,6 +95,38 @@ class ReadmeSyncTests(unittest.TestCase):
             for budget in ("quick", "balanced", "thorough"):
                 self.assertIn(budget, text)
 
+    def test_first_use_path_is_concrete_and_ai_executed(self) -> None:
+        english_quick_start = self.english[
+            self.english.index("## Quick start") : self.english.index(
+                "## Choose a workflow"
+            )
+        ]
+        chinese_quick_start = self.chinese[
+            self.chinese.index("## 快速开始") : self.chinese.index("## 选择工作流")
+        ]
+        getting_started = (ROOT / "docs/getting-started.md").read_text(
+            encoding="utf-8"
+        )
+
+        for marker in (
+            "installed tag, commit, and destination",
+            "10-minute fit check",
+            "does not claim a speedup",
+            "summary.md",
+            "decision.json",
+        ):
+            self.assertIn(marker, english_quick_start + getting_started)
+        for marker in (
+            "安装标签、commit 和目标目录",
+            "10 分钟适配检查",
+            "不产出提速结论",
+            "summary.md",
+            "decision.json",
+        ):
+            self.assertIn(marker, chinese_quick_start)
+        self.assertIn("Do not edit source files", getting_started)
+        self.assertIn("merge-ready", getting_started)
+
     def test_readmes_publish_the_same_five_workflows(self) -> None:
         english = (
             "Environment readiness",
@@ -229,6 +261,9 @@ class ReadmeSyncTests(unittest.TestCase):
             self.assertIn("docs/case-studies.md", text)
         validation = (ROOT / "docs/validation.md").read_text(encoding="utf-8")
         cases = (ROOT / "docs/case-studies.md").read_text(encoding="utf-8")
+        compatibility = (
+            ROOT / "skills/cuda-kernel-optimizer/references/compatibility.md"
+        ).read_text(encoding="utf-8")
         for fact in (
             "15 of 15",
             "34.307",
@@ -237,8 +272,16 @@ class ReadmeSyncTests(unittest.TestCase):
             "ERR_NVGPUCTRPERM",
         ):
             self.assertIn(fact, validation)
-        for fact in ("60.4616%", "26.3287%", "-0.0097%", "140"):
+        for fact in ("60.4616%", "140"):
             self.assertIn(fact, cases)
+        for unsupported_case_fact in (
+            "User-provided vLLM workload",
+            "Observed real-workload lane",
+            "26.3287%",
+            "-0.0097%",
+        ):
+            self.assertNotIn(unsupported_case_fact, cases)
+            self.assertNotIn(unsupported_case_fact, compatibility)
         self.assertNotIn("60.4616%", validation)
         self.assertNotIn("811", cases)
 

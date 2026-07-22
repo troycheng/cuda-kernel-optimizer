@@ -47,26 +47,35 @@ recommendations unless the user separately authorizes them.
 
 ## Quick start
 
-Installation is performed by ChatGPT's coding agent. Ask it to install or update
-`skills/cuda-kernel-optimizer` from
-[troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer),
-using the latest published release tag. Use the moving `main` branch only when
-deliberately testing unreleased changes. Start a new session after installation
-so the instructions are reloaded.
+Installation is performed by ChatGPT's coding agent; the reader does not run
+the project scripts by hand. In a ChatGPT coding session, send:
 
-Provide a runnable target, correctness reference, target environment,
-performance goal, constraints, and allowed modification scope. A real workload must be supplied by the user; the skill does not download or invent one. When a
-foundation is missing, it reports the strongest result the current setup can
-support and helps prepare project-local tests instead of claiming an unmeasured
-speedup.
+> Install `skills/cuda-kernel-optimizer` from the latest published release of [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer). Install only that skill into the active skills directory, run its CPU/static `self_check`, and report the installed tag, commit, and destination. Do not use `main` unless I ask.
+
+Start a new session after installation so the instructions are reloaded.
+
+Before committing to the 45-minute `quick` budget, run a **10-minute fit check**:
+
+> Use cuda-kernel-optimizer for a read-only fit check of this project. Spend at most 10 minutes. Do not edit source files, install packages, or change host settings. Confirm the runnable target, correctness reference, benchmark, target GPU, and profiler access. Report the supported claim layer, blockers, missing evidence, and the first lowest-cost action. Do not claim a speedup.
+
+This check only decides whether the project is ready; it does not claim a
+speedup. A real workload must be supplied by the user. The skill does not download or invent one.
+If the foundations are sufficient, provide the real workload, performance goal,
+constraints, and allowed modification scope, then choose `quick`, `balanced`,
+or `thorough` for the formal run.
+
+The AI then freezes the task, runs the original baseline, evaluates candidates
+from cheap checks to expensive tests, and restores rejected changes. At the end,
+it reports the exact run directory. Read `summary.md` first and use
+`itervN/decision.json` for the machine-readable decision. A change is ready to
+merge only when the declared workload objective, correctness, constraints, and
+evidence integrity all pass.
 
 Choose `quick` for a 45-minute ceiling, `balanced` for the default three hours,
 or `thorough` for up to ten hours. The run may stop earlier when the evidence is
 conclusive or no useful direction remains.
 
-> Use cuda-kernel-optimizer on this Triton workload. Confirm the reference, real inputs, target metric, allowed files, and environment first. Keep host settings unchanged and retain a change only when correctness and paired performance both pass.
-
-See [Getting Started](docs/getting-started.md) for the input checklist.
+See [Getting Started](docs/getting-started.md) for the complete first-run path.
 
 ## Choose a workflow
 

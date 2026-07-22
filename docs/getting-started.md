@@ -2,12 +2,22 @@
 
 ## Install with ChatGPT
 
-Installation is performed by ChatGPT's coding agent. Ask it to install or update
-`skills/cuda-kernel-optimizer` from
-[troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer)
-at the latest published release tag. Use the moving `main` branch only when
-deliberately testing unreleased changes. Start a new session after installation
-so the agent reloads the skill instructions.
+The reader does not run installation commands or project scripts by hand. Send
+this request in a ChatGPT coding session:
+
+> Install `skills/cuda-kernel-optimizer` from [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer) at its latest published release tag. Install only that skill into the active skills directory, run its CPU/static `self_check`, and report the installed tag, commit, and destination. Do not use `main` unless I ask.
+
+Use the moving `main` branch only when deliberately testing unreleased changes.
+Start a new session after installation so the agent reloads the skill.
+
+## Run a 10-minute fit check
+
+Use this read-only check before selecting a formal optimization budget:
+
+> Use cuda-kernel-optimizer for a read-only fit check of this project. Spend at most 10 minutes. Do not edit source files, install packages, or change host settings. Confirm the runnable target, correctness reference, benchmark, target GPU, and profiler access. Report the supported claim layer, blockers, missing evidence, and the first lowest-cost action. Do not claim a speedup.
+
+The check does not claim a speedup. It answers whether optimization can start,
+what result the current setup could support, and what must be prepared first.
 
 ## Prepare the task
 
@@ -35,6 +45,17 @@ If the runnable target, correctness reference, or stable benchmark is missing,
 start with [Environment readiness](environment-readiness.md). Source-only work
 may produce useful hypotheses, but not a performance result.
 
+## What the AI does in a formal run
+
+1. Freeze the workload, objective, constraints, environment, allowed paths, and
+   measurement policy.
+2. Run the project's original business baseline before testing a candidate.
+3. Evaluate each candidate from the cheapest falsifier through correctness,
+   short paired timing, profiling when needed, and formal workload evidence.
+4. Keep a change only when its declared claim passes; otherwise restore the
+   previous implementation and record the stop reason.
+5. Report progress during long work and finish with the exact run directory.
+
 ## Choose a budget
 
 | Budget | Maximum wall time | Use it for |
@@ -60,3 +81,15 @@ Next, select the matching [workflow](workflows.md) and review the
 [evidence and safety boundaries](evidence-and-safety.md). For work that may run
 for many iterations, also review the
 [long-running optimization loop](long-running-optimization.md).
+
+## Inspect the result
+
+Start with `<run-dir>/summary.md`. It states the terminal result, elapsed time,
+stop reason, retained or restored change, strongest supported claim, and missing
+evidence. Use `<run-dir>/itervN/decision.json` for the machine-readable
+correctness, performance, constraint, and evidence-integrity decision. Raw
+paired samples and manifests remain in the same run directory for audit.
+
+A change is **merge-ready** only when the declared workload objective,
+correctness reference, constraints, and evidence integrity all pass. A
+kernel-only improvement is not merge-ready for an end-to-end workload claim.

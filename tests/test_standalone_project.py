@@ -104,9 +104,33 @@ class StandaloneProjectTests(unittest.TestCase):
 
     def test_validation_count_matches_the_release_gate(self) -> None:
         validation = (ROOT / "docs" / "validation.md").read_text("utf-8")
-        self.assertIn("1,122 tests", validation)
-        self.assertIn("1,113 passed", validation)
-        self.assertIn("nine physical RTX 5090 opt-in tests were skipped", validation)
+        suite = unittest.defaultTestLoader.discover(
+            str(ROOT / "tests"), pattern="test_*.py", top_level_dir=str(ROOT)
+        )
+
+        def iter_cases(node):
+            for item in node:
+                if isinstance(item, unittest.TestSuite):
+                    yield from iter_cases(item)
+                else:
+                    yield item
+
+        cases = list(iter_cases(suite))
+        skipped = sum(
+            bool(getattr(case.__class__, "__unittest_skip__", False))
+            or bool(
+                getattr(
+                    getattr(case, case._testMethodName), "__unittest_skip__", False
+                )
+            )
+            for case in cases
+        )
+        passed = len(cases) - skipped
+        self.assertIn(f"{len(cases):,} tests", validation)
+        self.assertIn(f"{passed:,} passed", validation)
+        self.assertIn(
+            "nine physical RTX 5090 opt-in tests were skipped", validation
+        )
 
 
 if __name__ == "__main__":
