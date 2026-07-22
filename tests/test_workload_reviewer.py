@@ -450,6 +450,115 @@ class ReviewerProcessTests(unittest.TestCase):
                     [item["provider"] for item in selected], providers
                 )
 
+    def test_copilot_is_second_for_repository_review(self) -> None:
+        configs = [
+            {"provider": provider, "argv": [provider], "timeout_seconds": 5}
+            for provider in ("gemini", "github-copilot", "glm", "google-ai-mode")
+        ]
+
+        selected = self.reviewer.select_reviewer_configs(configs, "major")
+
+        self.assertEqual(
+            [item["provider"] for item in selected],
+            ["google-ai-mode", "github-copilot"],
+        )
+
+    def test_provider_surface_and_underlying_model_are_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            good = self._script(
+                root,
+                """
+                request = json.load(sys.stdin)
+                print(json.dumps({
+                    "schema_version": "cuda-workload-optimizer/review-v1",
+                    "request_digest": request["request_digest"],
+                    "verdict": "challenge",
+                    "concerns": [],
+                    "suggested_experiments": ["inspect repository call sites"]
+                }))
+                """,
+            )
+
+            artifact = self.reviewer.run_reviewers(
+                [{
+                    "provider": "github-copilot",
+                    "underlying_model": "auto",
+                    "argv": [sys.executable, str(good)],
+                    "timeout_seconds": 2,
+                }],
+                _request(self.reviewer),
+                root / "run",
+                total_timeout_seconds=2,
+            )
+
+            review = artifact["reviews"][0]
+            self.assertEqual(review["provider"], "github-copilot")
+            self.assertEqual(review["underlying_model"], "auto")
+            self.assertEqual(review["status"], "completed")
+            self.assertEqual(
+                review["response"]["suggested_experiments"],
+                ["inspect repository call sites"],
+            )
+            self.assertEqual(artifact["failed_providers"], [])
+            self.assertLessEqual(artifact["total_wait_seconds"], 2)
+
+    def test_run_deduplicates_canonical_provider_model_per_request(self) -> None:
+        configs = [
+            {
+                "provider": provider,
+                "underlying_model": "unknown",
+                "argv": [provider],
+                "timeout_seconds": 5,
+            }
+            for provider in ("glm", "zhipu")
+        ]
+
+        artifact = self.reviewer.run_reviewers(
+            configs,
+            _request(self.reviewer),
+            tempfile.mkdtemp(),
+            total_timeout_seconds=1,
+        )
+
+        self.assertEqual(artifact["providers_requested"], ["glm"])
+        self.assertEqual(artifact["failed_providers"], ["glm"])
+
+    def test_same_underlying_model_is_not_heterogeneous_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            good = self._script(
+                root,
+                """
+                request = json.load(sys.stdin)
+                print(json.dumps({
+                    "schema_version": "cuda-workload-optimizer/review-v1",
+                    "request_digest": request["request_digest"],
+                    "verdict": "support",
+                    "concerns": [],
+                    "suggested_experiments": []
+                }))
+                """,
+            )
+            configs = [
+                {
+                    "provider": provider,
+                    "underlying_model": "gpt-4.1",
+                    "argv": [sys.executable, str(good)],
+                    "timeout_seconds": 5,
+                }
+                for provider in ("google-ai-mode", "github-copilot")
+            ]
+
+            artifact = self.reviewer.run_reviewers(
+                configs,
+                _request(self.reviewer),
+                root / "run",
+                total_timeout_seconds=2,
+            )
+
+        self.assertEqual(artifact["heterogeneous_models"], ["gpt-4.1"])
+
     def test_provider_aliases_cannot_fill_multiple_independent_review_slots(self) -> None:
         configs = [
             {"provider": provider, "argv": [provider], "timeout_seconds": 5}

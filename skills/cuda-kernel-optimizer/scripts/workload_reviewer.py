@@ -28,6 +28,7 @@ _SHA256 = re.compile(r"[a-f0-9]{64}\Z")
 _PROVIDER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _PROVIDER_PRIORITY = (
     "google-ai-mode",
+    "github-copilot",
     "glm",
     "kimi",
     "deepseek",
@@ -35,6 +36,7 @@ _PROVIDER_PRIORITY = (
 )
 _PROVIDER_ALIASES = {
     "google-ai-mode": "google-ai-mode",
+    "github-copilot": "github-copilot",
     "glm": "glm",
     "zhipu": "glm",
     "zhipu-qingyan": "glm",
@@ -503,21 +505,33 @@ def run_reviewers(
         raise ReviewerError("review request digest is invalid")
 
     normalized = []
-    providers = set()
+    run_keys = set()
     cleanup_reserve = min(4.0, float(total_timeout_seconds) * 0.25)
     provider_deadline = max(
         0.05, float(total_timeout_seconds) - cleanup_reserve
     )
     for index, raw in enumerate(configs):
         config = _object(raw, f"reviewers[{index}]")
-        _closed(config, {"provider", "argv", "timeout_seconds"}, f"reviewers[{index}]")
+        _closed(
+            config,
+            {"provider", "underlying_model", "argv", "timeout_seconds"},
+            f"reviewers[{index}]",
+        )
         _required(config, {"provider", "argv", "timeout_seconds"}, f"reviewers[{index}]")
         provider = _string(config["provider"], f"reviewers[{index}].provider", 64)
         if _PROVIDER.fullmatch(provider) is None:
             raise ReviewerError(f"reviewers[{index}].provider is invalid")
-        if provider in providers:
-            raise ReviewerError("reviewer providers must be unique")
-        providers.add(provider)
+        underlying_model = config.get("underlying_model", "unknown")
+        underlying_model = _string(
+            underlying_model, f"reviewers[{index}].underlying_model", 64
+        )
+        if _PROVIDER.fullmatch(underlying_model) is None:
+            raise ReviewerError(f"reviewers[{index}].underlying_model is invalid")
+        canonical_provider = _PROVIDER_ALIASES.get(provider.lower(), provider.lower())
+        run_key = (expected, canonical_provider, underlying_model.lower())
+        if run_key in run_keys:
+            continue
+        run_keys.add(run_key)
         timeout = config["timeout_seconds"]
         if (
             isinstance(timeout, bool)
@@ -536,6 +550,8 @@ def run_reviewers(
         normalized.append(
             {
                 "provider": provider,
+                "canonical_provider": canonical_provider,
+                "underlying_model": underlying_model,
                 "argv": list(argv),
                 "timeout_seconds": min(
                     float(timeout), provider_deadline
@@ -556,11 +572,14 @@ def run_reviewers(
                     "timeout_seconds": config["timeout_seconds"],
                 },
                 request,
-                run_root / "reviewers" / provider,
+                run_root / "reviewers" / _digest(
+                    [expected, config["canonical_provider"], config["underlying_model"].lower()]
+                )[:16],
             )
             execution = artifact.get("execution", {})
             return {
                 "provider": provider,
+                "underlying_model": config["underlying_model"],
                 "status": artifact["status"],
                 "response": copy.deepcopy(artifact.get("response")),
                 "failure": execution.get("failure"),
@@ -569,6 +588,7 @@ def run_reviewers(
         except (OSError, ReviewerError, RuntimeError) as error:
             return {
                 "provider": provider,
+                "underlying_model": config["underlying_model"],
                 "status": "unavailable",
                 "response": None,
                 "failure": str(error),
@@ -594,6 +614,7 @@ def run_reviewers(
         "providers_requested": requested,
         "providers_completed": completed,
         "failed_providers": failed,
+        "heterogeneous_models": _heterogeneous_models(reviews),
         "total_timeout_seconds": float(total_timeout_seconds),
         "total_wait_seconds": float(elapsed),
         "reviews": reviews,
@@ -612,21 +633,27 @@ def _ordered_reviewer_configs(
     if len(configs) > 8:
         raise ReviewerError("reviewers must contain at most 8 providers")
     normalized = []
-    providers = set()
     priority = {provider: index for index, provider in enumerate(_PROVIDER_PRIORITY)}
     for index, raw in enumerate(configs):
         config = _object(raw, f"reviewers[{index}]")
-        _closed(config, {"provider", "argv", "timeout_seconds"}, f"reviewers[{index}]")
+        _closed(
+            config,
+            {"provider", "underlying_model", "argv", "timeout_seconds"},
+            f"reviewers[{index}]",
+        )
         _required(config, {"provider", "argv", "timeout_seconds"}, f"reviewers[{index}]")
         provider = _string(config["provider"], f"reviewers[{index}].provider", 64)
         if _PROVIDER.fullmatch(provider) is None:
             raise ReviewerError(f"reviewers[{index}].provider is invalid")
-        if provider in providers:
-            raise ReviewerError("reviewer providers must be unique")
-        providers.add(provider)
         canonical = _PROVIDER_ALIASES.get(provider.lower())
         if canonical is None:
             continue
+        underlying_model = config.get("underlying_model", "unknown")
+        underlying_model = _string(
+            underlying_model, f"reviewers[{index}].underlying_model", 64
+        )
+        if _PROVIDER.fullmatch(underlying_model) is None:
+            raise ReviewerError(f"reviewers[{index}].underlying_model is invalid")
         argv = config["argv"]
         if type(argv) is not list or not argv or any(
             type(item) is not str or not item for item in argv
@@ -646,6 +673,7 @@ def _ordered_reviewer_configs(
             {
                 "provider": provider,
                 "canonical_provider": canonical,
+                "underlying_model": underlying_model,
                 "argv": list(argv),
                 "timeout_seconds": float(timeout),
             }
@@ -654,15 +682,17 @@ def _ordered_reviewer_configs(
         key=lambda item: (priority[item["canonical_provider"]], item["provider"])
     )
     distinct = []
-    canonical_providers = set()
+    run_keys = set()
     for item in normalized:
-        if item["canonical_provider"] in canonical_providers:
+        run_key = (item["canonical_provider"], item["underlying_model"].lower())
+        if run_key in run_keys:
             continue
-        canonical_providers.add(item["canonical_provider"])
+        run_keys.add(run_key)
         distinct.append(item)
     return [
         {
             "provider": item["provider"],
+            "underlying_model": item["underlying_model"],
             "argv": item["argv"],
             "timeout_seconds": item["timeout_seconds"],
         }
@@ -677,6 +707,19 @@ def select_reviewer_configs(
     if trigger not in _TRIGGER_TARGETS:
         raise ReviewerError("review trigger is unsupported")
     return _ordered_reviewer_configs(configs)[: _TRIGGER_TARGETS[trigger]]
+
+
+def _heterogeneous_models(reviews: Sequence[Mapping[str, Any]]) -> list[str]:
+    models = []
+    for item in reviews:
+        model = item["underlying_model"]
+        if (
+            item["status"] == "completed"
+            and model.lower() not in {"auto", "unknown"}
+            and model not in models
+        ):
+            models.append(model)
+    return models
 
 
 def run_prioritized_reviewers(
@@ -743,6 +786,7 @@ def run_prioritized_reviewers(
         "providers_requested": requested,
         "providers_completed": completed,
         "failed_providers": failed,
+        "heterogeneous_models": _heterogeneous_models(reviews),
         "total_timeout_seconds": float(total_timeout_seconds),
         "total_wait_seconds": elapsed,
         "reviews": reviews,

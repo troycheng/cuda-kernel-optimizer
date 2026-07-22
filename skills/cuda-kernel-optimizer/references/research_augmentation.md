@@ -47,6 +47,23 @@ paired measurements, constraints, and evidence integrity remain authoritative.
 Record unavailable providers and continue locally. Never turn network failure
 into a blocked optimization when the required local foundation exists.
 
+## Reviewer metadata and provider priority
+
+When named reviewer CLIs are configured, use this priority: Google AI Mode,
+GitHub Copilot, GLM, Kimi, DeepSeek, then Gemini. GitHub Copilot is especially
+useful for repository and code-review questions; it remains an advisory input.
+
+Each review record keeps the provider surface separate from its optional
+`underlying_model`. Omitted models are recorded as `unknown`; `auto` is allowed
+when the surface does not disclose a concrete model. A run deduplicates the
+same request digest, canonical provider, and underlying model. Two provider
+surfaces that report the same concrete underlying model contribute one entry to
+the heterogeneous-model record, not two independent models.
+
+Retain each normalized response, completed and failed providers, and aggregate
+wait time. Reviewer outputs cannot change local verdicts, benefit bounds, or
+evidence requirements.
+
 ## Design basis
 
 - [Multiagent Debate](https://arxiv.org/abs/2305.14325) motivates independent
