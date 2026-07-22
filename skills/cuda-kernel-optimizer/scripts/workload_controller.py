@@ -4844,6 +4844,9 @@ def _finish_review_required(
     time_gate: Mapping[str, Any],
 ) -> dict:
     """Persist an authorization pause without classifying it as a rejection."""
+    review_reason = time_gate.get("stop_reason")
+    if not isinstance(review_reason, str) or not review_reason.strip():
+        raise ValidationError("review-required time gate stop reason is invalid")
     evidence = {}
     for name in (
         "candidate_binding.json",
@@ -4909,7 +4912,7 @@ def _finish_review_required(
     decision = {
         "schema_version": "cuda-workload-optimizer/decision-v1",
         "status": "review_required",
-        "reason": "authorization_insufficient_for_next_action",
+        "reason": review_reason,
         "primary_status": primary_status,
         "rolled_back": True,
         **preserved,
@@ -4926,7 +4929,7 @@ def _finish_review_required(
             "next_action": "review_required",
             "updated_at_epoch": time.time(),
             "decision_digest": _canonical_digest(decision),
-            "terminal_reason": "authorization_insufficient_for_next_action",
+            "terminal_reason": review_reason,
         }
     )
     _write_state(run_root, updated)

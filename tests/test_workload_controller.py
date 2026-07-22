@@ -3766,6 +3766,7 @@ class WorkloadRoundTests(unittest.TestCase):
             evaluator.evaluate_pairs.assert_not_called()
             profiler.assert_not_called()
             self.assertEqual(first["status"], "review_required")
+            self.assertEqual(first["reason"], "cost_unavailable_for_next_action")
             self.assertEqual(first["stop_reason"], "cost_unavailable_for_next_action")
             self.assertEqual(first["blocked_action"]["action_id"], "profiler")
             self.assertIsNone(first["blocked_action"]["p90_seconds"])
@@ -3783,6 +3784,9 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(repeated, first)
             state = self.controller.read_run_state(run_dir)
             self.assertEqual(state["next_action"], "review_required")
+            self.assertEqual(
+                state["terminal_reason"], "cost_unavailable_for_next_action"
+            )
             self.assertEqual(
                 state["decision_digest"], self.controller._canonical_digest(first)
             )
@@ -4036,6 +4040,10 @@ class WorkloadRoundTests(unittest.TestCase):
             resumed = self.controller.read_run_state(run_dir)
             self.assertEqual(resumed["status"], "active")
             self.assertEqual(resumed["next_action"], "review_required")
+            self.assertEqual(
+                resumed["terminal_reason"],
+                "authorization_insufficient_for_next_action",
+            )
             self.assertEqual(
                 resumed["decision_digest"], self.controller._canonical_digest(first)
             )
@@ -4767,6 +4775,7 @@ class WorkloadRoundTests(unittest.TestCase):
                 decision = self.controller.evaluate_change(run_dir)
 
             self.assertEqual(decision["status"], "manual_recovery_required")
+            self.assertEqual(decision["reason"], "rollback_failed")
             self.assertFalse(decision["rolled_back"])
             state = self.controller.read_run_state(run_dir)
             self.assertEqual(state["status"], "manual_recovery_required")
