@@ -106,6 +106,48 @@ class SkillMetadataTests(unittest.TestCase):
             self.assertIn("`%s`" % category, self.text)
         self.assertIn("do not apply a universal method ranking", self.text)
 
+    def test_diagnosis_starts_from_original_baseline_and_exposes_early_decision(self) -> None:
+        prose = " ".join(self.text.split())
+        for marker in (
+            "original user-provided business baseline",
+            "performance_model.json",
+            "investment_brief.json",
+            "benefit ceiling",
+            "uncertainty",
+            "next action",
+            "MEASURE",
+            "PURSUE",
+            "REVIEW_REQUIRED",
+            "STOP",
+        ):
+            self.assertIn(marker, prose)
+
+    def test_controller_runs_only_the_admitted_action_and_preserves_objective(self) -> None:
+        prose = " ".join(self.text.split())
+        for marker in (
+            "complete-service objective remains authoritative",
+            "at most three competing mechanism hypotheses",
+            "only the one action named by `decision.json`",
+            "Do not start a later or more expensive action",
+        ):
+            self.assertIn(marker, prose)
+
+    def test_external_direction_challenge_has_fixed_priority_and_local_fallback(self) -> None:
+        prose = " ".join(self.text.split())
+        for marker in (
+            "Google AI Mode",
+            "GLM",
+            "Kimi",
+            "DeepSeek",
+            "Gemini",
+            "local evidence remains authoritative",
+        ):
+            self.assertIn(marker, prose)
+        self.assertLess(prose.index("Google AI Mode"), prose.index("GLM"))
+        self.assertLess(prose.index("GLM"), prose.index("Kimi"))
+        self.assertLess(prose.index("Kimi"), prose.index("DeepSeek"))
+        self.assertLess(prose.index("DeepSeek"), prose.index("Gemini"))
+
     def test_knowledge_query_is_bounded_exact_arch_and_offline_capable(self) -> None:
         for marker in (
             "scripts/knowledge_query.py",

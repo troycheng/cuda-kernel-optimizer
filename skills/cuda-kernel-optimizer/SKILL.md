@@ -37,6 +37,14 @@ available, return static hypotheses and an environment plan, not an optimization
 result. Run readiness yourself; required failures stop baseline and profiling.
 Host repair stays `recommend_only`.
 
+Run the original user-provided business baseline before profiling or replacing
+its measurement path. The complete-service objective remains authoritative;
+operator and kernel measurements only explain it. After the first global scan,
+read `active_diagnosis/performance_model.json` and
+`active_diagnosis/investment_brief.json`. Report the supported benefit ceiling,
+uncertainty, next action, and whether further work is worth the expected cost.
+Do not invent a numeric duration without identity-matched timing history.
+
 Use `balanced` by default; respect `quick` or `thorough` when selected. Each
 budget has a soft target and a hard ceiling. The soft target guides effort. The
 hard ceiling is only a safety limit.
@@ -83,6 +91,12 @@ seals allowlisted evidence; `scripts/planner_boundary.py` admits candidates.
 The frozen `audit_every_candidates` value controls baseline audits. A changed
 workload, source, objective, or environment starts a new contract and ledger.
 
+Keep at most three competing mechanism hypotheses. The deterministic decision
+is one of `MEASURE`, `PURSUE`, `REVIEW_REQUIRED`, or `STOP`. Execute only the one
+action named by `decision.json`, then rebuild the performance model. Do not start
+a later or more expensive action after its prerequisite fails, when the benefit
+ceiling is below `minimum_effect`, or when the decision is `STOP`.
+
 Run help instead of loading command inventories:
 
 ```bash
@@ -105,11 +119,14 @@ External search and multi-model challenge are optional. Use them only for
 direction selection, a clear plateau, or final review; run independent checks in
 parallel with a 180-second total wait. Use primary sources, redact private material,
 preserve disagreement, and adjudicate locally. Network or provider failure falls
-back to the offline workflow. External models are never promotion
+back to the offline workflow. When configured, try providers in this order:
+Google AI Mode, GLM, Kimi, DeepSeek, then Gemini. Their answers are advisory;
+local evidence remains authoritative and external models are never promotion
 authorities.
 
 Preserve only useful durable output: readiness report and claim ceiling,
 manifest, checkpoint, candidate lineage, raw paired samples, constraints,
-`decision.json`, evidence integrity, and `summary.md`. Report the verified
+`performance_model.json`, `investment_brief.json`, `decision.json`,
+evidence integrity, and `summary.md`. Report the verified
 result, strongest supported claim, rejected candidates, missing evidence, host
 recommendations, and next highest-value action.
