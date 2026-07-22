@@ -3685,6 +3685,7 @@ class WorkloadRoundTests(unittest.TestCase):
             diagnosis = json.loads((run_dir / "diagnosis.json").read_text("utf-8"))
             diagnosis["primary_category"] = None
             diagnosis["confidence"] = "inconclusive"
+            diagnosis["suggested_probes"] = ["timeline"]
             (run_dir / "diagnosis.json").write_text(
                 json.dumps(diagnosis), encoding="utf-8"
             )
@@ -3725,6 +3726,7 @@ class WorkloadRoundTests(unittest.TestCase):
             diagnosis = json.loads((run_dir / "diagnosis.json").read_text("utf-8"))
             diagnosis["primary_category"] = "kernel"
             diagnosis["confidence"] = "low"
+            diagnosis["suggested_probes"] = ["timeline"]
             (run_dir / "diagnosis.json").write_text(
                 json.dumps(diagnosis), encoding="utf-8"
             )
@@ -3746,11 +3748,14 @@ class WorkloadRoundTests(unittest.TestCase):
 
             with mock.patch.object(
                 self.controller, "_load_evaluate_module", return_value=evaluator
-            ):
+            ), mock.patch.object(
+                self.controller, "run_probe", wraps=self.controller.run_probe
+            ) as profiler:
                 decision = self.controller.evaluate_change(run_dir)
 
             self.assertEqual(decision["status"], "promoted")
             self.assertEqual(evaluator.evaluate_pairs.call_count, 2)
+            self.assertEqual(profiler.call_count, 1)
             artifact = json.loads(
                 (run_dir / "profiler_stage.json").read_text("utf-8")
             )
@@ -3764,6 +3769,56 @@ class WorkloadRoundTests(unittest.TestCase):
                 ).read_text("utf-8")
             )
             self.assertEqual(execution["events"][-1]["event"], "terminal")
+
+    def test_high_confidence_kernel_without_explicit_uncertainty_skips_profiler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            self.controller.start_run(control, run_dir)
+            diagnosis = json.loads((run_dir / "diagnosis.json").read_text("utf-8"))
+            diagnosis["primary_category"] = "kernel"
+            diagnosis["confidence"] = "high"
+            diagnosis["suggested_probes"] = []
+            (run_dir / "diagnosis.json").write_text(
+                json.dumps(diagnosis), encoding="utf-8"
+            )
+            self.controller.register_change(control, run_dir, self._change())
+            (project / "configs" / "value.json").write_text(
+                '{"workers": 8}\n', encoding="utf-8"
+            )
+            evaluator = mock.Mock()
+            evaluator.evaluate_pairs.return_value = {
+                "status": "evaluated",
+                "primary": {
+                    "status": "confirmed_win",
+                    "estimate_pct": 5.0,
+                    "ci_low_pct": 4.0,
+                    "ci_high_pct": 6.0,
+                },
+                "constraints": [],
+            }
+
+            with mock.patch.object(
+                self.controller, "_load_evaluate_module", return_value=evaluator
+            ), mock.patch.object(
+                self.controller,
+                "run_probe",
+                side_effect=AssertionError("implicit kernel profiler executed"),
+            ) as profiler:
+                decision = self.controller.evaluate_change(run_dir)
+
+            self.assertEqual(decision["status"], "promoted")
+            self.assertEqual(evaluator.evaluate_pairs.call_count, 2)
+            profiler.assert_not_called()
+
+    def test_profiler_uncertainty_reuses_explicit_diagnosis_and_brief_fields(self) -> None:
+        self.assertEqual(
+            self.controller._explicit_profiler_uncertainty(
+                {"suggested_probes": ["timeline", "ncu"]},
+                {"uncertainty": ["framework", "operator_trace"]},
+            ),
+            {"timeline", "framework"},
+        )
 
     def test_confirmed_workload_win_is_promoted_and_keeps_project_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3866,7 +3921,9 @@ class WorkloadRoundTests(unittest.TestCase):
             original = config.read_text("utf-8")
             config.write_text('{"workers": 8}\n', encoding="utf-8")
             state = self.controller.read_run_state(run_dir)
-            state["deadline_epoch"] = time.time() + 100.0
+            state["started_at_epoch"] = time.time() - 50.0
+            state["soft_target_epoch"] = state["started_at_epoch"] + 20.0
+            state["deadline_epoch"] = state["started_at_epoch"] + 100.0
             self.controller._write_state(run_dir, state)
             evaluator = mock.Mock()
             evaluator.evaluate_pairs.return_value = {
@@ -3897,7 +3954,12 @@ class WorkloadRoundTests(unittest.TestCase):
                 first["reason"], "authorization_insufficient_for_next_action"
             )
             self.assertEqual(first["blocked_action"]["action_id"], "formal_paired")
-            self.assertGreater(first["projected_spend"]["p90_seconds"], 100.0)
+            self.assertGreaterEqual(first["elapsed_seconds"], 50.0)
+            self.assertAlmostEqual(
+                first["projected_spend"]["p90_seconds"],
+                first["elapsed_seconds"] + 120.0,
+                places=6,
+            )
             self.assertNotEqual(first.get("reason"), "budget_expired")
             self.assertEqual(config.read_text("utf-8"), original)
             self.assertTrue((run_dir / "candidate.diff").is_file())
@@ -3908,6 +3970,102 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(
                 resumed["decision_digest"], self.controller._canonical_digest(first)
             )
+
+    def test_static_stage_is_inside_cumulative_authorization_and_runs_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            self.controller.start_run(control, run_dir)
+            self.controller.register_change(control, run_dir, self._change())
+            (project / "configs" / "value.json").write_text(
+                '{"workers": 8}\n', encoding="utf-8"
+            )
+            state = self.controller.read_run_state(run_dir)
+            started = state.get(
+                "optimization_started_at_epoch", state["started_at_epoch"]
+            )
+            state["deadline_epoch"] = started + 0.5
+            state["soft_target_epoch"] = started + 0.25
+            self.controller._write_state(run_dir, state)
+
+            with mock.patch.object(
+                self.controller,
+                "_static_review_changed_files",
+                side_effect=AssertionError("unauthorized static stage executed"),
+            ) as static_review:
+                decision = self.controller.evaluate_change(run_dir)
+
+            static_review.assert_not_called()
+            self.assertEqual(decision["status"], "review_required")
+            self.assertEqual(decision["blocked_action"]["action_id"], "static_review")
+            self.assertNotEqual(decision["reason"], "budget_expired")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            self.controller.start_run(control, run_dir)
+            self.controller.register_change(control, run_dir, self._change())
+            (project / "configs" / "value.json").write_text(
+                '{"workers": 8}\n', encoding="utf-8"
+            )
+
+            with mock.patch.object(
+                self.controller,
+                "_static_review_changed_files",
+                wraps=self.controller._static_review_changed_files,
+            ) as static_review:
+                decision = self.controller.evaluate_change(run_dir)
+
+            self.assertEqual(decision["status"], "promoted")
+            self.assertEqual(static_review.call_count, 1)
+
+    def test_review_required_replay_revalidates_all_bound_artifacts_and_snapshot(self) -> None:
+        for target in ("candidate_diff", "time_gate", "evidence", "workspace"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                control, run_dir, project = self._workspace(root)
+                self.controller.start_run(control, run_dir)
+                self.controller.register_change(control, run_dir, self._change())
+                config = project / "configs" / "value.json"
+                config.write_text('{"workers": 8}\n', encoding="utf-8")
+                state = self.controller.read_run_state(run_dir)
+                state["deadline_epoch"] = time.time() + 100.0
+                self.controller._write_state(run_dir, state)
+                evaluator = mock.Mock()
+                evaluator.evaluate_pairs.return_value = {
+                    "status": "evaluated",
+                    "primary": {
+                        "status": "inconclusive",
+                        "estimate_pct": 1.0,
+                        "ci_low_pct": 0.5,
+                        "ci_high_pct": 1.5,
+                    },
+                    "constraints": [],
+                }
+                with mock.patch.object(
+                    self.controller, "_load_evaluate_module", return_value=evaluator
+                ):
+                    decision = self.controller.evaluate_change(run_dir)
+                self.assertEqual(decision["status"], "review_required")
+
+                if target == "candidate_diff":
+                    with (run_dir / "candidate.diff").open("a", encoding="utf-8") as stream:
+                        stream.write("tampered\n")
+                elif target == "time_gate":
+                    path = run_dir / "time_gate.json"
+                    payload = json.loads(path.read_text("utf-8"))
+                    payload["elapsed_seconds"] += 1.0
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                elif target == "evidence":
+                    path = run_dir / "short_paired_evaluation.json"
+                    payload = json.loads(path.read_text("utf-8"))
+                    payload["tampered"] = True
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                else:
+                    config.write_text('{"workers": 77}\n', encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, "review-required"):
+                    self.controller.evaluate_change(run_dir)
 
     def test_external_final_review_timeout_cannot_overturn_confirmed_local_win(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3921,6 +4079,8 @@ class WorkloadRoundTests(unittest.TestCase):
             config = project / "configs" / "value.json"
             config.write_text('{"workers": 8}\n', encoding="utf-8")
             state = self.controller.read_run_state(run_dir)
+            state["started_at_epoch"] = 900.0
+            state["soft_target_epoch"] = 930.0
             state["deadline_epoch"] = 1000.0
             self.controller._write_state(run_dir, state)
             evaluator = mock.Mock()
@@ -4469,7 +4629,7 @@ class WorkloadRoundTests(unittest.TestCase):
             ):
                 self.controller.resume_run(run_dir)
 
-    def test_expired_budget_after_edit_rejects_and_restores_candidate(self) -> None:
+    def test_expired_authorization_before_gate_blocks_static_for_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             control, run_dir, project = self._workspace(root)
@@ -4484,8 +4644,11 @@ class WorkloadRoundTests(unittest.TestCase):
 
             decision = self.controller.evaluate_change(run_dir)
 
-            self.assertEqual(decision["status"], "rejected")
-            self.assertEqual(decision["reason"], "budget_expired")
+            self.assertEqual(decision["status"], "review_required")
+            self.assertEqual(
+                decision["reason"], "authorization_insufficient_for_next_action"
+            )
+            self.assertEqual(decision["blocked_action"]["action_id"], "static_review")
             self.assertEqual(config.read_text("utf-8"), original)
 
     def test_deadline_expiring_during_evaluation_requires_authorization_review(self) -> None:

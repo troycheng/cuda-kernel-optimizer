@@ -621,11 +621,19 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
             result["short_statistics"] = statistics
             if evidence is not None:
                 result["short_paired_samples"] = evidence
+            lower_bound_us = _improvement_us(
+                statistics.get("ci_low_pct"), baseline_median_ms
+            )
             upper_bound_us = _improvement_us(
                 statistics.get("ci_high_pct"), baseline_median_ms
             )
             return {
-                "status": "passed" if upper_bound_us is not None else "failed",
+                "status": (
+                    "passed"
+                    if lower_bound_us is not None and upper_bound_us is not None
+                    else "failed"
+                ),
+                "lower_bound": lower_bound_us,
                 "upper_bound": upper_bound_us,
             }
 

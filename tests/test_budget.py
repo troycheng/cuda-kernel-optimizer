@@ -266,6 +266,39 @@ class BudgetClockTests(unittest.TestCase):
 
 
 class CandidateGateTests(unittest.TestCase):
+    def test_action_exception_terminal_is_cached_after_failure_details_are_added(self) -> None:
+        gate = budget.CandidateGate(
+            {
+                "soft_target_seconds": 30,
+                "hard_ceiling_seconds": 300,
+                "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
+            },
+            {
+                "claim_layer": "kernel",
+                "cheapest_falsifier": "static_review",
+                "estimated_cost": {
+                    "static_review": 1,
+                    "build_correctness": 2,
+                    "short_paired": 3,
+                    "profiler": 4,
+                    "formal_paired": 5,
+                    "service": 6,
+                },
+                "minimum_effect": {"metric": "mechanism_us", "value": 1.0},
+                "rejection_condition": "any gate fails",
+                "promotion_condition": "formal lower bound passes",
+            },
+        )
+        action = mock.Mock(side_effect=RuntimeError("private"))
+
+        first = gate.run({"static_review": action})
+        second = gate.run({"static_review": action})
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["failed_stage"], "static_review")
+        self.assertEqual(first["failure_type"], "RuntimeError")
+        self.assertEqual(action.call_count, 1)
+
     def test_authorization_exhaustion_is_review_required_not_performance_stop(self) -> None:
         now = mock.Mock(side_effect=[100.0, 100.0, 100.0])
         gate = budget.CandidateGate(

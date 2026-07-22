@@ -301,6 +301,42 @@ class BranchExploreTests(unittest.TestCase):
             )
             self.assertEqual(output["status"], "no_confirmed_kernel_win")
 
+    def test_short_screen_reports_both_bounds_from_paired_statistics(self) -> None:
+        branch_explore = _load_branch_explore()
+        captured = {}
+
+        class InspectingGate:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def run(self, actions):
+                actions["static_review"]()
+                actions["build_correctness"]()
+                captured.update(actions["short_paired"]())
+                return {"decision": "STOP"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path, _payload = self._state(root, branches=1)
+            paired = {
+                "statistics": _statistics("inconclusive", 3.0),
+                "baseline_median_ms": 2.0,
+            }
+            with mock.patch.object(
+                branch_explore, "_bench_kernel", return_value=_bench()
+            ), mock.patch.object(
+                branch_explore, "_paired_candidate", return_value=paired
+            ), mock.patch.object(
+                branch_explore, "CandidateGate", InspectingGate
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    branch_explore.run(str(state_path), iteration=1)
+
+        self.assertEqual(
+            captured,
+            {"status": "passed", "lower_bound": 55.0, "upper_bound": 65.0},
+        )
+
     def test_candidate_gate_orders_short_profile_decision_before_formal_pairing(self) -> None:
         branch_explore = _load_branch_explore()
         with tempfile.TemporaryDirectory() as tmp:

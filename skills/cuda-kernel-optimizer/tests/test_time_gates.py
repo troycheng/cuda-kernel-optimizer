@@ -68,12 +68,44 @@ class TimeGateTests(unittest.TestCase):
             "promotion_condition": "all_required_gates_passed",
         }
 
-    def _gate(self):
+    def _gate(self, *, pre_gate_elapsed_seconds: float = 0.0):
         return self.budget.CandidateGate(
             self.contract,
             self.candidate,
             now=self.clock.now,
+            pre_gate_elapsed_seconds=pre_gate_elapsed_seconds,
         )
+
+    def test_static_is_blocked_before_action_when_cumulative_p90_is_not_authorized(self) -> None:
+        calls = []
+
+        result = self._gate(pre_gate_elapsed_seconds=299.5).run(
+            {
+                "static_review": self.clock.action(
+                    calls, "static_review", {"status": "passed"}
+                )
+            }
+        )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
+        self.assertEqual(result["blocked_action"]["action_id"], "static_review")
+        self.assertEqual(result["elapsed_seconds"], 299.5)
+        self.assertEqual(result["projected_spend"]["p90_seconds"], 300.5)
+
+    def test_authorized_static_runs_once_and_is_charged_once(self) -> None:
+        calls = []
+
+        result = self._gate(pre_gate_elapsed_seconds=10.0).run(
+            {
+                "static_review": self.clock.action(
+                    calls, "static_review", {"status": "failed"}
+                )
+            }
+        )
+
+        self.assertEqual(calls, ["static_review"])
+        self.assertEqual(result["elapsed_seconds"], 11.0)
 
     def test_static_falsification_does_not_start_gpu_benchmark(self) -> None:
         calls = []
@@ -85,7 +117,7 @@ class TimeGateTests(unittest.TestCase):
                 calls, "build_correctness", {"status": "passed"}
             ),
             "short_paired": self.clock.action(
-                calls, "short_paired", {"status": "passed", "upper_bound": 2.0}
+                calls, "short_paired", {"status": "passed", "lower_bound": 0.5, "upper_bound": 2.0}
             ),
         }
 
@@ -100,7 +132,7 @@ class TimeGateTests(unittest.TestCase):
         actions = {
             "static_review": self.clock.action(calls, "static_review", {"status": "passed"}),
             "build_correctness": self.clock.action(calls, "build_correctness", {"status": "failed"}),
-            "short_paired": self.clock.action(calls, "short_paired", {"status": "passed", "upper_bound": 2.0}),
+            "short_paired": self.clock.action(calls, "short_paired", {"status": "passed", "lower_bound": 0.5, "upper_bound": 2.0}),
             "profiler": self.clock.action(calls, "profiler", {"status": "passed"}),
         }
 
@@ -123,7 +155,7 @@ class TimeGateTests(unittest.TestCase):
                 "short_paired": self.clock.action(
                     calls,
                     "short_paired",
-                    {"status": "passed", "upper_bound": 2.0},
+                    {"status": "passed", "lower_bound": 0.5, "upper_bound": 2.0},
                 ),
                 "formal_paired": self.clock.action(
                     calls,
@@ -208,6 +240,114 @@ class TimeGateTests(unittest.TestCase):
         self.assertEqual(result["elapsed_seconds"], 3.0)
         self.assertIn("formal_paired", result["skipped_expensive_stages"])
 
+    def test_pre_gate_actual_is_included_once_in_elapsed_projected_and_soft_target(self) -> None:
+        calls = []
+        self.contract["soft_target_seconds"] = 50.0
+        self.contract["hard_ceiling_seconds"] = 122.0
+        result = self._gate(pre_gate_elapsed_seconds=100.0).run(
+            {
+                "static_review": self.clock.action(
+                    calls, "static_review", {"status": "passed"}
+                ),
+                "build_correctness": self.clock.action(
+                    calls, "build_correctness", {"status": "passed"}
+                ),
+                "short_paired": self.clock.action(
+                    calls,
+                    "short_paired",
+                    {"status": "passed", "lower_bound": 0.5, "upper_bound": 1.5},
+                ),
+                "formal_paired": self.clock.action(
+                    calls,
+                    "formal_paired",
+                    {"status": "passed", "lower_bound": 1.1},
+                ),
+            }
+        )
+
+        self.assertEqual(
+            calls, ["static_review", "build_correctness", "short_paired"]
+        )
+        self.assertEqual(result["elapsed_seconds"], 103.0)
+        self.assertEqual(result["projected_spend"]["p90_seconds"], 123.0)
+        self.assertTrue(result["soft_target_exceeded"])
+
+    def test_short_pair_missing_lower_bound_never_starts_formal(self) -> None:
+        calls = []
+        result = self._gate().run(
+            {
+                "static_review": self.clock.action(
+                    calls, "static_review", {"status": "passed"}
+                ),
+                "build_correctness": self.clock.action(
+                    calls, "build_correctness", {"status": "passed"}
+                ),
+                "short_paired": self.clock.action(
+                    calls, "short_paired", {"status": "passed", "upper_bound": 1.5}
+                ),
+                "formal_paired": self.clock.action(
+                    calls,
+                    "formal_paired",
+                    {"status": "passed", "lower_bound": 1.1},
+                ),
+            }
+        )
+
+        self.assertEqual(calls.count("formal_paired"), 0)
+        self.assertEqual(result["stop_reason"], "short_pair_missing_lower_bound")
+
+    def test_short_pair_invalid_interval_never_starts_formal(self) -> None:
+        calls = []
+        result = self._gate().run(
+            {
+                "static_review": self.clock.action(
+                    calls, "static_review", {"status": "passed"}
+                ),
+                "build_correctness": self.clock.action(
+                    calls, "build_correctness", {"status": "passed"}
+                ),
+                "short_paired": self.clock.action(
+                    calls,
+                    "short_paired",
+                    {"status": "passed", "lower_bound": 2.0, "upper_bound": 1.5},
+                ),
+                "formal_paired": self.clock.action(
+                    calls,
+                    "formal_paired",
+                    {"status": "passed", "lower_bound": 1.1},
+                ),
+            }
+        )
+
+        self.assertEqual(calls.count("formal_paired"), 0)
+        self.assertEqual(result["stop_reason"], "short_pair_invalid_interval")
+
+    def test_short_pair_qualifying_lower_bound_starts_one_formal_confirmation(self) -> None:
+        calls = []
+        result = self._gate().run(
+            {
+                "static_review": self.clock.action(
+                    calls, "static_review", {"status": "passed"}
+                ),
+                "build_correctness": self.clock.action(
+                    calls, "build_correctness", {"status": "passed"}
+                ),
+                "short_paired": self.clock.action(
+                    calls,
+                    "short_paired",
+                    {"status": "passed", "lower_bound": 1.0, "upper_bound": 1.5},
+                ),
+                "formal_paired": self.clock.action(
+                    calls,
+                    "formal_paired",
+                    {"status": "passed", "lower_bound": 1.1},
+                ),
+            }
+        )
+
+        self.assertEqual(calls.count("formal_paired"), 1)
+        self.assertEqual(result["decision"], "PROMOTE")
+
     def test_repeated_run_returns_same_terminal_result_without_restarting_actions(self) -> None:
         calls = []
         gate = self._gate()
@@ -231,7 +371,7 @@ class TimeGateTests(unittest.TestCase):
             "short_paired": self.clock.action(
                 calls,
                 "short_paired",
-                {"status": "passed", "estimate": 0.4, "upper_bound": 0.8},
+                {"status": "passed", "estimate": 0.4, "lower_bound": 0.2, "upper_bound": 0.8},
             ),
             "profiler": self.clock.action(calls, "profiler", {"status": "passed"}),
             "formal_paired": self.clock.action(calls, "formal_paired", {"status": "passed"}),
@@ -314,7 +454,7 @@ class TimeGateTests(unittest.TestCase):
                     "short_paired": self.clock.action(
                         calls,
                         "short_paired",
-                        {"status": "passed", "upper_bound": 2.0},
+                        {"status": "passed", "lower_bound": 0.5, "upper_bound": 2.0},
                     ),
                     "formal_paired": self.clock.action(
                         calls,
@@ -344,7 +484,7 @@ class TimeGateTests(unittest.TestCase):
                     "short_paired": self.clock.action(
                         calls,
                         "short_paired",
-                        {"status": "passed", "upper_bound": 2.0},
+                        {"status": "passed", "lower_bound": 0.5, "upper_bound": 2.0},
                     ),
                     "formal_paired": self.clock.action(
                         calls,
@@ -388,7 +528,7 @@ class TimeGateTests(unittest.TestCase):
                 "static_review": self.clock.action(calls, "static_review", {"status": "passed"}),
                 "build_correctness": self.clock.action(calls, "build_correctness", {"status": "passed"}),
                 "short_paired": self.clock.action(
-                    calls, "short_paired", {"status": "passed", "upper_bound": 0.2}
+                    calls, "short_paired", {"status": "passed", "lower_bound": 0.1, "upper_bound": 0.2}
                 ),
             }
         )
@@ -415,7 +555,7 @@ class TimeGateTests(unittest.TestCase):
                     "short_paired": self.clock.action(
                         calls,
                         "short_paired",
-                        {"status": "passed", "upper_bound": 2.0},
+                        {"status": "passed", "lower_bound": 0.5, "upper_bound": 2.0},
                     ),
                     "profiler": self.clock.action(
                         calls, "profiler", {"status": "passed"}
@@ -426,9 +566,10 @@ class TimeGateTests(unittest.TestCase):
                         {"status": "passed", "lower_bound": 2.0},
                     ),
                 }
-                actions[stage] = self.clock.action(
-                    calls, stage, {"status": "passed", field: value}
-                )
+                outcome = {"status": "passed", field: value}
+                if stage == "short_paired":
+                    outcome["lower_bound"] = 0.5
+                actions[stage] = self.clock.action(calls, stage, outcome)
 
                 result = self._gate().run(actions)
 
@@ -454,7 +595,7 @@ class TimeGateTests(unittest.TestCase):
                     "short_paired": self.clock.action(
                         calls,
                         "short_paired",
-                        {"status": "passed", "upper_bound": 2.0},
+                        {"status": "passed", "lower_bound": 0.5, "upper_bound": 2.0},
                     ),
                     "profiler": self.clock.action(
                         calls, "profiler", {"status": "not_applicable"}
@@ -483,7 +624,7 @@ class TimeGateTests(unittest.TestCase):
             "short_paired": self.clock.action(
                 calls,
                 "short_paired",
-                {"status": "passed", "estimate": 1.1, "upper_bound": 2.5},
+                {"status": "passed", "estimate": 1.1, "lower_bound": 0.5, "upper_bound": 2.5},
             ),
             "profiler": self.clock.action(calls, "profiler", {"status": "passed"}),
             "formal_paired": self.clock.action(

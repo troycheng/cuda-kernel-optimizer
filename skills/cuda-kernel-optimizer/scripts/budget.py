@@ -300,12 +300,21 @@ class CandidateGate:
         candidate: Mapping,
         *,
         now: Callable[[], float] = time.monotonic,
+        pre_gate_elapsed_seconds: float = 0.0,
     ) -> None:
         self.contract = _validate_gate_contract(contract)
         self.candidate = _validate_candidate(candidate, self.contract)
         if not callable(now):
             raise ValueError("now must be callable")
         self.now = now
+        elapsed = _validate_time(
+            pre_gate_elapsed_seconds, "pre_gate_elapsed_seconds"
+        )
+        if elapsed < 0.0:
+            raise ValueError(
+                "pre_gate_elapsed_seconds must be a non-negative finite number"
+            )
+        self.pre_gate_elapsed_seconds = elapsed
         self._terminal_result: dict | None = None
 
     def _result(
@@ -319,9 +328,11 @@ class CandidateGate:
         blocked_action: Mapping | None = None,
         projected_p90_seconds: float | None = None,
         observed_elapsed_seconds: float | None = None,
+        details: Mapping | None = None,
     ) -> dict:
         elapsed = (
-            max(0.0, float(self.now()) - started_at)
+            self.pre_gate_elapsed_seconds
+            + max(0.0, float(self.now()) - started_at)
             if observed_elapsed_seconds is None
             else observed_elapsed_seconds
         )
@@ -348,6 +359,8 @@ class CandidateGate:
                 )
             },
         }
+        if details is not None:
+            result.update(dict(details))
         self._terminal_result = copy.deepcopy(result)
         return result
 
@@ -372,7 +385,9 @@ class CandidateGate:
                     stop_reason=f"missing_{stage}_action",
                     completed=completed,
                 )
-            elapsed = max(0.0, float(self.now()) - started)
+            elapsed = self.pre_gate_elapsed_seconds + max(
+                0.0, float(self.now()) - started
+            )
             p90 = self.candidate["estimated_cost"][stage]
             projected = elapsed + p90
             if projected > self.contract["hard_ceiling_seconds"]:
@@ -395,19 +410,16 @@ class CandidateGate:
                 if not isinstance(outcome, Mapping):
                     raise ValueError(f"{stage} result must be a mapping")
             except Exception as error:
-                result = self._result(
+                return self._result(
                     started_at=started,
                     decision="STOP",
                     stop_reason=f"{stage}_action_failed",
                     completed=completed,
-                )
-                result.update(
-                    {
+                    details={
                         "failed_stage": stage,
                         "failure_type": type(error).__name__,
-                    }
+                    },
                 )
-                return result
             completed.append(stage)
             status = outcome.get("status")
             allowed_statuses = (
@@ -431,7 +443,15 @@ class CandidateGate:
                     completed=completed,
                 )
             if stage == "short_paired":
+                lower = outcome.get("lower_bound")
                 upper = outcome.get("upper_bound")
+                if isinstance(lower, bool) or not isinstance(lower, (int, float)):
+                    return self._result(
+                        started_at=started,
+                        decision="STOP",
+                        stop_reason="short_pair_missing_lower_bound",
+                        completed=completed,
+                    )
                 if isinstance(upper, bool) or not isinstance(upper, (int, float)):
                     return self._result(
                         started_at=started,
@@ -439,11 +459,25 @@ class CandidateGate:
                         stop_reason="short_pair_missing_upper_bound",
                         completed=completed,
                     )
+                if not math.isfinite(float(lower)):
+                    return self._result(
+                        started_at=started,
+                        decision="STOP",
+                        stop_reason="short_pair_invalid_lower_bound",
+                        completed=completed,
+                    )
                 if not math.isfinite(float(upper)):
                     return self._result(
                         started_at=started,
                         decision="STOP",
                         stop_reason="short_pair_invalid_upper_bound",
+                        completed=completed,
+                    )
+                if float(lower) > float(upper):
+                    return self._result(
+                        started_at=started,
+                        decision="STOP",
+                        stop_reason="short_pair_invalid_interval",
                         completed=completed,
                     )
                 if float(upper) < threshold:

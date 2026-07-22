@@ -4933,6 +4933,58 @@ def _finish_review_required(
     return decision
 
 
+def _replay_review_required(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+) -> dict:
+    """Return a paused decision only while every bound artifact remains intact."""
+    decision = load_json_object(run_root / "decision.json")
+    if (
+        decision.get("status") != "review_required"
+        or _canonical_digest(decision) != state.get("decision_digest")
+    ):
+        raise ValidationError("review-required decision does not match state")
+    candidate_diff = run_root / "candidate.diff"
+    if (
+        candidate_diff.is_symlink()
+        or not candidate_diff.is_file()
+        or _sha256_path(candidate_diff) != decision.get("candidate_diff_sha256")
+    ):
+        raise ValidationError("review-required candidate diff digest drifted")
+    time_gate_path = run_root / "time_gate.json"
+    if time_gate_path.is_symlink() or not time_gate_path.is_file():
+        raise ValidationError("review-required time gate artifact is missing")
+    time_gate = load_json_object(time_gate_path)
+    if _canonical_digest(time_gate) != decision.get("time_gate_sha256"):
+        raise ValidationError("review-required time gate digest drifted")
+    evidence = decision.get("evidence")
+    allowed_evidence = {
+        "candidate_binding.json",
+        "static_review.json",
+        "correctness.json",
+        "short_paired_evaluation.json",
+        "profiler_stage.json",
+        "formal_paired_evaluation.json",
+    }
+    if not isinstance(evidence, Mapping) or not set(evidence) <= allowed_evidence:
+        raise ValidationError("review-required evidence binding is invalid")
+    for name, expected_digest in evidence.items():
+        path = run_root / name
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or _sha256_path(path) != expected_digest
+        ):
+            raise ValidationError(f"review-required evidence digest drifted: {name}")
+    scope = state.get("change_scope")
+    if scope not in {"project", "isolated_environment"}:
+        raise ValidationError("review-required rollback scope is invalid")
+    if _identity(control, scope)["digest"] != state.get("before_identity_digest"):
+        raise ValidationError("review-required rollback snapshot identity drifted")
+    return decision
+
+
 def _validated_identity_artifact(value: Mapping[str, Any], expected_digest: str) -> dict:
     identity = _object(value, "identity artifact")
     fields = {"schema_version", "scope", "roots", "missing_roots", "files", "digest"}
@@ -4949,6 +5001,25 @@ def _validated_identity_artifact(value: Mapping[str, Any], expected_digest: str)
     if identity["digest"] != computed or computed != expected_digest:
         raise ValidationError("frozen identity artifact digest does not match state")
     return copy.deepcopy(identity)
+
+
+def _explicit_profiler_uncertainty(
+    diagnosis: Mapping[str, Any], investment_brief: Mapping[str, Any] | None = None
+) -> set[str]:
+    """Return only live uncertainties with a directly matching profiler kind."""
+    supported = {"timeline", "framework", "custom"}
+    uncertainty = {
+        item
+        for item in diagnosis.get("suggested_probes", [])
+        if item in supported
+    }
+    if investment_brief is not None:
+        uncertainty.update(
+            item
+            for item in investment_brief.get("uncertainty", [])
+            if item in supported
+        )
+    return uncertainty
 
 
 def evaluate_change(run_dir: os.PathLike[str] | str) -> dict:
@@ -4968,13 +5039,8 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             raise ValidationError("decision artifact digest does not match state")
         return decision
     if state.get("stage") == "decision" and state["next_action"] == "review_required":
-        decision = load_json_object(run_root / "decision.json")
-        if (
-            decision.get("status") != "review_required"
-            or _canonical_digest(decision) != state.get("decision_digest")
-        ):
-            raise ValidationError("review-required decision does not match state")
-        return decision
+        control = _load_frozen_control(run_root, state)
+        return _replay_review_required(run_root, state, control)
     if state["next_action"] != "edit_then_evaluate":
         raise ValidationError("run is not ready to evaluate a ChangeSet")
     control = _load_frozen_control(run_root, state)
@@ -4997,32 +5063,6 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             control,
             scope=state["change_scope"],
             reason="frozen_artifact_drift",
-            primary_status=None,
-        )
-    if time.time() > state["deadline_epoch"]:
-        _atomic_json(
-            run_root / "review.json",
-            {
-                "schema_version": "cuda-workload-optimizer/review-artifact-v1",
-                "status": "skipped",
-                "request_digest": None,
-                "response": None,
-                "execution": {"reason": "budget_expired"},
-            },
-        )
-        _atomic_json(
-            run_root / "evaluation.json",
-            {
-                "schema_version": "cuda-workload-optimizer/evaluation-v1",
-                "status": "budget_expired",
-            },
-        )
-        return _finish_rejected(
-            run_root,
-            state,
-            control,
-            scope=change["scope"],
-            reason="budget_expired",
             primary_status=None,
         )
     workload = _normalize_frozen_workload(control)
@@ -5105,19 +5145,22 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
     (run_root / "candidate.diff").write_text(
         _candidate_diff(control, run_root, changed, change["scope"]), encoding="utf-8"
     )
-    static_review = _static_review_changed_files(
-        control,
-        scope=change["scope"],
-        changed=changed,
-        candidate_binding=candidate_binding,
-        change_set_digest=change_digest,
-        after_identity_digest=after["digest"],
-    )
-    _atomic_json(run_root / "static_review.json", static_review)
 
     runtime = _BUDGET_RUNTIME[control["budget"]]
     evaluations: dict[str, dict] = {}
     workload_attempt = 0
+
+    def static_review_stage() -> dict:
+        artifact = _static_review_changed_files(
+            control,
+            scope=change["scope"],
+            changed=changed,
+            candidate_binding=candidate_binding,
+            change_set_digest=change_digest,
+            after_identity_digest=after["digest"],
+        )
+        _atomic_json(run_root / "static_review.json", artifact)
+        return artifact
 
     def run_workload_once(
         evaluation_workload: Any,
@@ -5189,49 +5232,47 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             "upper_bound": primary.get("ci_high_pct"),
         }
 
-    def profiler_stage() -> dict:
-        diagnosis = load_json_object(run_root / "diagnosis.json")
-        primary = diagnosis.get("primary_category")
-        confidence = diagnosis.get("confidence")
-        required = primary in {None, "kernel", "mixed"} or confidence in {
-            "low",
-            "inconclusive",
-        }
-        if not required:
-            artifact = {
-                "status": "not_applicable",
-                "reason": "diagnosis_is_specific_without_live_profiler_uncertainty",
-                "primary_category": primary,
-                "confidence": confidence,
-            }
-            _atomic_json(run_root / "profiler_stage.json", artifact)
-            return artifact
-        eligible = [
+    diagnosis = load_json_object(run_root / "diagnosis.json")
+    investment_brief = None
+    if "analysis_contract" in control:
+        diagnostic_decision = _load_bound_diagnostic_artifacts(
+            run_root, state, expected_decision="PURSUE"
+        )
+        investment_brief = diagnostic_decision["investment_brief"]
+    explicit_uncertainty = _explicit_profiler_uncertainty(
+        diagnosis, investment_brief
+    )
+    selected_profiler = next(
+        (
             probe
-            for probe in control["probes"]
-            if probe["kind"] in {"timeline", "framework", "custom"}
-        ]
-        if not eligible:
+            for probe in sorted(
+                control["probes"],
+                key=lambda item: (float(item["timeout_seconds"]), item["id"]),
+            )
+            if probe["kind"] in explicit_uncertainty
+        ),
+        None,
+    )
+
+    def profiler_stage() -> dict:
+        if selected_profiler is None:
             artifact = {
                 "status": "failed",
                 "reason": "live_uncertainty_has_no_configured_profiler_action",
-                "primary_category": primary,
-                "confidence": confidence,
+                "unresolved_uncertainty": sorted(explicit_uncertainty),
             }
             _atomic_json(run_root / "profiler_stage.json", artifact)
             return artifact
-        selected = min(
-            eligible,
-            key=lambda probe: (float(probe["timeout_seconds"]), probe["id"]),
-        )
         profile_root = run_root / "candidate_profile"
         result = run_probe(
-            selected,
+            selected_profiler,
             control,
             profile_root,
             deadline_epoch=state["deadline_epoch"],
         )
-        result_path = profile_root / "probes" / f"{selected['id']}.json"
+        result_path = (
+            profile_root / "probes" / f"{selected_profiler['id']}.json"
+        )
         artifact = {
             "status": (
                 "passed"
@@ -5239,10 +5280,9 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
                 else "failed"
             ),
             "reason": "candidate_profiler_executed",
-            "primary_category": primary,
-            "confidence": confidence,
-            "probe_id": selected["id"],
-            "probe_kind": selected["kind"],
+            "unresolved_uncertainty": sorted(explicit_uncertainty),
+            "probe_id": selected_profiler["id"],
+            "probe_kind": selected_profiler["kind"],
             "evidence_path": str(result_path.relative_to(run_root)),
             "evidence_sha256": _sha256_path(result_path),
         }
@@ -5273,14 +5313,25 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         _atomic_json(run_root / "correctness.json", artifact)
         return artifact
 
-    remaining = max(0.001, state["deadline_epoch"] - time.time())
-    soft_remaining = max(
+    gate_now = time.time()
+    optimization_started = float(
+        state.get("optimization_started_at_epoch", state["started_at_epoch"])
+    )
+    pre_gate_elapsed = max(0.0, gate_now - optimization_started)
+    hard_authorization = max(
+        0.001, float(state["deadline_epoch"]) - optimization_started
+    )
+    soft_authorization = max(
         0.001,
-        min(remaining, state.get("soft_target_epoch", time.time()) - time.time()),
+        min(
+            hard_authorization,
+            float(state.get("soft_target_epoch", state["deadline_epoch"]))
+            - optimization_started,
+        ),
     )
     gate_contract = {
-        "soft_target_seconds": soft_remaining,
-        "hard_ceiling_seconds": remaining,
+        "soft_target_seconds": soft_authorization,
+        "hard_ceiling_seconds": hard_authorization,
         "minimum_effect": {
             "mechanism_us": 1.0,
             "service_pct": max(0.5, float(workload.objective["min_effect_pct"])),
@@ -5289,15 +5340,10 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
     gate = _load_budget_module().CandidateGate(
         gate_contract,
         bound_candidate,
+        pre_gate_elapsed_seconds=pre_gate_elapsed,
     )
-    diagnosis = load_json_object(run_root / "diagnosis.json")
-    live_profiler_uncertainty = diagnosis.get("primary_category") in {
-        None,
-        "kernel",
-        "mixed",
-    } or diagnosis.get("confidence") in {"low", "inconclusive"}
     candidate_actions = {
-        "static_review": lambda: static_review,
+        "static_review": static_review_stage,
         "build_correctness": minimum_correctness_stage,
         "short_paired": lambda: evaluate_pairs(
             "short_paired", min(2, runtime["blocks"])
@@ -5306,7 +5352,7 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             "formal_paired", runtime["blocks"]
         ),
     }
-    if live_profiler_uncertainty:
+    if explicit_uncertainty:
         candidate_actions["profiler"] = profiler_stage
     gate_result = gate.run(candidate_actions)
     evaluation = evaluations.get(
