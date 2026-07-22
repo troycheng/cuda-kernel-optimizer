@@ -179,6 +179,12 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
         self.selector_module = _load(
             "evidence_selector.py", "vertical_evidence_selector"
         )
+        self.model_module = _load(
+            "performance_model.py", "vertical_performance_model"
+        )
+        self.decision_module = _load(
+            "diagnostic_decision.py", "vertical_diagnostic_decision"
+        )
         self.epoch = epoch_fixture()
         self.evidence = evidence_catalog()
 
@@ -302,6 +308,207 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
         signature = first["selected_request"]["request_signature"]
         self.assertEqual(select([signature])["status"], "evidence_gap")
         self.assertEqual(select([])["status"], "selected")
+
+    def test_four_controlled_mechanisms_choose_layer_appropriate_next_action(self) -> None:
+        scenarios = []
+
+        launch = map_fixture(self.map_module)
+        launch["nodes"][0].update(
+            {"duration_us": 700.0, "first_start_us": 0.0, "last_end_us": 700.0}
+        )
+        launch["nodes"][1].update(
+            {"duration_us": 200.0, "first_start_us": 800.0, "last_end_us": 1000.0}
+        )
+        scenarios.append(
+            (
+                "launch_graph",
+                launch,
+                "cuda_graph_launch_batching",
+                "runtime",
+                ["cpu-launch"],
+                "framework-targeted",
+                "framework_trace",
+            )
+        )
+
+        memory = map_fixture(self.map_module)
+        memory["nodes"][0].update(
+            {"duration_us": 50.0, "first_start_us": 0.0, "last_end_us": 50.0}
+        )
+        memory["nodes"][1].update(
+            {"duration_us": 900.0, "first_start_us": 100.0, "last_end_us": 1000.0}
+        )
+        scenarios.append(
+            (
+                "memory_coalescing",
+                memory,
+                "memory_coalescing",
+                "kernel",
+                ["gpu-kernel"],
+                "ncu-targeted",
+                "ncu_kernel",
+            )
+        )
+
+        compute = copy.deepcopy(memory)
+        compute["map_id"] = "map-compute"
+        compute["nodes"][1]["label"] = "gemm-mainloop"
+        scenarios.append(
+            (
+                "compute_gemm",
+                compute,
+                "gemm_tile_occupancy",
+                "kernel",
+                ["gpu-kernel"],
+                "ncu-targeted",
+                "ncu_kernel",
+            )
+        )
+
+        transfer = map_fixture(self.map_module)
+        _coverage(transfer, "transfer")
+        transfer["nodes"].append(
+            _node("serialized-copy", "transfer", "copy-stream-0", 200.0, 800.0)
+        )
+        transfer["edges"].append(
+            {
+                "source": "gpu-kernel",
+                "target": "serialized-copy",
+                "relation": "precedes",
+                "overlap_us": None,
+                "evidence_ids": ["ev-edge"],
+            }
+        )
+        transfer["hot_path"] = ["cpu-launch", "serialized-copy", "gpu-kernel"]
+        scenarios.append(
+            (
+                "transfer_overlap",
+                transfer,
+                "async_transfer_overlap",
+                "runtime",
+                ["serialized-copy"],
+                "direction-experiment",
+                "direction_experiment",
+            )
+        )
+
+        for (
+            name,
+            execution_map,
+            mechanism,
+            claim_layer,
+            scope,
+            action_id,
+            evidence_kind,
+        ) in scenarios:
+            with self.subTest(name=name):
+                execution_map = self.map_module.validate_execution_map(
+                    execution_map,
+                    epoch=self.epoch,
+                    evidence_catalog=self.evidence,
+                )["execution_map"]
+                hypothesis = {
+                    "schema_version": "cuda-optimizer/hypothesis-set-v1",
+                    "set_id": f"hypotheses-{name}",
+                    "epoch_id": self.epoch["epoch_id"],
+                    "epoch_sha256": self.map_module.epoch_digest(self.epoch),
+                    "execution_map_sha256": self.map_module.execution_map_digest(
+                        execution_map,
+                        epoch=self.epoch,
+                        evidence_catalog=self.evidence,
+                    ),
+                    "hypotheses": [
+                        {
+                            "hypothesis_id": f"h-{name}",
+                            "kind": "mechanism",
+                            "scope_node_ids": scope,
+                            "statement": f"Controlled {name} mechanism dominates the path.",
+                            "mechanism": mechanism,
+                            "claim_layer": claim_layer,
+                            "disposition": "active",
+                            "confidence": "inconclusive",
+                            "support_evidence_ids": [],
+                            "oppose_evidence_ids": [],
+                            "missing_evidence_kinds": [evidence_kind],
+                            "falsification_question": f"Can {evidence_kind} falsify {mechanism}?",
+                        }
+                    ],
+                    "relationships": [],
+                }
+                hypothesis_result = self.hypothesis_module.validate_hypothesis_set(
+                    hypothesis,
+                    epoch=self.epoch,
+                    execution_map=execution_map,
+                    evidence_catalog=self.evidence,
+                )
+                action_catalog = catalog_fixture()
+                if action_id == "direction-experiment":
+                    action_catalog["actions"].append(
+                        {
+                            "action_id": action_id,
+                            "evidence_kind": evidence_kind,
+                            "required_capability_ids": ["workload.smoke"],
+                            "cost": "medium",
+                            "perturbation": "low",
+                            "risk": "low",
+                            "control_scope": "project_copy",
+                            "repeatable": True,
+                        }
+                    )
+                request = {
+                    "schema_version": "cuda-optimizer/evidence-request-set-v1",
+                    "request_set_id": f"requests-{name}",
+                    "epoch_id": self.epoch["epoch_id"],
+                    "epoch_sha256": self.map_module.epoch_digest(self.epoch),
+                    "hypothesis_set_sha256": hypothesis_result["hypothesis_set_sha256"],
+                    "requests": [
+                        {
+                            "request_id": f"request-{name}",
+                            "action_id": action_id,
+                            "question": f"Does {evidence_kind} falsify {mechanism}?",
+                            "target_hypothesis_ids": [f"h-{name}"],
+                            "exclusive_pairs": [],
+                            "outcomes": [
+                                {
+                                    "outcome_id": "mechanism-present",
+                                    "supports": [f"h-{name}"],
+                                    "opposes": [],
+                                },
+                                {
+                                    "outcome_id": "mechanism-absent",
+                                    "supports": [],
+                                    "opposes": [f"h-{name}"],
+                                },
+                            ],
+                        }
+                    ],
+                }
+                policy = policy_fixture()
+                policy["available_capability_ids"].append("workload.smoke")
+                selection = self.selector_module.select_evidence_request(
+                    request,
+                    epoch=self.epoch,
+                    execution_map=execution_map,
+                    hypothesis_result=hypothesis_result,
+                    evidence_catalog=self.evidence,
+                    action_catalog=action_catalog,
+                    policy=policy,
+                    request_history=[],
+                )
+                model = self.model_module.build_performance_model(
+                    execution_map, minimum_effect_us=1.0
+                )
+                decision = self.decision_module.decide_next_step(
+                    model, hypothesis_result, selection
+                )
+
+                self.assertEqual(decision["decision"], "MEASURE")
+                self.assertEqual(decision["primary_diagnosis"]["mechanism"], mechanism)
+                self.assertEqual(decision["primary_diagnosis"]["claim_layer"], claim_layer)
+                self.assertEqual(decision["next_action"]["action_id"], action_id)
+                self.assertTrue(decision["benefit_ceiling"]["qualifies"])
+                if claim_layer != "kernel":
+                    self.assertNotEqual(decision["next_action"]["action_id"], "ncu-targeted")
 
 
 if __name__ == "__main__":
