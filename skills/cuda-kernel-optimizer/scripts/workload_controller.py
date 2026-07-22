@@ -79,6 +79,8 @@ _ANALYSIS_EPOCH_MODULE = None
 _EXECUTION_MAP_MODULE = None
 _HYPOTHESIS_SPACE_MODULE = None
 _EVIDENCE_SELECTOR_MODULE = None
+_PERFORMANCE_MODEL_MODULE = None
+_DIAGNOSTIC_DECISION_MODULE = None
 _ACTIVE_DIAGNOSIS_CONTRACT_SCHEMA = "cuda-optimizer/active-diagnosis-contract-v1"
 _GLOBAL_SCAN_DRAFT_SCHEMA = "cuda-optimizer/global-scan-draft-v1"
 _BUDGET_RUNTIME = {
@@ -276,6 +278,7 @@ def _validate_active_diagnosis_contract(value: Mapping[str, Any]) -> dict:
         "global_scan_probe_id",
         "adapter_path",
         "analysis_policy_sha256",
+        "minimum_effect_us",
         "source",
         "actions",
         "selection_policy",
@@ -292,6 +295,13 @@ def _validate_active_diagnosis_contract(value: Mapping[str, Any]) -> dict:
         contract["analysis_policy_sha256"],
         "analysis_contract.analysis_policy_sha256",
     )
+    minimum_effect_us = contract["minimum_effect_us"]
+    if (
+        type(minimum_effect_us) not in {int, float}
+        or not math.isfinite(float(minimum_effect_us))
+        or float(minimum_effect_us) <= 0
+    ):
+        raise ValidationError("analysis_contract.minimum_effect_us must be positive and finite")
     source = _object(contract["source"], "analysis_contract.source")
     source_fields = {
         "profiler",
@@ -360,6 +370,7 @@ def _validate_active_diagnosis_contract(value: Mapping[str, Any]) -> dict:
     except ValueError as error:
         raise ValidationError(f"invalid analysis selection policy: {error}") from error
     normalized = copy.deepcopy(dict(contract))
+    normalized["minimum_effect_us"] = float(minimum_effect_us)
     normalized["actions"] = actions
     # Capability admission is Controller-owned and is rebuilt from the current
     # readiness report when the diagnosis context is created.
@@ -834,6 +845,24 @@ def _load_evidence_selector_module():
             "evidence_selector.py", "cuda_optimizer_evidence_selector_controller"
         )
     return _EVIDENCE_SELECTOR_MODULE
+
+
+def _load_performance_model_module():
+    global _PERFORMANCE_MODEL_MODULE
+    if _PERFORMANCE_MODEL_MODULE is None:
+        _PERFORMANCE_MODEL_MODULE = _load_sibling_module(
+            "performance_model.py", "cuda_optimizer_performance_model_controller"
+        )
+    return _PERFORMANCE_MODEL_MODULE
+
+
+def _load_diagnostic_decision_module():
+    global _DIAGNOSTIC_DECISION_MODULE
+    if _DIAGNOSTIC_DECISION_MODULE is None:
+        _DIAGNOSTIC_DECISION_MODULE = _load_sibling_module(
+            "diagnostic_decision.py", "cuda_optimizer_diagnostic_decision_controller"
+        )
+    return _DIAGNOSTIC_DECISION_MODULE
 
 
 def _load_diagnostic_knowledge_module():
@@ -2329,6 +2358,12 @@ def _build_active_diagnosis_context(
         active_root / "completed_action_ids.json",
         completed_action_ids,
     )
+    performance_model = _load_performance_model_module().build_performance_model(
+        execution_map,
+        minimum_effect_us=contract["minimum_effect_us"],
+        action_timings=[],
+    )
+    _atomic_json(active_root / "performance_model.json", performance_model)
     diagnosis = load_json_object(run_root / "diagnosis.json")
     knowledge_context = _load_diagnostic_knowledge_module().route_cards(
         diagnosis, execution_map, limit=3
@@ -2345,6 +2380,7 @@ def _build_active_diagnosis_context(
         "execution_map_sha256": map_module.execution_map_digest(
             execution_map, epoch=epoch, evidence_catalog=evidence_catalog
         ),
+        "performance_model_sha256": _canonical_digest(performance_model),
         "evidence_catalog_sha256": _canonical_digest(evidence_catalog),
         "action_catalog_sha256": _canonical_digest(action_catalog),
         "selection_policy_sha256": _canonical_digest(selection_policy),
@@ -2421,6 +2457,7 @@ def _load_active_diagnosis_context(
             "outcome_id",
             "result_path",
             "result_sha256",
+            "duration_seconds",
         }
         _closed(summary, summary_fields, f"evidence_results[{index}]")
         _required(summary, summary_fields, f"evidence_results[{index}]")
@@ -2438,6 +2475,13 @@ def _load_active_diagnosis_context(
             raise ValidationError("evidence result content digest does not match context")
         if result.get("request_signature") != summary["request_signature"]:
             raise ValidationError("evidence result request signature does not match context")
+        duration = summary["duration_seconds"]
+        if (
+            type(duration) not in {int, float}
+            or not math.isfinite(float(duration))
+            or float(duration) < 0
+        ):
+            raise ValidationError("evidence result duration_seconds must be non-negative and finite")
         artifacts = result.get("artifacts")
         if type(artifacts) is not list:
             raise ValidationError("evidence result artifacts are invalid")
@@ -2494,11 +2538,33 @@ def _load_active_diagnosis_context(
         )["execution_map"]
     except ValueError as error:
         raise ValidationError(f"active diagnosis context validation failed: {error}") from error
+    contract = _load_frozen_analysis_contract(run_root, state)
+    action_timings = [
+        {
+            "action_id": item["action_id"],
+            "identities": copy.deepcopy(execution_map["identities"]),
+            "elapsed_seconds": item["duration_seconds"],
+        }
+        for item in result_summaries
+        if item["duration_seconds"] > 0
+    ]
+    try:
+        expected_performance_model = _load_performance_model_module().build_performance_model(
+            execution_map,
+            minimum_effect_us=contract["minimum_effect_us"],
+            action_timings=action_timings,
+        )
+    except ValueError as error:
+        raise ValidationError(f"active diagnosis performance model is invalid: {error}") from error
+    performance_model = load_json_object(active_root / "performance_model.json")
+    if performance_model != expected_performance_model:
+        raise ValidationError("active diagnosis performance model drifted")
     expected = {
         "epoch_sha256": epoch_module.epoch_digest(epoch),
         "execution_map_sha256": _load_execution_map_module().execution_map_digest(
             execution_map, epoch=epoch, evidence_catalog=evidence_catalog
         ),
+        "performance_model_sha256": _canonical_digest(performance_model),
         "evidence_catalog_sha256": _canonical_digest(evidence_catalog),
         "action_catalog_sha256": _canonical_digest(action_catalog),
         "selection_policy_sha256": _canonical_digest(selection_policy),
@@ -2552,6 +2618,7 @@ def _start_run_unlocked(
             "propose_hypotheses",
             "collect_evidence",
             "evidence_gap",
+            "review_required",
             "register_change",
             "edit_then_evaluate",
             "done",
@@ -3067,6 +3134,14 @@ def _register_active_diagnosis_proposal_unlocked(
                 )
             ),
         )
+        performance_model = load_json_object(
+            run_root / "active_diagnosis" / "performance_model.json"
+        )
+        decision = _load_diagnostic_decision_module().decide_next_step(
+            performance_model,
+            hypothesis_result,
+            selection,
+        )
     except ValueError as error:
         raise ValidationError(f"active diagnosis proposal rejected: {error}") from error
     active_root = run_root / "active_diagnosis"
@@ -3082,18 +3157,34 @@ def _register_active_diagnosis_proposal_unlocked(
         _json_copy(request_set, "request_set", reject_sensitive=True),
     )
     _atomic_json(active_root / "evidence_selection.json", selection)
+    _atomic_json(active_root / "decision.json", decision)
+    investment_brief = {
+        "schema_version": "cuda-optimizer/investment-brief-v1",
+        "decision": decision["decision"],
+        "terminal_reason": decision["terminal_reason"],
+        "primary_diagnosis": copy.deepcopy(decision["primary_diagnosis"]),
+        "benefit_ceiling": copy.deepcopy(decision["benefit_ceiling"]),
+        "uncertainty": copy.deepcopy(decision["uncertainty"]),
+        "next_action": copy.deepcopy(decision["next_action"]),
+        "cost": copy.deepcopy(decision["cost"]),
+        "next_checkpoint": decision["next_checkpoint"],
+    }
+    _atomic_json(active_root / "investment_brief.json", investment_brief)
     proposal_binding = {
         "context_sha256": _canonical_digest(context),
         "hypothesis_set_sha256": hypothesis_result["hypothesis_set_sha256"],
         "request_set_sha256": _canonical_digest(request_set),
         "selection_sha256": _canonical_digest(selection),
+        "decision_sha256": _canonical_digest(decision),
+        "investment_brief_sha256": _canonical_digest(investment_brief),
     }
     _append_active_diagnosis_event(run_root, "proposal", proposal_binding)
     next_action = {
-        "selected": "collect_evidence",
-        "sufficient": "register_change",
-        "evidence_gap": "evidence_gap",
-    }[selection["status"]]
+        "MEASURE": "collect_evidence",
+        "PURSUE": "register_change",
+        "REVIEW_REQUIRED": "review_required",
+        "STOP": "done",
+    }[decision["decision"]]
     updated = copy.deepcopy(state)
     updated.update(
         {
@@ -3102,11 +3193,16 @@ def _register_active_diagnosis_proposal_unlocked(
             "updated_at_epoch": time.time(),
             "hypothesis_set_sha256": hypothesis_result["hypothesis_set_sha256"],
             "evidence_selection_sha256": _canonical_digest(selection),
+            "diagnostic_decision_sha256": _canonical_digest(decision),
+            "investment_brief_sha256": _canonical_digest(investment_brief),
+            "terminal_reason": decision["terminal_reason"],
             "diagnosis_context_sha256": _canonical_digest(context),
         }
     )
+    if decision["decision"] == "STOP":
+        updated["status"] = "completed"
     updated.update(_active_ledger_binding(_verify_active_diagnosis_ledger(run_root)))
-    if selection["selected_request"] is not None:
+    if decision["decision"] == "MEASURE" and selection["selected_request"] is not None:
         updated["selected_request_signature"] = selection["selected_request"][
             "request_signature"
         ]
@@ -3334,6 +3430,7 @@ def _refresh_active_diagnosis_context(
     evidence_catalog: Mapping[str, Any],
     selection_policy: Mapping[str, Any],
     result_summary: Mapping[str, Any],
+    minimum_effect_us: float,
 ) -> dict:
     refreshed = copy.deepcopy(dict(context))
     refreshed["evidence_catalog_sha256"] = _canonical_digest(evidence_catalog)
@@ -3362,6 +3459,25 @@ def _refresh_active_diagnosis_context(
         raise ValidationError("diagnosis context evidence_results is invalid")
     evidence_results.append(copy.deepcopy(dict(result_summary)))
     refreshed["evidence_results"] = evidence_results
+    action_timings = [
+        {
+            "action_id": item["action_id"],
+            "identities": copy.deepcopy(execution_map["identities"]),
+            "elapsed_seconds": item["duration_seconds"],
+        }
+        for item in evidence_results
+        if item["duration_seconds"] > 0
+    ]
+    performance_model = _load_performance_model_module().build_performance_model(
+        execution_map,
+        minimum_effect_us=minimum_effect_us,
+        action_timings=action_timings,
+    )
+    _atomic_json(
+        run_root / "active_diagnosis" / "performance_model.json",
+        performance_model,
+    )
+    refreshed["performance_model_sha256"] = _canonical_digest(performance_model)
     _atomic_json(run_root / "diagnosis_context.json", refreshed)
     return refreshed
 
@@ -3622,7 +3738,9 @@ def _collect_active_diagnosis_evidence_unlocked(
                 (attempt_root / "result.json").relative_to(run_root)
             ),
             "result_sha256": _canonical_digest(result),
+            "duration_seconds": execution["duration_seconds"],
         },
+        contract["minimum_effect_us"],
     )
     event_payload = {
         "request_signature": signature,
@@ -4415,6 +4533,7 @@ def resume_run(run_dir: os.PathLike[str] | str) -> dict:
     if state["next_action"] in {
         "propose_hypotheses",
         "evidence_gap",
+        "review_required",
         "register_change",
         "edit_then_evaluate",
         "done",

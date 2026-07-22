@@ -9,6 +9,7 @@
     "global_scan_probe_id",
     "adapter_path",
     "analysis_policy_sha256",
+    "minimum_effect_us",
     "source",
     "actions",
     "selection_policy"
@@ -18,6 +19,7 @@
     "global_scan_probe_id": {"$ref": "#/$defs/id"},
     "adapter_path": {"type": "string", "minLength": 1},
     "analysis_policy_sha256": {"$ref": "#/$defs/sha256"},
+    "minimum_effect_us": {"type": "number", "exclusiveMinimum": 0},
     "source": {
       "type": "object",
       "additionalProperties": false,

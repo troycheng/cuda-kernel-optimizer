@@ -606,6 +606,7 @@ class Sm120AcceptanceTests(unittest.TestCase):
                     "global_scan_probe_id": "timeline",
                     "adapter_path": str(global_scan),
                     "analysis_policy_sha256": "a" * 64,
+                    "minimum_effect_us": 1.0,
                     "source": {
                         "profiler": "custom",
                         "profiler_version": "gpu-smoke-v1",

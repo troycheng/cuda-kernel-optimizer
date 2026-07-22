@@ -182,6 +182,7 @@ def _enable_active_diagnosis(control: dict, root: Path) -> dict:
                 "global_scan_probe_id": "timeline",
                 "adapter_path": str(adapter),
                 "analysis_policy_sha256": "a" * 64,
+                "minimum_effect_us": 1.0,
                 "source": {
                     "profiler": "nsys",
                     "profiler_version": "2026.3",
@@ -1559,11 +1560,20 @@ class WorkloadRoundTests(unittest.TestCase):
             for field in (
                 "epoch_sha256",
                 "execution_map_sha256",
+                "performance_model_sha256",
                 "evidence_catalog_sha256",
                 "action_catalog_sha256",
                 "selection_policy_sha256",
             ):
                 self.assertEqual(len(context[field]), 64)
+            performance_model = json.loads(
+                (run_dir / "active_diagnosis" / "performance_model.json").read_text("utf-8")
+            )
+            self.assertEqual(
+                self.controller._canonical_digest(performance_model),
+                context["performance_model_sha256"],
+            )
+            self.assertEqual(performance_model["minimum_effect_us"], 1.0)
             self.assertLessEqual(len(context["knowledge_context"]["cards"]), 3)
             self.assertEqual(
                 context["knowledge_context"]["promotion_authority"], "none"
@@ -1621,6 +1631,18 @@ class WorkloadRoundTests(unittest.TestCase):
             )
             self.assertEqual(selection["status"], "selected")
             self.assertEqual(selection["selected_request"]["request_id"], "req-framework")
+            decision = json.loads(
+                (run_dir / "active_diagnosis" / "decision.json").read_text("utf-8")
+            )
+            brief = json.loads(
+                (run_dir / "active_diagnosis" / "investment_brief.json").read_text("utf-8")
+            )
+            self.assertEqual(decision["decision"], "MEASURE")
+            self.assertEqual(brief["decision"], "MEASURE")
+            self.assertEqual(
+                state["diagnostic_decision_sha256"],
+                self.controller._canonical_digest(decision),
+            )
             self.assertTrue(
                 (run_dir / "active_diagnosis" / "ledger" / "000002-proposal.json").is_file()
             )
@@ -1635,6 +1657,9 @@ class WorkloadRoundTests(unittest.TestCase):
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
+            )
+            before_model = json.loads(
+                (run_dir / "active_diagnosis" / "performance_model.json").read_text("utf-8")
             )
 
             state = self.controller.collect_active_diagnosis_evidence(control, run_dir)
@@ -1662,6 +1687,56 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(
                 context["evidence_results"][0]["outcome_id"], "gap-present"
             )
+            after_model = json.loads(
+                (run_dir / "active_diagnosis" / "performance_model.json").read_text("utf-8")
+            )
+            self.assertNotEqual(
+                self.controller._canonical_digest(before_model),
+                self.controller._canonical_digest(after_model),
+            )
+            self.assertIn(
+                "pytorch-operator-trace", after_model["action_timing_estimates"]
+            )
+            self.assertEqual(
+                context["performance_model_sha256"],
+                self.controller._canonical_digest(after_model),
+            )
+
+    def test_diagnostic_stop_and_review_required_have_distinct_terminal_state(self) -> None:
+        for mode in ("stop", "review"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                control, run_dir, _project = self._workspace(root)
+                _enable_v2_readiness(control, root)
+                _enable_active_diagnosis(control, root)
+                contract_path = Path(control["analysis_contract"])
+                contract = json.loads(contract_path.read_text("utf-8"))
+                if mode == "stop":
+                    contract["minimum_effect_us"] = 2000.0
+                else:
+                    contract["selection_policy"]["max_cost"] = "none"
+                contract_path.write_text(json.dumps(contract), encoding="utf-8")
+                self.controller.start_run(control, run_dir)
+                hypothesis, request = self._active_proposal(run_dir)
+
+                state = self.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+                decision = json.loads(
+                    (run_dir / "active_diagnosis" / "decision.json").read_text("utf-8")
+                )
+
+                if mode == "stop":
+                    self.assertEqual(decision["decision"], "STOP")
+                    self.assertEqual(state["status"], "completed")
+                    self.assertEqual(state["next_action"], "done")
+                else:
+                    self.assertEqual(decision["decision"], "REVIEW_REQUIRED")
+                    self.assertEqual(state["status"], "active")
+                    self.assertEqual(state["next_action"], "review_required")
+                self.assertEqual(
+                    state["terminal_reason"], decision["terminal_reason"]
+                )
 
     def test_resume_collects_once_and_never_reexecutes_completed_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1822,7 +1897,8 @@ class WorkloadRoundTests(unittest.TestCase):
                 control, run_dir, hypothesis, request
             )
 
-            self.assertEqual(state["next_action"], "evidence_gap")
+            self.assertEqual(state["next_action"], "done")
+            self.assertEqual(state["terminal_reason"], "no_admissible_new_direction")
             selection = json.loads(
                 (run_dir / "active_diagnosis" / "evidence_selection.json").read_text("utf-8")
             )
@@ -1890,7 +1966,10 @@ class WorkloadRoundTests(unittest.TestCase):
             recovered = self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
             )
-            self.assertEqual(recovered["next_action"], "evidence_gap")
+            self.assertEqual(recovered["next_action"], "done")
+            self.assertEqual(
+                recovered["terminal_reason"], "no_admissible_new_direction"
+            )
 
     def test_committed_active_diagnosis_ledger_tail_cannot_be_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1930,7 +2009,11 @@ class WorkloadRoundTests(unittest.TestCase):
             state = self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
             )
-            self.assertEqual(state["next_action"], "evidence_gap")
+            self.assertEqual(state["next_action"], "review_required")
+            self.assertEqual(
+                state["terminal_reason"],
+                "valuable_action_outside_authorization",
+            )
 
     def test_direction_experiment_runs_only_in_a_project_copy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
