@@ -469,7 +469,14 @@ def select_evidence_request(
         if reason is None and signature in history:
             reason = "equivalent_request_already_attempted"
         if reason is not None:
-            rejections.append({"request_id": request["request_id"], "reason": reason})
+            rejections.append(
+                {
+                    "request_id": request["request_id"],
+                    "action_id": action["action_id"],
+                    "reason": reason,
+                    "controller_action": copy.deepcopy(action),
+                }
+            )
             continue
         falsifiable = {
             hypothesis_id
