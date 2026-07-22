@@ -3068,6 +3068,48 @@ def _hypothesis_identity_registry(hypothesis_result: Mapping[str, Any]) -> dict:
     }
 
 
+def _load_bound_diagnostic_artifacts(
+    run_root: Path,
+    state: Mapping[str, Any],
+    *,
+    expected_decision: str,
+) -> dict:
+    """Recheck the published decision and brief before a downstream stage."""
+    active_root = run_root / "active_diagnosis"
+    decision_path = active_root / "decision.json"
+    brief_path = active_root / "investment_brief.json"
+    for path, label in (
+        (decision_path, "diagnostic decision"),
+        (brief_path, "investment brief"),
+    ):
+        if path.is_symlink() or not path.is_file():
+            raise ValidationError(f"{label} must be a regular file")
+    decision = load_json_object(decision_path)
+    brief = load_json_object(brief_path)
+    if _canonical_digest(decision) != state.get("diagnostic_decision_sha256"):
+        raise ValidationError("diagnostic decision digest drifted before execution")
+    if _canonical_digest(brief) != state.get("investment_brief_sha256"):
+        raise ValidationError("investment brief digest drifted before execution")
+    if decision.get("decision") != expected_decision:
+        raise ValidationError(
+            f"diagnostic decision does not authorize {expected_decision} execution"
+        )
+    expected_brief = {
+        "schema_version": "cuda-optimizer/investment-brief-v1",
+        "decision": decision.get("decision"),
+        "terminal_reason": decision.get("terminal_reason"),
+        "primary_diagnosis": copy.deepcopy(decision.get("primary_diagnosis")),
+        "benefit_ceiling": copy.deepcopy(decision.get("benefit_ceiling")),
+        "uncertainty": copy.deepcopy(decision.get("uncertainty")),
+        "next_action": copy.deepcopy(decision.get("next_action")),
+        "cost": copy.deepcopy(decision.get("cost")),
+        "next_checkpoint": decision.get("next_checkpoint"),
+    }
+    if brief != expected_brief:
+        raise ValidationError("investment brief does not match diagnostic decision")
+    return decision
+
+
 def _review_diagnostic_direction(
     control: Mapping[str, Any],
     run_root: Path,
@@ -3737,6 +3779,9 @@ def _collect_active_diagnosis_evidence_unlocked(
         return state
     if state["next_action"] != "collect_evidence":
         raise ValidationError("run is not ready to collect active diagnosis evidence")
+    decision = _load_bound_diagnostic_artifacts(
+        run_root, state, expected_decision="MEASURE"
+    )
     selection = load_json_object(
         run_root / "active_diagnosis" / "evidence_selection.json"
     )
@@ -3745,6 +3790,12 @@ def _collect_active_diagnosis_evidence_unlocked(
     selected = selection.get("selected_request")
     if type(selected) is not dict or selection.get("status") != "selected":
         raise ValidationError("evidence selection contains no executable request")
+    authorized_action = decision.get("next_action")
+    if not isinstance(authorized_action, Mapping) or any(
+        authorized_action.get(field) != selected.get(field)
+        for field in ("request_id", "action_id")
+    ):
+        raise ValidationError("diagnostic decision does not match evidence selection")
     signature = selected["request_signature"]
     attempt_root = run_root / "active_diagnosis" / "evidence" / signature
     recovered = _recover_or_block_active_evidence_attempt(
@@ -3932,6 +3983,10 @@ def register_change(
     if state["control_digest"] != _canonical_digest(normalized):
         raise ValidationError("control manifest drifted before ChangeSet registration")
     _load_frozen_control(run_root, state)
+    if "analysis_contract" in normalized:
+        _load_bound_diagnostic_artifacts(
+            run_root, state, expected_decision="PURSUE"
+        )
     change = validate_change_set(change_set, normalized)
     workload = _normalize_frozen_workload(normalized)
     if workload.source_hash != state["workload_source_hash"]:

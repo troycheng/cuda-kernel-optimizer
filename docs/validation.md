@@ -5,7 +5,7 @@ predict the speedup of a new workload.
 
 ## Automated checks
 
-The local CPU/static suite ran 1,171 tests on 2026-07-22: 1,161 passed, 10 physical RTX 5090 opt-in tests were skipped, and none failed. It covers input
+The local CPU/static suite ran 1,173 tests on 2026-07-22: 1,163 passed, 10 physical RTX 5090 opt-in tests were skipped, and none failed. It covers input
 validation, state recovery, evidence binding, shared-host guards, timeouts, restoration, capability retrieval,
 stability calibration, audit cadence, performance-model accounting, bounded
 hypothesis admission, targeted evidence selection, and deterministic decision logic. Pre-V1

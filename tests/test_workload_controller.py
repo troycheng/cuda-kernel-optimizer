@@ -1702,6 +1702,28 @@ class WorkloadRoundTests(unittest.TestCase):
                 self.controller._canonical_digest(after_model),
             )
 
+    def test_tampered_decision_or_investment_brief_blocks_evidence_execution(self) -> None:
+        for artifact_name in ("decision.json", "investment_brief.json"):
+            with self.subTest(artifact=artifact_name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                control, run_dir, _project = self._workspace(root)
+                _enable_v2_readiness(control, root)
+                _enable_active_diagnosis(control, root)
+                self.controller.start_run(control, run_dir)
+                hypothesis, request = self._active_proposal(run_dir)
+                self.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+                artifact = run_dir / "active_diagnosis" / artifact_name
+                value = json.loads(artifact.read_text("utf-8"))
+                value["terminal_reason"] = "tampered"
+                artifact.write_text(json.dumps(value), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, "decision|investment brief"):
+                    self.controller.collect_active_diagnosis_evidence(control, run_dir)
+
+                self.assertFalse((run_dir / "active_diagnosis" / "evidence").exists())
+
     def test_diagnostic_stop_and_review_required_have_distinct_terminal_state(self) -> None:
         for mode in ("stop", "review"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:

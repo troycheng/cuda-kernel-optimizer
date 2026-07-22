@@ -653,13 +653,20 @@ def _ordered_reviewer_configs(
     normalized.sort(
         key=lambda item: (priority[item["canonical_provider"]], item["provider"])
     )
+    distinct = []
+    canonical_providers = set()
+    for item in normalized:
+        if item["canonical_provider"] in canonical_providers:
+            continue
+        canonical_providers.add(item["canonical_provider"])
+        distinct.append(item)
     return [
         {
             "provider": item["provider"],
             "argv": item["argv"],
             "timeout_seconds": item["timeout_seconds"],
         }
-        for item in normalized
+        for item in distinct
     ]
 
 

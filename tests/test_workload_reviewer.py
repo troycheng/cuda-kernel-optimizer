@@ -450,6 +450,18 @@ class ReviewerProcessTests(unittest.TestCase):
                     [item["provider"] for item in selected], providers
                 )
 
+    def test_provider_aliases_cannot_fill_multiple_independent_review_slots(self) -> None:
+        configs = [
+            {"provider": provider, "argv": [provider], "timeout_seconds": 5}
+            for provider in ("zhipu", "kimi", "glm")
+        ]
+
+        selected = self.reviewer.select_reviewer_configs(configs, "major")
+
+        self.assertEqual(
+            [item["provider"] for item in selected], ["glm", "kimi"]
+        )
+
     def test_prioritized_review_falls_through_after_fast_provider_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
