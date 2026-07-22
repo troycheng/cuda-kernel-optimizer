@@ -6636,37 +6636,258 @@ def _finish_review_required(
     return decision
 
 
-def _complete_legacy_review_migration(
+_LEGACY_REVIEW_MIGRATION_KIND = "legacy-review-refresh-v1"
+_LEGACY_REVIEW_PENDING_FIELD = "legacy_review_pending_migration"
+
+
+def _legacy_review_migration_epoch(state: Mapping[str, Any]) -> float:
+    epoch = state.get("updated_at_epoch")
+    if type(epoch) not in {int, float} or not math.isfinite(float(epoch)):
+        raise ValidationError("legacy review migration base time is invalid")
+    return float(epoch)
+
+
+def _legacy_review_migration_id(
+    base_state_sha256: str, source_decision_sha256: str
+) -> str:
+    seed = {
+        "kind": _LEGACY_REVIEW_MIGRATION_KIND,
+        "base_state_sha256": base_state_sha256,
+        "source_decision_sha256": source_decision_sha256,
+    }
+    return f"legacy-review-{_canonical_digest(seed)[:16]}"
+
+
+def _legacy_review_target_decision(
+    base_state: Mapping[str, Any], source: Mapping[str, Any]
+) -> dict:
+    base_digest = _canonical_digest(base_state)
+    source_digest = _canonical_digest(source)
+    if source_digest != base_state.get("decision_digest"):
+        raise ValidationError(
+            "legacy review migration source decision does not match its base state"
+        )
+    if source.get("status") != "review_required" or "replay_identity" in source:
+        raise ValidationError("legacy review migration source decision is invalid")
+    migration_fields = {
+        "legacy_decision_sha256",
+        "migration_epoch",
+        "migration_kind",
+        "migration_id",
+    }
+    if migration_fields & set(source):
+        raise ValidationError(
+            "legacy review migration metadata lacks a committed prepared binding"
+        )
+    epoch = _legacy_review_migration_epoch(base_state)
+    migration_id = _legacy_review_migration_id(base_digest, source_digest)
+    target = copy.deepcopy(dict(source))
+    target.update(
+        {
+            "status": "review_required",
+            "reason": "legacy_replay_identity_unavailable",
+            "recovery_action": "refresh_from_current_identity",
+            # Audit only. Recovery trust comes exclusively from committed state.
+            "legacy_decision_sha256": source_digest,
+            "migration_kind": _LEGACY_REVIEW_MIGRATION_KIND,
+            "migration_id": migration_id,
+            "migration_epoch": epoch,
+        }
+    )
+    return target
+
+
+def _legacy_review_target_state(
+    base_state: Mapping[str, Any],
+    *,
+    target_decision_sha256: str,
+    migration_epoch: float,
+) -> dict:
+    target = copy.deepcopy(dict(base_state))
+    target.pop(_LEGACY_REVIEW_PENDING_FIELD, None)
+    target.update(
+        {
+            "status": "active",
+            "stage": "decision",
+            "next_action": "refresh_required",
+            "updated_at_epoch": float(migration_epoch),
+            "terminal_reason": "legacy_replay_identity_unavailable",
+            "decision_digest": target_decision_sha256,
+        }
+    )
+    return target
+
+
+def _legacy_review_migration_plan(
+    base_state: Mapping[str, Any], source: Mapping[str, Any]
+) -> tuple[dict, dict, dict]:
+    base = copy.deepcopy(dict(base_state))
+    base_digest = _canonical_digest(base)
+    source_digest = _canonical_digest(source)
+    target_decision = _legacy_review_target_decision(base, source)
+    target_decision_digest = _canonical_digest(target_decision)
+    epoch = _legacy_review_migration_epoch(base)
+    target_state = _legacy_review_target_state(
+        base,
+        target_decision_sha256=target_decision_digest,
+        migration_epoch=epoch,
+    )
+    binding = {
+        "schema_version": "cuda-workload-optimizer/legacy-review-migration-v1",
+        "kind": _LEGACY_REVIEW_MIGRATION_KIND,
+        "migration_id": _legacy_review_migration_id(base_digest, source_digest),
+        "base_state_sha256": base_digest,
+        "source_decision_sha256": source_digest,
+        "target_decision_sha256": target_decision_digest,
+        "target_state_sha256": _canonical_digest(target_state),
+        "migration_epoch": epoch,
+    }
+    prepared_state = copy.deepcopy(base)
+    prepared_state[_LEGACY_REVIEW_PENDING_FIELD] = binding
+    return target_decision, target_state, prepared_state
+
+
+def _validate_prepared_legacy_review_migration(
     run_root: Path,
     state: Mapping[str, Any],
-    migrated: Mapping[str, Any],
-) -> dict:
-    old_digest = _sha256(
-        migrated.get("legacy_decision_sha256"),
+    decision: Mapping[str, Any],
+) -> tuple[dict, dict]:
+    binding = _object(
+        state.get(_LEGACY_REVIEW_PENDING_FIELD),
+        "legacy review migration prepared binding",
+    )
+    fields = {
+        "schema_version",
+        "kind",
+        "migration_id",
+        "base_state_sha256",
+        "source_decision_sha256",
+        "target_decision_sha256",
+        "target_state_sha256",
+        "migration_epoch",
+    }
+    _closed(binding, fields, "legacy review migration prepared binding")
+    _required(binding, fields, "legacy review migration prepared binding")
+    if (
+        binding["schema_version"]
+        != "cuda-workload-optimizer/legacy-review-migration-v1"
+        or binding["kind"] != _LEGACY_REVIEW_MIGRATION_KIND
+    ):
+        raise ValidationError("legacy review migration prepared binding is invalid")
+    base_digest = _sha256(
+        binding["base_state_sha256"], "legacy review migration base state"
+    )
+    source_digest = _sha256(
+        binding["source_decision_sha256"],
         "legacy review migration source decision",
     )
-    migration_epoch = migrated.get("migration_epoch")
-    if type(migration_epoch) not in {int, float} or not math.isfinite(
-        float(migration_epoch)
+    target_digest = _sha256(
+        binding["target_decision_sha256"],
+        "legacy review migration target decision",
+    )
+    target_state_digest = _sha256(
+        binding["target_state_sha256"], "legacy review migration target state"
+    )
+    base_state = load_json_object(
+        run_root / "state_generations" / f"{base_digest}.json"
+    )
+    if (
+        _canonical_digest(base_state) != base_digest
+        or _LEGACY_REVIEW_PENDING_FIELD in base_state
+        or base_state.get("decision_digest") != source_digest
     ):
-        raise ValidationError("legacy review migration time is invalid")
-    migrated_digest = _canonical_digest(migrated)
-    if state.get("decision_digest") not in {old_digest, migrated_digest}:
-        raise ValidationError("legacy review migration state binding drifted")
-    if state.get("decision_digest") != migrated_digest:
-        updated = copy.deepcopy(state)
-        updated.update(
-            {
-                "status": "active",
-                "stage": "decision",
-                "next_action": "refresh_required",
-                "updated_at_epoch": float(migration_epoch),
-                "terminal_reason": "legacy_replay_identity_unavailable",
-                "decision_digest": migrated_digest,
-            }
+        raise ValidationError("legacy review migration base lineage is corrupt")
+    epoch = _legacy_review_migration_epoch(base_state)
+    if (
+        type(binding["migration_epoch"]) not in {int, float}
+        or not math.isfinite(float(binding["migration_epoch"]))
+        or float(binding["migration_epoch"]) != epoch
+        or binding["migration_id"]
+        != _legacy_review_migration_id(base_digest, source_digest)
+    ):
+        raise ValidationError("legacy review migration prepared binding drifted")
+    target_state = _legacy_review_target_state(
+        base_state,
+        target_decision_sha256=target_digest,
+        migration_epoch=epoch,
+    )
+    if _canonical_digest(target_state) != target_state_digest:
+        raise ValidationError("legacy review migration target state binding drifted")
+    expected_prepared = copy.deepcopy(base_state)
+    expected_prepared[_LEGACY_REVIEW_PENDING_FIELD] = copy.deepcopy(binding)
+    if dict(state) != expected_prepared:
+        raise ValidationError("legacy review migration prepared state drifted")
+
+    current_digest = _canonical_digest(decision)
+    if current_digest == source_digest:
+        target_decision = _legacy_review_target_decision(base_state, decision)
+        if _canonical_digest(target_decision) != target_digest:
+            raise ValidationError(
+                "legacy review migration deterministic target binding drifted"
+            )
+    elif current_digest == target_digest:
+        target_decision = copy.deepcopy(dict(decision))
+        if (
+            target_decision.get("status") != "review_required"
+            or target_decision.get("reason")
+            != "legacy_replay_identity_unavailable"
+            or target_decision.get("recovery_action")
+            != "refresh_from_current_identity"
+            or target_decision.get("legacy_decision_sha256") != source_digest
+            or target_decision.get("migration_kind")
+            != _LEGACY_REVIEW_MIGRATION_KIND
+            or target_decision.get("migration_id") != binding["migration_id"]
+            or target_decision.get("migration_epoch") != epoch
+            or "replay_identity" in target_decision
+        ):
+            raise ValidationError("legacy review migration target decision is corrupt")
+    else:
+        raise ValidationError(
+            "legacy review migration decision matches neither source nor target"
         )
-        _write_state(run_root, updated)
-    return copy.deepcopy(dict(migrated))
+    return target_decision, target_state
+
+
+def _recover_legacy_review_migration(
+    run_root: Path,
+    state: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> dict:
+    target_decision, target_state = _validate_prepared_legacy_review_migration(
+        run_root, state, decision
+    )
+    binding = _object(
+        state[_LEGACY_REVIEW_PENDING_FIELD],
+        "legacy review migration prepared binding",
+    )
+    if _canonical_digest(decision) == binding["source_decision_sha256"]:
+        _atomic_json(run_root / "decision.json", target_decision)
+    written = load_json_object(run_root / "decision.json")
+    if _canonical_digest(written) != binding["target_decision_sha256"]:
+        raise ValidationError("legacy review migration target decision write drifted")
+    current_state = read_run_state(run_root)
+    if _canonical_digest(current_state) != _canonical_digest(state):
+        raise ValidationError(
+            "legacy review migration state advanced before final commit"
+        )
+    _write_state(run_root, target_state)
+    return copy.deepcopy(target_decision)
+
+
+def _begin_legacy_review_migration(
+    run_root: Path,
+    state: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> dict:
+    target_decision, _target_state, prepared_state = (
+        _legacy_review_migration_plan(state, decision)
+    )
+    _write_state(run_root, prepared_state)
+    return _recover_legacy_review_migration(
+        run_root,
+        read_run_state(run_root),
+        load_json_object(run_root / "decision.json"),
+    )
 
 
 def _replay_review_required(
@@ -6676,33 +6897,16 @@ def _replay_review_required(
 ) -> dict:
     """Return a paused decision only while every bound artifact remains intact."""
     decision = load_json_object(run_root / "decision.json")
-    if (
-        decision.get("status") == "review_required"
-        and decision.get("reason") == "legacy_replay_identity_unavailable"
-        and decision.get("recovery_action") == "refresh_from_current_identity"
-        and "replay_identity" not in decision
-        and "legacy_decision_sha256" in decision
-        and "migration_epoch" in decision
-    ):
-        return _complete_legacy_review_migration(run_root, state, decision)
-    if (
-        decision.get("status") != "review_required"
-        or _canonical_digest(decision) != state.get("decision_digest")
-    ):
+    if _LEGACY_REVIEW_PENDING_FIELD in state:
+        return _recover_legacy_review_migration(run_root, state, decision)
+    if _canonical_digest(decision) != state.get("decision_digest"):
+        raise ValidationError(
+            "review-required decision does not match state; manual recovery is required"
+        )
+    if decision.get("status") != "review_required":
         raise ValidationError("review-required decision does not match state")
     if "replay_identity" not in decision:
-        migrated = copy.deepcopy(decision)
-        migrated.update(
-            {
-                "status": "review_required",
-                "reason": "legacy_replay_identity_unavailable",
-                "recovery_action": "refresh_from_current_identity",
-                "legacy_decision_sha256": _canonical_digest(decision),
-                "migration_epoch": time.time(),
-            }
-        )
-        _atomic_json(run_root / "decision.json", migrated)
-        return _complete_legacy_review_migration(run_root, state, migrated)
+        return _begin_legacy_review_migration(run_root, state, decision)
     candidate_diff = run_root / "candidate.diff"
     if (
         candidate_diff.is_symlink()
@@ -7353,6 +7557,13 @@ def _resume_run_unlocked(run_root: Path) -> dict:
     recovered = _recover_active_diagnosis_transition(run_root, control)
     if recovered is not None:
         state = recovered
+    if _LEGACY_REVIEW_PENDING_FIELD in state:
+        _recover_legacy_review_migration(
+            run_root,
+            state,
+            load_json_object(run_root / "decision.json"),
+        )
+        state = read_run_state(run_root)
     if state["next_action"] == "collect_evidence":
         return _collect_active_diagnosis_evidence_unlocked(control, run_root)
     if state.get("stage") == "decision" and state["next_action"] == "review_required":

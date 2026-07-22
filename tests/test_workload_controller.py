@@ -1418,6 +1418,29 @@ class WorkloadRoundTests(unittest.TestCase):
         change.update(overrides)
         return change
 
+    def _legacy_review_run(self, root: Path) -> tuple[dict, Path, dict]:
+        control, run_dir, project = self._workspace(root)
+        self.controller.start_run(control, run_dir)
+        self.controller.register_change(control, run_dir, self._change())
+        (project / "configs" / "value.json").write_text(
+            '{"workers": 8}\n', encoding="utf-8"
+        )
+        state = self.controller.read_run_state(run_dir)
+        started = state.get("optimization_started_at_epoch", state["started_at_epoch"])
+        state["deadline_epoch"] = started + 0.5
+        state["soft_target_epoch"] = started + 0.25
+        self.controller._write_state(run_dir, state)
+        self.controller.evaluate_change(run_dir)
+        legacy = json.loads((run_dir / "decision.json").read_text("utf-8"))
+        legacy.pop("replay_identity")
+        (run_dir / "decision.json").write_text(
+            json.dumps(legacy), encoding="utf-8"
+        )
+        legacy_state = self.controller.read_run_state(run_dir)
+        legacy_state["decision_digest"] = self.controller._canonical_digest(legacy)
+        self.controller._write_state(run_dir, legacy_state)
+        return control, run_dir, legacy
+
     def _active_proposal(self, run_dir: Path) -> tuple[dict, dict]:
         active = run_dir / "active_diagnosis"
         epoch = json.loads((active / "epoch.json").read_text("utf-8"))
@@ -4335,6 +4358,203 @@ class WorkloadRoundTests(unittest.TestCase):
                 migrated["recovery_action"], "refresh_from_current_identity"
             )
             self.assertNotIn("replay_identity", migrated)
+
+    def test_legacy_review_migration_rejects_self_attested_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _control, run_dir, legacy = self._legacy_review_run(Path(tmp).resolve())
+            state = self.controller.read_run_state(run_dir)
+            source_digest = state["decision_digest"]
+            forged = copy.deepcopy(legacy)
+            forged.update(
+                {
+                    "status": "review_required",
+                    "reason": "legacy_replay_identity_unavailable",
+                    "recovery_action": "refresh_from_current_identity",
+                    "legacy_decision_sha256": source_digest,
+                    "migration_kind": "legacy-review-refresh-v1",
+                    "migration_id": "legacy-review-" + source_digest[:16],
+                    "migration_epoch": state["updated_at_epoch"],
+                    "attacker_payload": {"accepted": True},
+                }
+            )
+            (run_dir / "decision.json").write_text(
+                json.dumps(forged), encoding="utf-8"
+            )
+            before_state_digest = self.controller._canonical_digest(state)
+
+            with self.assertRaisesRegex(
+                ValueError, "review-required|migration|corrupt|manual recovery"
+            ):
+                self.controller.resume_run(run_dir)
+
+            after = self.controller.read_run_state(run_dir)
+            self.assertEqual(
+                self.controller._canonical_digest(after), before_state_digest
+            )
+            self.assertEqual(after["decision_digest"], source_digest)
+            self.assertEqual(
+                json.loads((run_dir / "decision.json").read_text("utf-8")),
+                forged,
+            )
+
+    def test_legacy_review_migration_recovers_each_prepared_transaction_write(self) -> None:
+        for target in (
+            "prepared_state_commit",
+            "target_decision_write",
+            "final_state_commit",
+        ):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                _control, run_dir, _legacy = self._legacy_review_run(
+                    Path(tmp).resolve()
+                )
+                original_atomic = self.controller._atomic_json
+                interrupted = False
+
+                def interrupt(path, value):
+                    nonlocal interrupted
+                    path = Path(path)
+                    phase = None
+                    if path.name == "state_commit.json":
+                        generation_path = (
+                            path.parent
+                            / "state_generations"
+                            / f"{value['state_digest']}.json"
+                        )
+                        generation = json.loads(generation_path.read_text("utf-8"))
+                        if "legacy_review_pending_migration" in generation:
+                            phase = "prepared_state_commit"
+                        elif generation.get("next_action") == "refresh_required":
+                            phase = "final_state_commit"
+                    elif (
+                        path == run_dir / "decision.json"
+                        and value.get("migration_kind")
+                        == "legacy-review-refresh-v1"
+                    ):
+                        phase = "target_decision_write"
+                    if phase == target and not interrupted:
+                        interrupted = True
+                        raise OSError(f"interrupt legacy migration at {target}")
+                    return original_atomic(path, value)
+
+                with mock.patch.object(
+                    self.controller, "_atomic_json", side_effect=interrupt
+                ):
+                    with self.assertRaisesRegex(OSError, "interrupt legacy"):
+                        self.controller.resume_run(run_dir)
+
+                recovered = self.controller.resume_run(run_dir)
+                decision = json.loads((run_dir / "decision.json").read_text("utf-8"))
+                generation_paths = set((run_dir / "state_generations").glob("*.json"))
+                ledger_paths = set(
+                    (run_dir / "active_diagnosis" / "ledger").glob("*.json")
+                )
+                repeated = self.controller.resume_run(run_dir)
+
+                self.assertTrue(interrupted)
+                self.assertEqual(recovered, repeated)
+                self.assertEqual(recovered["next_action"], "refresh_required")
+                self.assertNotIn("legacy_review_pending_migration", recovered)
+                self.assertEqual(
+                    recovered["decision_digest"],
+                    self.controller._canonical_digest(decision),
+                )
+                self.assertEqual(
+                    decision["migration_kind"], "legacy-review-refresh-v1"
+                )
+                self.assertRegex(decision["migration_id"], r"^legacy-review-[a-f0-9]{16}$")
+                self.assertEqual(
+                    set((run_dir / "state_generations").glob("*.json")),
+                    generation_paths,
+                )
+                self.assertEqual(
+                    set((run_dir / "active_diagnosis" / "ledger").glob("*.json")),
+                    ledger_paths,
+                )
+                self.assertEqual(
+                    len(recovered["completed_stages"]),
+                    len(set(recovered["completed_stages"])),
+                )
+
+    def test_legacy_review_migration_fails_closed_on_prepared_or_decision_tamper(self) -> None:
+        for mode in (
+            "prepared_binding",
+            "prepared_route",
+            "target_binding",
+            "decision_neither_source_nor_target",
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                _control, run_dir, legacy = self._legacy_review_run(
+                    Path(tmp).resolve()
+                )
+                original_atomic = self.controller._atomic_json
+                stop_at = (
+                    "final_state_commit"
+                    if mode == "target_binding"
+                    else "target_decision_write"
+                )
+                interrupted = False
+
+                def interrupt(path, value):
+                    nonlocal interrupted
+                    path = Path(path)
+                    phase = None
+                    if (
+                        path == run_dir / "decision.json"
+                        and value.get("migration_kind")
+                        == "legacy-review-refresh-v1"
+                    ):
+                        phase = "target_decision_write"
+                    elif path.name == "state_commit.json":
+                        generation = json.loads(
+                            (
+                                path.parent
+                                / "state_generations"
+                                / f"{value['state_digest']}.json"
+                            ).read_text("utf-8")
+                        )
+                        if generation.get("next_action") == "refresh_required":
+                            phase = "final_state_commit"
+                    if phase == stop_at and not interrupted:
+                        interrupted = True
+                        raise OSError(f"interrupt legacy migration at {stop_at}")
+                    return original_atomic(path, value)
+
+                with mock.patch.object(
+                    self.controller, "_atomic_json", side_effect=interrupt
+                ):
+                    with self.assertRaisesRegex(OSError, "interrupt legacy"):
+                        self.controller.resume_run(run_dir)
+
+                prepared = self.controller.read_run_state(run_dir)
+                self.assertIn("legacy_review_pending_migration", prepared)
+                if mode == "decision_neither_source_nor_target":
+                    corrupt = copy.deepcopy(legacy)
+                    corrupt["attacker_payload"] = {"accepted": True}
+                    (run_dir / "decision.json").write_text(
+                        json.dumps(corrupt), encoding="utf-8"
+                    )
+                else:
+                    tampered = copy.deepcopy(prepared)
+                    binding = tampered["legacy_review_pending_migration"]
+                    if mode == "prepared_binding":
+                        binding["migration_id"] = "legacy-review-0000000000000000"
+                    elif mode == "prepared_route":
+                        tampered["next_action"] = "done"
+                    else:
+                        binding["target_decision_sha256"] = "f" * 64
+                    self.controller._write_state(run_dir, tampered)
+                before = self.controller.read_run_state(run_dir)
+                before_digest = self.controller._canonical_digest(before)
+                decision_before = (run_dir / "decision.json").read_bytes()
+
+                with self.assertRaisesRegex(
+                    ValueError, "legacy review migration|binding|corrupt|manual recovery"
+                ):
+                    self.controller.resume_run(run_dir)
+
+                after = self.controller.read_run_state(run_dir)
+                self.assertEqual(self.controller._canonical_digest(after), before_digest)
+                self.assertEqual((run_dir / "decision.json").read_bytes(), decision_before)
 
     def test_legacy_review_migration_recovers_interrupted_state_commit(self) -> None:
         for target in ("state_generation", "state_commit.json"):
