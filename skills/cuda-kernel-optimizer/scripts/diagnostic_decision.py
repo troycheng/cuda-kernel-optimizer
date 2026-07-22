@@ -395,6 +395,7 @@ def _investment_action(
     model: Mapping[str, Any],
     history: list[dict],
     action_bounds: Mapping[str, Any],
+    allow_generic_bounds: bool = True,
     kind: str = "check",
 ) -> tuple[dict, bool]:
     controller = {} if controller_action is None else dict(controller_action)
@@ -402,9 +403,9 @@ def _investment_action(
     record = _matching_history(history, action_id=action_id)
     status = record.get("implementation_status", record.get("status", "available"))
     raw_p90 = record.get("p90_seconds", record.get("elapsed_seconds"))
-    if raw_p90 is None and isinstance(estimate, Mapping):
+    if raw_p90 is None and allow_generic_bounds and isinstance(estimate, Mapping):
         raw_p90 = estimate.get("p90_seconds")
-    if raw_p90 is None:
+    if raw_p90 is None and allow_generic_bounds:
         bound = action_bounds.get(action_id)
         if isinstance(bound, Mapping):
             raw_p90 = bound.get("p90_seconds")
@@ -466,6 +467,7 @@ def _adaptive_actions(
                 model=model,
                 history=candidate_history,
                 action_bounds=action_bounds,
+                allow_generic_bounds=False,
                 kind="refresh" if stale else "check",
             )
             if record.get("implementation_status", record.get("status")) == "failed":
@@ -651,7 +653,22 @@ def decide_next_step(
             ),
             None,
         )
-        if unavailable is not None and selected_investment is None:
+        unavailable_blocks_selected = selected_investment is None
+        if unavailable is not None and isinstance(selected_investment, Mapping):
+            unavailable_info = action_metadata[unavailable["action_id"]]
+            selected_info = action_metadata[selected_investment["action_id"]]
+            if (
+                unavailable_info.get("hypothesis_id") is not None
+                and selected_info.get("hypothesis_id") is not None
+            ):
+                rank_by_hypothesis = {
+                    item["hypothesis_id"]: index
+                    for index, item in enumerate(ranked)
+                }
+                unavailable_blocks_selected = rank_by_hypothesis[
+                    unavailable_info["hypothesis_id"]
+                ] < rank_by_hypothesis[selected_info["hypothesis_id"]]
+        if unavailable is not None and unavailable_blocks_selected:
             unavailable_info = action_metadata[unavailable["action_id"]]
             unavailable_reason = unavailable["reason"]
             decision, reason, checkpoint = (

@@ -849,6 +849,73 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 "h-kernel-bound",
             )
 
+    def test_change_set_cannot_claim_a_different_diagnostic_direction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (
+                helper,
+                control,
+                run_dir,
+                _project,
+                hypothesis,
+                request,
+            ) = self._controller_with_two_supported_directions(root)
+            real_module = helper.controller._load_diagnostic_decision_module()
+
+            def authorized_primary(*args, **kwargs):
+                decision = real_module.decide_next_step(*args, **kwargs)
+                primary = decision["primary_diagnosis"]
+                decision.update(
+                    {
+                        "decision": "PURSUE",
+                        "terminal_reason": "direction_supported",
+                        "next_action": {
+                            "action_id": "implement-candidate",
+                            "hypothesis_id": primary["hypothesis_id"],
+                            "mechanism": primary["mechanism"],
+                            "claim_layer": primary["claim_layer"],
+                        },
+                        "next_checkpoint": "after_candidate_screen",
+                    }
+                )
+                brief = decision["investment_brief"]
+                for field in (
+                    "decision",
+                    "terminal_reason",
+                    "next_action",
+                    "next_checkpoint",
+                ):
+                    brief[field] = copy.deepcopy(decision[field])
+                return decision
+
+            legacy = mock.Mock()
+            legacy.decide_next_step.side_effect = authorized_primary
+            with mock.patch.object(
+                helper.controller,
+                "_load_diagnostic_decision_module",
+                return_value=legacy,
+            ):
+                state = helper.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+            self.assertEqual(state["next_action"], "register_change")
+            change = helper._change("fast")
+            change["diagnosis_ids"] = ["h-kernel-bound"]
+
+            with self.assertRaisesRegex(
+                helper.controller.ValidationError,
+                "diagnosis_ids.*authorized|authorized.*diagnosis_ids",
+            ):
+                helper.controller.register_change(control, run_dir, change)
+
+            after = helper.controller.read_run_state(run_dir)
+            self.assertEqual(after["next_action"], "register_change")
+            context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            self.assertEqual(context["candidate_history"], [])
+            self.assertFalse((run_dir / "snapshot" / "project").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

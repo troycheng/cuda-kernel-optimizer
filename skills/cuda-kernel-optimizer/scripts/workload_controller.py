@@ -4458,6 +4458,27 @@ def register_change(
             run_root, state, expected_decision="PURSUE"
         )
     change = validate_change_set(change_set, normalized)
+    candidate_hypothesis_id = None
+    candidate_identity_digest = None
+    if diagnostic_decision is not None:
+        next_diagnostic_action = diagnostic_decision.get("next_action")
+        if not isinstance(next_diagnostic_action, Mapping):
+            raise ValidationError("diagnostic decision lacks a bound candidate action")
+        candidate_hypothesis_id = _identifier(
+            next_diagnostic_action.get("hypothesis_id"),
+            "diagnostic candidate hypothesis_id",
+        )
+        if candidate_hypothesis_id not in change["diagnosis_ids"]:
+            raise ValidationError(
+                "ChangeSet diagnosis_ids do not contain the authorized diagnostic candidate"
+            )
+        bound_basis = diagnostic_decision.get("investment_brief", {}).get(
+            "bound_basis", {}
+        )
+        candidate_identity_digest = _sha256(
+            bound_basis.get("identity_digest"),
+            "diagnostic candidate identity_digest",
+        )
     workload = _normalize_frozen_workload(normalized)
     if workload.source_hash != state["workload_source_hash"]:
         raise ValidationError("workload identity drifted before ChangeSet registration")
@@ -4530,24 +4551,10 @@ def register_change(
         }
     )
     if diagnostic_decision is not None:
-        next_diagnostic_action = diagnostic_decision.get("next_action")
-        if not isinstance(next_diagnostic_action, Mapping):
-            raise ValidationError("diagnostic decision lacks a bound candidate action")
-        hypothesis_id = _identifier(
-            next_diagnostic_action.get("hypothesis_id"),
-            "diagnostic candidate hypothesis_id",
-        )
-        bound_basis = diagnostic_decision.get("investment_brief", {}).get(
-            "bound_basis", {}
-        )
-        identity_digest = _sha256(
-            bound_basis.get("identity_digest"),
-            "diagnostic candidate identity_digest",
-        )
         updated.update(
             {
-                "candidate_hypothesis_id": hypothesis_id,
-                "candidate_identity_digest": identity_digest,
+                "candidate_hypothesis_id": candidate_hypothesis_id,
+                "candidate_identity_digest": candidate_identity_digest,
                 "candidate_digest": _canonical_digest(change["candidate"]),
                 "candidate_started_at_epoch": time.time(),
             }
