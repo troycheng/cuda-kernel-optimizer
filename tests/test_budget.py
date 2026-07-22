@@ -6,6 +6,7 @@ import sys
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -265,6 +266,42 @@ class BudgetClockTests(unittest.TestCase):
 
 
 class CandidateGateTests(unittest.TestCase):
+    def test_authorization_exhaustion_is_review_required_not_performance_stop(self) -> None:
+        now = mock.Mock(side_effect=[100.0, 100.0, 100.0])
+        gate = budget.CandidateGate(
+            {
+                "soft_target_seconds": 3,
+                "hard_ceiling_seconds": 3,
+                "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
+            },
+            {
+                "claim_layer": "kernel",
+                "cheapest_falsifier": "static_review",
+                "estimated_cost": {
+                    "static_review": 4,
+                    "build_correctness": 4,
+                    "short_paired": 4,
+                    "profiler": 4,
+                    "formal_paired": 4,
+                    "service": 4,
+                },
+                "minimum_effect": {"metric": "mechanism_us", "value": 1.0},
+                "rejection_condition": "any evidence gate fails",
+                "promotion_condition": "formal lower bound passes",
+            },
+            now=now,
+        )
+        action = mock.Mock(return_value={"status": "passed"})
+
+        result = gate.run({"static_review": action})
+
+        action.assert_not_called()
+        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
+        self.assertEqual(
+            result["stop_reason"], "authorization_insufficient_for_next_action"
+        )
+        self.assertNotIn("budget_expired", json.dumps(result))
+
     def test_action_exception_returns_terminal_stop(self) -> None:
         gate = budget.CandidateGate(
             {

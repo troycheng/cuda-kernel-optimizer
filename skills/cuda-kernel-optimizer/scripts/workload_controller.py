@@ -4834,6 +4834,105 @@ def _finish_rejected(
     return decision
 
 
+def _finish_review_required(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+    *,
+    scope: str,
+    primary_status: str | None,
+    time_gate: Mapping[str, Any],
+) -> dict:
+    """Persist an authorization pause without classifying it as a rejection."""
+    evidence = {}
+    for name in (
+        "candidate_binding.json",
+        "static_review.json",
+        "correctness.json",
+        "short_paired_evaluation.json",
+        "profiler_stage.json",
+        "formal_paired_evaluation.json",
+    ):
+        path = run_root / name
+        if path.is_file():
+            evidence[name] = _sha256_path(path)
+    preserved = {
+        "candidate_diff_sha256": _sha256_path(run_root / "candidate.diff"),
+        "time_gate_sha256": _canonical_digest(time_gate),
+        "next_stage": time_gate["next_stage"],
+        "blocked_action": copy.deepcopy(time_gate["blocked_action"]),
+        "projected_spend": copy.deepcopy(time_gate["projected_spend"]),
+        "elapsed_seconds": time_gate["elapsed_seconds"],
+        "stop_reason": time_gate["stop_reason"],
+        "skipped_expensive_stages": copy.deepcopy(
+            time_gate["skipped_expensive_stages"]
+        ),
+        "evidence": evidence,
+    }
+    try:
+        _restore_snapshot(
+            control,
+            run_root,
+            scope,
+            state["before_identity_digest"],
+        )
+    except (OSError, ValidationError) as error:
+        decision = {
+            "schema_version": "cuda-workload-optimizer/decision-v1",
+            "status": "manual_recovery_required",
+            "reason": "rollback_failed",
+            "review_required_reason": time_gate["stop_reason"],
+            "primary_status": primary_status,
+            "rolled_back": False,
+            "error": f"{type(error).__name__}: {error}",
+            "snapshot": str(
+                run_root
+                / "snapshot"
+                / ("project" if scope == "project" else "environment")
+            ),
+            **preserved,
+        }
+        _atomic_json(run_root / "decision.json", decision)
+        updated = copy.deepcopy(state)
+        updated.update(
+            {
+                "status": "manual_recovery_required",
+                "stage": "decision",
+                "next_action": "manual_recovery",
+                "updated_at_epoch": time.time(),
+                "decision_digest": _canonical_digest(decision),
+            }
+        )
+        _write_state(run_root, updated)
+        return decision
+
+    decision = {
+        "schema_version": "cuda-workload-optimizer/decision-v1",
+        "status": "review_required",
+        "reason": "authorization_insufficient_for_next_action",
+        "primary_status": primary_status,
+        "rolled_back": True,
+        **preserved,
+    }
+    _atomic_json(run_root / "decision.json", decision)
+    updated = copy.deepcopy(state)
+    for stage in ("review", "evaluation", "decision"):
+        if stage not in updated["completed_stages"]:
+            updated["completed_stages"].append(stage)
+    updated.update(
+        {
+            "status": "active",
+            "stage": "decision",
+            "next_action": "review_required",
+            "updated_at_epoch": time.time(),
+            "decision_digest": _canonical_digest(decision),
+            "terminal_reason": "authorization_insufficient_for_next_action",
+        }
+    )
+    _write_state(run_root, updated)
+    return decision
+
+
 def _validated_identity_artifact(value: Mapping[str, Any], expected_digest: str) -> dict:
     identity = _object(value, "identity artifact")
     fields = {"schema_version", "scope", "roots", "missing_roots", "files", "digest"}
@@ -4867,6 +4966,14 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         decision = load_json_object(run_root / "decision.json")
         if _canonical_digest(decision) != state.get("decision_digest"):
             raise ValidationError("decision artifact digest does not match state")
+        return decision
+    if state.get("stage") == "decision" and state["next_action"] == "review_required":
+        decision = load_json_object(run_root / "decision.json")
+        if (
+            decision.get("status") != "review_required"
+            or _canonical_digest(decision) != state.get("decision_digest")
+        ):
+            raise ValidationError("review-required decision does not match state")
         return decision
     if state["next_action"] != "edit_then_evaluate":
         raise ValidationError("run is not ready to evaluate a ChangeSet")
@@ -5183,19 +5290,25 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         gate_contract,
         bound_candidate,
     )
-    gate_result = gate.run(
-        {
-            "static_review": lambda: static_review,
-            "build_correctness": minimum_correctness_stage,
-            "short_paired": lambda: evaluate_pairs(
-                "short_paired", min(2, runtime["blocks"])
-            ),
-            "profiler": profiler_stage,
-            "formal_paired": lambda: evaluate_pairs(
-                "formal_paired", runtime["blocks"]
-            ),
-        }
-    )
+    diagnosis = load_json_object(run_root / "diagnosis.json")
+    live_profiler_uncertainty = diagnosis.get("primary_category") in {
+        None,
+        "kernel",
+        "mixed",
+    } or diagnosis.get("confidence") in {"low", "inconclusive"}
+    candidate_actions = {
+        "static_review": lambda: static_review,
+        "build_correctness": minimum_correctness_stage,
+        "short_paired": lambda: evaluate_pairs(
+            "short_paired", min(2, runtime["blocks"])
+        ),
+        "formal_paired": lambda: evaluate_pairs(
+            "formal_paired", runtime["blocks"]
+        ),
+    }
+    if live_profiler_uncertainty:
+        candidate_actions["profiler"] = profiler_stage
+    gate_result = gate.run(candidate_actions)
     evaluation = evaluations.get(
         "formal_paired",
         evaluations.get(
@@ -5205,10 +5318,27 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
     )
     _atomic_json(run_root / "evaluation.json", evaluation)
     _atomic_json(run_root / "time_gate.json", gate_result)
+    if gate_result["decision"] == "REVIEW_REQUIRED":
+        _atomic_json(
+            run_root / "review.json",
+            {
+                "schema_version": "cuda-workload-optimizer/review-artifact-v1",
+                "status": "skipped",
+                "request_digest": None,
+                "response": None,
+                "execution": {"reason": gate_result["stop_reason"]},
+            },
+        )
+        return _finish_review_required(
+            run_root,
+            state,
+            control,
+            scope=change["scope"],
+            primary_status=evaluation.get("primary", {}).get("status"),
+            time_gate=gate_result,
+        )
     if gate_result["decision"] != "PROMOTE":
         rejection_reason = gate_result["stop_reason"]
-        if rejection_reason == "hard_ceiling_admission_failed":
-            rejection_reason = "budget_expired"
         if evaluations and evaluation.get("status") != "evaluated":
             rejection_reason = "workload_failed"
         _atomic_json(
@@ -5259,15 +5389,6 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         deadline_epoch=min(state["deadline_epoch"], time.time() + 180),
     )
     _write_final_review_adjudication(run_root, review_artifact, evaluation)
-    if time.time() > state["deadline_epoch"]:
-        return _finish_rejected(
-            run_root,
-            state,
-            control,
-            scope=change["scope"],
-            reason="budget_expired",
-            primary_status=evaluation.get("primary", {}).get("status"),
-        )
     if _identity(control, change["scope"])["digest"] != after["digest"]:
         decision = _finish_rejected(
             run_root,

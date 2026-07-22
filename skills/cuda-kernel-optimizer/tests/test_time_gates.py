@@ -110,7 +110,7 @@ class TimeGateTests(unittest.TestCase):
         self.assertNotIn("profiler", calls)
         self.assertEqual(result["stop_reason"], "correctness_failed")
 
-    def test_missing_profiler_action_cannot_be_silently_skipped(self) -> None:
+    def test_profiler_is_skipped_without_declared_live_uncertainty(self) -> None:
         calls = []
         result = self._gate().run(
             {
@@ -134,10 +134,94 @@ class TimeGateTests(unittest.TestCase):
         )
 
         self.assertEqual(
+            calls,
+            [
+                "static_review",
+                "build_correctness",
+                "short_paired",
+                "formal_paired",
+            ],
+        )
+        self.assertEqual(result["decision"], "PROMOTE")
+
+    def test_cross_threshold_short_interval_allows_one_bounded_follow_up(self) -> None:
+        calls = []
+        actions = {
+            "static_review": self.clock.action(
+                calls, "static_review", {"status": "passed"}
+            ),
+            "build_correctness": self.clock.action(
+                calls, "build_correctness", {"status": "passed"}
+            ),
+            "short_paired": self.clock.action(
+                calls,
+                "short_paired",
+                {"status": "passed", "lower_bound": 0.5, "upper_bound": 1.5},
+            ),
+            "formal_paired": self.clock.action(
+                calls,
+                "formal_paired",
+                {"status": "passed", "lower_bound": 1.1},
+            ),
+        }
+
+        result = self._gate().run(actions)
+
+        self.assertEqual(calls.count("formal_paired"), 1)
+        self.assertEqual(result["decision"], "PROMOTE")
+
+    def test_follow_up_is_blocked_before_action_when_p90_exceeds_authorization(self) -> None:
+        calls = []
+        self.contract["hard_ceiling_seconds"] = 22.0
+        self.contract["soft_target_seconds"] = 20.0
+        actions = {
+            "static_review": self.clock.action(
+                calls, "static_review", {"status": "passed"}
+            ),
+            "build_correctness": self.clock.action(
+                calls, "build_correctness", {"status": "passed"}
+            ),
+            "short_paired": self.clock.action(
+                calls,
+                "short_paired",
+                {"status": "passed", "lower_bound": 0.5, "upper_bound": 1.5},
+            ),
+            "formal_paired": self.clock.action(
+                calls,
+                "formal_paired",
+                {"status": "passed", "lower_bound": 1.1},
+            ),
+        }
+
+        result = self._gate().run(actions)
+
+        self.assertEqual(
             calls, ["static_review", "build_correctness", "short_paired"]
         )
-        self.assertEqual(result["decision"], "STOP")
-        self.assertEqual(result["stop_reason"], "missing_profiler_action")
+        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
+        self.assertEqual(
+            result["stop_reason"], "authorization_insufficient_for_next_action"
+        )
+        self.assertEqual(result["next_stage"], "formal_paired")
+        self.assertEqual(result["blocked_action"]["action_id"], "formal_paired")
+        self.assertEqual(result["projected_spend"]["p90_seconds"], 23.0)
+        self.assertEqual(result["elapsed_seconds"], 3.0)
+        self.assertIn("formal_paired", result["skipped_expensive_stages"])
+
+    def test_repeated_run_returns_same_terminal_result_without_restarting_actions(self) -> None:
+        calls = []
+        gate = self._gate()
+        actions = {
+            "static_review": self.clock.action(
+                calls, "static_review", {"status": "failed"}
+            )
+        }
+
+        first = gate.run(actions)
+        second = gate.run(actions)
+
+        self.assertEqual(first, second)
+        self.assertEqual(calls, ["static_review"])
 
     def test_short_pair_upper_bound_below_threshold_skips_formal_test(self) -> None:
         calls = []

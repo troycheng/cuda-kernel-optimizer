@@ -3856,6 +3856,104 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(decision["stop_reason"], "effect_upper_bound_below_minimum")
             self.assertIn("formal_paired", decision["skipped_expensive_stages"])
 
+    def test_authorization_review_is_resumable_idempotent_and_not_a_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            self.controller.start_run(control, run_dir)
+            self.controller.register_change(control, run_dir, self._change())
+            config = project / "configs" / "value.json"
+            original = config.read_text("utf-8")
+            config.write_text('{"workers": 8}\n', encoding="utf-8")
+            state = self.controller.read_run_state(run_dir)
+            state["deadline_epoch"] = time.time() + 100.0
+            self.controller._write_state(run_dir, state)
+            evaluator = mock.Mock()
+            evaluator.evaluate_pairs.return_value = {
+                "status": "evaluated",
+                "primary": {
+                    "status": "inconclusive",
+                    "estimate_pct": 1.0,
+                    "ci_low_pct": 0.5,
+                    "ci_high_pct": 1.5,
+                },
+                "constraints": [],
+            }
+
+            with mock.patch.object(
+                self.controller, "_load_evaluate_module", return_value=evaluator
+            ), mock.patch.object(
+                self.controller,
+                "review_change",
+                side_effect=AssertionError("authorization block invoked reviewer"),
+            ):
+                first = self.controller.evaluate_change(run_dir)
+                second = self.controller.evaluate_change(run_dir)
+
+            self.assertEqual(first, second)
+            self.assertEqual(evaluator.evaluate_pairs.call_count, 1)
+            self.assertEqual(first["status"], "review_required")
+            self.assertEqual(
+                first["reason"], "authorization_insufficient_for_next_action"
+            )
+            self.assertEqual(first["blocked_action"]["action_id"], "formal_paired")
+            self.assertGreater(first["projected_spend"]["p90_seconds"], 100.0)
+            self.assertNotEqual(first.get("reason"), "budget_expired")
+            self.assertEqual(config.read_text("utf-8"), original)
+            self.assertTrue((run_dir / "candidate.diff").is_file())
+            self.assertTrue((run_dir / "time_gate.json").is_file())
+            resumed = self.controller.read_run_state(run_dir)
+            self.assertEqual(resumed["status"], "active")
+            self.assertEqual(resumed["next_action"], "review_required")
+            self.assertEqual(
+                resumed["decision_digest"], self.controller._canonical_digest(first)
+            )
+
+    def test_external_final_review_timeout_cannot_overturn_confirmed_local_win(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            self.controller.start_run(control, run_dir)
+            change = self._change()
+            change["candidate"]["estimated_cost"]["formal_paired"] = 90.0
+            change["candidate"]["estimated_cost"]["service"] = 90.0
+            self.controller.register_change(control, run_dir, change)
+            config = project / "configs" / "value.json"
+            config.write_text('{"workers": 8}\n', encoding="utf-8")
+            state = self.controller.read_run_state(run_dir)
+            state["deadline_epoch"] = 1000.0
+            self.controller._write_state(run_dir, state)
+            evaluator = mock.Mock()
+            evaluator.evaluate_pairs.return_value = {
+                "status": "evaluated",
+                "primary": {
+                    "status": "confirmed_win",
+                    "estimate_pct": 5.0,
+                    "ci_low_pct": 4.0,
+                    "ci_high_pct": 6.0,
+                },
+                "constraints": [],
+            }
+            wall_clock = {"now": 900.0}
+
+            def timed_out_review(*_args, **_kwargs):
+                wall_clock["now"] = 1001.0
+                return {"status": "timed_out", "reviews": []}
+
+            with mock.patch.object(
+                self.controller, "_load_evaluate_module", return_value=evaluator
+            ), mock.patch.object(
+                self.controller, "review_change", side_effect=timed_out_review
+            ), mock.patch.object(
+                self.controller.time, "time", side_effect=lambda: wall_clock["now"]
+            ):
+                decision = self.controller.evaluate_change(run_dir)
+
+            self.assertEqual(evaluator.evaluate_pairs.call_count, 2)
+            self.assertEqual(decision["status"], "promoted")
+            self.assertEqual(decision["primary_status"], "confirmed_win")
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 8}\n')
+
     def test_short_constraint_failure_skips_formal_evaluation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -4390,7 +4488,7 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(decision["reason"], "budget_expired")
             self.assertEqual(config.read_text("utf-8"), original)
 
-    def test_deadline_expiring_during_evaluation_cannot_promote(self) -> None:
+    def test_deadline_expiring_during_evaluation_requires_authorization_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             control, run_dir, project = self._workspace(root)
@@ -4412,8 +4510,11 @@ class WorkloadRoundTests(unittest.TestCase):
             with mock.patch.object(evaluator, "evaluate_pairs", delayed_evaluate):
                 decision = self.controller.evaluate_change(run_dir)
 
-            self.assertEqual(decision["status"], "rejected")
-            self.assertEqual(decision["reason"], "budget_expired")
+            self.assertEqual(decision["status"], "review_required")
+            self.assertEqual(
+                decision["reason"], "authorization_insufficient_for_next_action"
+            )
+            self.assertNotEqual(decision["reason"], "budget_expired")
             self.assertEqual(config.read_text("utf-8"), original)
 
     def test_rollback_failure_requires_manual_recovery(self) -> None:

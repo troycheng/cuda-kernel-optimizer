@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import os
 import signal
@@ -305,6 +306,7 @@ class CandidateGate:
         if not callable(now):
             raise ValueError("now must be callable")
         self.now = now
+        self._terminal_result: dict | None = None
 
     def _result(
         self,
@@ -313,12 +315,20 @@ class CandidateGate:
         decision: str,
         stop_reason: str,
         completed: Sequence[str],
+        next_stage: str | None = None,
+        blocked_action: Mapping | None = None,
+        projected_p90_seconds: float | None = None,
+        observed_elapsed_seconds: float | None = None,
     ) -> dict:
-        elapsed = max(0.0, float(self.now()) - started_at)
+        elapsed = (
+            max(0.0, float(self.now()) - started_at)
+            if observed_elapsed_seconds is None
+            else observed_elapsed_seconds
+        )
         last_stage = _CLAIM_LAST_STAGE[self.candidate["claim_layer"]]
         applicable = _CANDIDATE_STAGES[: _CANDIDATE_STAGES.index(last_stage) + 1]
         skipped = [stage for stage in applicable if stage not in completed]
-        return {
+        result = {
             "decision": decision,
             "elapsed_seconds": float(elapsed),
             "stop_reason": stop_reason,
@@ -326,11 +336,26 @@ class CandidateGate:
             "completed_stages": list(completed),
             "soft_target_exceeded": elapsed
             > self.contract["soft_target_seconds"],
+            "next_stage": next_stage,
+            "blocked_action": (
+                None if blocked_action is None else dict(blocked_action)
+            ),
+            "projected_spend": {
+                "p90_seconds": float(
+                    elapsed
+                    if projected_p90_seconds is None
+                    else projected_p90_seconds
+                )
+            },
         }
+        self._terminal_result = copy.deepcopy(result)
+        return result
 
     def run(self, actions: Mapping[str, Callable[[], Mapping]]) -> dict:
         if not isinstance(actions, Mapping):
             raise ValueError("actions must be a mapping")
+        if self._terminal_result is not None:
+            return copy.deepcopy(self._terminal_result)
         started = float(self.now())
         completed: list[str] = []
         last_stage = _CLAIM_LAST_STAGE[self.candidate["claim_layer"]]
@@ -338,6 +363,8 @@ class CandidateGate:
         threshold = self.candidate["minimum_effect"]["value"]
         for stage in applicable:
             action = actions.get(stage)
+            if stage == "profiler" and not callable(action):
+                continue
             if not callable(action):
                 return self._result(
                     started_at=started,
@@ -346,13 +373,22 @@ class CandidateGate:
                     completed=completed,
                 )
             elapsed = max(0.0, float(self.now()) - started)
-            remaining = self.contract["hard_ceiling_seconds"] - elapsed
-            if remaining <= 0.0 or self.candidate["estimated_cost"][stage] > remaining:
+            p90 = self.candidate["estimated_cost"][stage]
+            projected = elapsed + p90
+            if projected > self.contract["hard_ceiling_seconds"]:
                 return self._result(
                     started_at=started,
-                    decision="STOP",
-                    stop_reason="hard_ceiling_admission_failed",
+                    decision="REVIEW_REQUIRED",
+                    stop_reason="authorization_insufficient_for_next_action",
                     completed=completed,
+                    next_stage=stage,
+                    blocked_action={
+                        "action_id": stage,
+                        "p90_seconds": p90,
+                        "reason": "authorization_insufficient_for_next_action",
+                    },
+                    projected_p90_seconds=projected,
+                    observed_elapsed_seconds=elapsed,
                 )
             try:
                 outcome = action()
