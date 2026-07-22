@@ -44,6 +44,11 @@ read `active_diagnosis/performance_model.json` and
 `active_diagnosis/investment_brief.json`. Report the supported benefit ceiling,
 uncertainty, next action, and whether further work is worth the expected cost.
 Do not invent a numeric duration without identity-matched timing history.
+Cumulative authorization is the start boundary for the next action, not a goal
+to consume. The benefit upper bound is an upper bound on removable time, not an
+expected benefit. If the next action's projected P90 exceeds authorization,
+return `REVIEW_REQUIRED` with the blocked action and projected spend; do not
+start it or call an evidence stop a performance rejection.
 
 Use `balanced` by default; respect `quick` or `thorough` when selected. Each
 budget has a soft target and a hard ceiling. The soft target guides effort. The
@@ -97,6 +102,10 @@ action named by `decision.json`, then rebuild the performance model. Do not star
 a later or more expensive action after its prerequisite fails, when the benefit
 ceiling is below `minimum_effect`, or when the decision is `STOP`.
 
+Bundled knowledge, search, and external AI may only propose a locally
+falsifiable shadow direction. They cannot create benefit facts, execute work,
+or promote a candidate; local correctness and paired evidence remain decisive.
+
 Run help instead of loading command inventories:
 
 ```bash
@@ -120,7 +129,8 @@ direction selection, a clear plateau, or final review; run independent checks in
 parallel with a 180-second total wait. Use primary sources, redact private material,
 preserve disagreement, and adjudicate locally. Network or provider failure falls
 back to the offline workflow. When configured, try providers in this order:
-Google AI Mode, GLM, Kimi, DeepSeek, then Gemini. Their answers are advisory;
+Google AI Mode, GitHub Copilot, GLM, Kimi, DeepSeek, then Gemini. GitHub Copilot
+is for code and repository-specific review. Their answers are advisory;
 local evidence remains authoritative and external models are never promotion
 authorities.
 

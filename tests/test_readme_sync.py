@@ -276,6 +276,7 @@ class ReadmeSyncTests(unittest.TestCase):
         for text in (english, chinese):
             self.assertEqual(text.count("### V1.1.0"), 1)
             self.assertEqual(text.count("### V1.0.0"), 1)
+            self.assertNotRegex(text, r"(?m)^### V1\.2\.")
             self.assertNotRegex(text, r"(?m)^### V(?:2|3)\.")
         self.assertIn("first standalone release", english)
         self.assertIn("首个独立公开版本", chinese)

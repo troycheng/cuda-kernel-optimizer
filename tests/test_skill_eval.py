@@ -221,6 +221,10 @@ class SkillEvalTests(unittest.TestCase):
             changed = dict(good, event_evidence=[])
             with self.assertRaisesRegex(ValueError, "event.*evidence"):
                 self.eval.score_results(suite, [changed, second], mode="v3_full")
+        with self.subTest("unmeasured expected benefit"):
+            changed = dict(good, expected_benefit_pct=20.0)
+            with self.assertRaisesRegex(ValueError, "unknown"):
+                self.eval.score_results(suite, [changed, second], mode="v3_full")
 
     def test_cli_output_is_deterministic_and_create_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -62,6 +62,21 @@ The workload contract's `audit_every_candidates` field sets the maximum number
 of newly registered candidates between baseline audits. Both online writes and
 ledger replay enforce it.
 
+## Adaptive investment and authorization
+
+After each sealed observation, rebuild the performance model and
+`investment_brief.json`. It records the portfolio, cumulative elapsed time,
+selected or blocked action, projected P90 spend, skipped actions, benefit-bound
+basis, and next checkpoint. The benefit upper bound is removable-time headroom,
+not an expected gain. Start an action only when its projected cumulative P90 is
+within authorization. Otherwise return `REVIEW_REQUIRED`: retain the evidence,
+do not start the blocked action, and do not label the result a performance
+rejection.
+
+In normal mode, ask at most once for aggregated authorization. In unattended
+mode, ask zero questions. A request, when needed, covers the next bounded
+action rather than asking repeatedly while a run is in progress.
+
 ## Audit and recovery
 
 Enter `AUDITING` when cadence is reached or an anomaly appears. A periodic audit

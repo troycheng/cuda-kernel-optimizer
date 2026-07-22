@@ -227,6 +227,31 @@ class PublicDocsTests(unittest.TestCase):
         self.assertNotIn("Version 3.0 is designed", long_running)
         self.assertNotIn("V3.1 adds", long_running)
 
+    def test_agent_docs_explain_adaptive_investment_boundaries(self) -> None:
+        skill = " ".join(
+            (ROOT / "skills/cuda-kernel-optimizer/SKILL.md").read_text("utf-8").split()
+        )
+        control = " ".join((
+            ROOT
+            / "skills"
+            / "cuda-kernel-optimizer"
+            / "references"
+            / "long_running_control.md"
+        ).read_text("utf-8").split())
+
+        for marker in (
+            "Cumulative authorization is the start boundary for the next action, not a goal to consume.",
+            "The benefit upper bound is an upper bound on removable time, not an expected benefit.",
+            "Bundled knowledge, search, and external AI may only propose a locally falsifiable shadow direction.",
+            "GitHub Copilot is for code and repository-specific review.",
+        ):
+            self.assertIn(marker, skill)
+        for marker in (
+            "In normal mode, ask at most once for aggregated authorization.",
+            "In unattended mode, ask zero questions.",
+        ):
+            self.assertIn(marker, control)
+
     def test_internal_history_is_not_shipped_as_public_documentation(self) -> None:
         self.assertFalse((ROOT / "maintainers").exists())
         self.assertFalse((ROOT / "docs/superpowers").exists())
