@@ -25,6 +25,7 @@ RUNNER = Path(__file__).resolve().parent / "remote" / "run_lane.sh"
 ARTIFACTS = Path(os.environ.get("CUDA_E2E_ARTIFACTS", "/tmp/cuda-sm120-acceptance"))
 WORKLOAD_CONTROLLER = SCRIPTS / "workload_controller.py"
 READINESS_SMOKE = FIXTURES / "readiness_smoke.py"
+DIAGNOSTIC_SCENARIOS = FIXTURES / "diagnostic_scenarios.py"
 
 
 @dataclass(frozen=True)
@@ -354,12 +355,64 @@ class Sm120AcceptanceHelperTests(unittest.TestCase):
         ):
             self.assertIn(marker, source)
 
+    def test_v1_1_lane_uses_four_real_controlled_gpu_scenarios(self) -> None:
+        self.assertTrue(DIAGNOSTIC_SCENARIOS.is_file())
+        source = DIAGNOSTIC_SCENARIOS.read_text(encoding="utf-8")
+        for marker in (
+            "cuda_graph_launch_batching",
+            "memory_coalescing",
+            "gemm_tile_occupancy",
+            "async_transfer_overlap",
+            "torch.cuda.CUDAGraph",
+            "pin_memory=True",
+            "torch.mm",
+        ):
+            self.assertIn(marker, source)
+
 
 @unittest.skipUnless(
     os.environ.get("CUDA_SM120_E2E") == "1",
     "set CUDA_SM120_E2E=1 on an SM120 CUDA host",
 )
 class Sm120AcceptanceTests(unittest.TestCase):
+
+    def test_v1_1_controlled_diagnostic_scenarios_on_real_gpu(self) -> None:
+        output = ARTIFACTS / "diagnostic_scenarios" / "observations.json"
+        result = _run(
+            [
+                sys.executable,
+                str(DIAGNOSTIC_SCENARIOS),
+                "--json-out",
+                str(output),
+            ],
+            output,
+        )
+
+        self.assertEqual(result["device"]["capability"], [12, 0])
+        scenarios = {item["name"]: item for item in result["scenarios"]}
+        self.assertEqual(
+            set(scenarios),
+            {"launch_graph", "memory_coalescing", "compute_gemm", "transfer_overlap"},
+        )
+        expected = {
+            "launch_graph": ("cuda_graph_launch_batching", "runtime"),
+            "memory_coalescing": ("memory_coalescing", "kernel"),
+            "compute_gemm": ("gemm_tile_occupancy", "kernel"),
+            "transfer_overlap": ("async_transfer_overlap", "runtime"),
+        }
+        for name, (mechanism, layer) in expected.items():
+            observation = scenarios[name]
+            self.assertEqual(observation["mechanism"], mechanism)
+            self.assertEqual(observation["claim_layer"], layer)
+            self.assertGreaterEqual(len(observation["samples_us"]), 5)
+            self.assertTrue(all(value > 0 for value in observation["samples_us"]))
+            self.assertTrue(observation["correctness_passed"])
+
+        self.assertLess(
+            scenarios["launch_graph"]["comparison_median_us"],
+            scenarios["launch_graph"]["baseline_median_us"],
+        )
+        self.assertGreater(scenarios["compute_gemm"]["observed_tflops"], 0)
     def _readiness_control(
         self,
         case_root: Path,
@@ -1238,6 +1291,19 @@ class Sm120AcceptanceTests(unittest.TestCase):
                 "name": "single-launch",
                 "revision": "fixture-fast",
                 "path": str(candidate),
+                "claim_layer": "workload",
+                "cheapest_falsifier": "static_review",
+                "estimated_cost": {
+                    "static_review": 1,
+                    "build_correctness": 10,
+                    "short_paired": 30,
+                    "profiler": 60,
+                    "formal_paired": 120,
+                    "service": 300,
+                },
+                "minimum_effect": {"metric": "service_pct", "value": 1.0},
+                "rejection_condition": "upper_bound_below_minimum_or_gate_failed",
+                "promotion_condition": "all_required_gates_passed",
             },
             "paths": ["candidate.py"],
             "commands": [],
