@@ -85,6 +85,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
             hypotheses,
             selection,
             external_review=external_review,
+            authorization={"max_seconds": 86400.0},
         )
 
     @staticmethod
@@ -191,6 +192,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
                     "freshness": "current",
                 }
             ],
+            authorization={"max_seconds": 20.0},
         )
 
         self.assertEqual(result["decision"], "PURSUE")
@@ -199,6 +201,56 @@ class DiagnosticDecisionTests(unittest.TestCase):
         self.assertEqual(result["cost"]["p50_seconds"], 10.0)
         self.assertEqual(result["cost"]["p90_seconds"], 20.0)
         self.assertEqual(result["cost"]["basis"], "user_authorized_upper_bound")
+
+    def test_missing_authorization_never_expands_to_one_day(self) -> None:
+        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
+        framework, kernel = value["hypotheses"]
+        framework.update(
+            {
+                "confidence": "direction_supported",
+                "support_evidence_ids": ["ev-cpu", "ev-gpu"],
+                "missing_evidence_kinds": [],
+            }
+        )
+        kernel.update(
+            {
+                "disposition": "rejected",
+                "oppose_evidence_ids": ["ev-edge"],
+                "missing_evidence_kinds": [],
+            }
+        )
+        hypotheses = self.hypotheses(value)
+        model = self.model()
+
+        result = self.module.decide_next_step(
+            model,
+            hypotheses,
+            self.selection(hypotheses),
+            candidate_proposals=[
+                {
+                    "proposal_id": "proposal-framework-0001",
+                    "hypothesis_id": "h-framework-gap",
+                    "action_id": "implement-h-framework-gap",
+                    "identity_digest": self.identity_digest(model),
+                    "p50_seconds": 10.0,
+                    "p90_seconds": 20.0,
+                    "basis": "user_authorized_upper_bound",
+                    "freshness": "current",
+                }
+            ],
+        )
+
+        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
+        self.assertEqual(result["terminal_reason"], "cumulative_authorization_exceeded")
+        self.assertIsNone(result["investment_brief"]["selected_action"])
+        self.assertEqual(
+            result["investment_brief"]["blocked_action"]["action_id"],
+            "implement-h-framework-gap",
+        )
+        self.assertEqual(
+            result["investment_brief"]["cumulative_investment"]["projected_p90_seconds"],
+            20.0,
+        )
 
     def test_two_bounded_candidates_preserve_v11_benefit_primary_over_cheaper_fallback(self) -> None:
         value = hypothesis_fixture(self.hypothesis_module, self.map_module)
@@ -247,6 +299,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
                     "freshness": "current",
                 },
             ],
+            authorization={"max_seconds": 100.0},
         )
 
         self.assertEqual(result["decision"], "PURSUE")
@@ -304,6 +357,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
                     "freshness": "current",
                 },
             ],
+            authorization={"max_seconds": 100.0},
         )
 
         self.assertEqual(
@@ -493,6 +547,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
                     "freshness": "current",
                 },
             ],
+            authorization={"max_seconds": 100.0},
         )
 
         self.assertEqual(result["decision"], "PURSUE")
@@ -538,6 +593,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
                 ],
                 "rejections": [],
             },
+            authorization={"max_seconds": 100.0},
         )
 
         self.assertEqual(result["decision"], "MEASURE")

@@ -264,12 +264,26 @@ def _candidate_declaration(name: str, revision: str) -> dict:
         "claim_layer": "workload",
         "cheapest_falsifier": "static_review",
         "estimated_cost": {
-            "static_review": 1,
-            "build_correctness": 10,
-            "short_paired": 30,
-            "profiler": 60,
-            "formal_paired": 120,
-            "service": 300,
+            "static_review": {
+                "p90_seconds": 1,
+                "basis": "declared_upper_bound",
+            },
+            "build_correctness": {
+                "p90_seconds": 10,
+                "basis": "declared_upper_bound",
+            },
+            "short_paired": {
+                "p90_seconds": 30,
+                "basis": "declared_upper_bound",
+            },
+            "profiler": {
+                "p90_seconds": 60,
+                "basis": "declared_upper_bound",
+            },
+            "formal_paired": {
+                "p90_seconds": 120,
+                "basis": "declared_upper_bound",
+            },
         },
         "minimum_effect": {"metric": "service_pct", "value": 1.0},
         "rejection_condition": "upper_bound_below_minimum_or_gate_failed",
@@ -306,9 +320,22 @@ class WorkloadControllerContractTests(unittest.TestCase):
                 control, root / "control.json"
             )
             normalized_change = self.controller.validate_change_set(change, normalized)
+            runtime = self.controller._BUDGET_RUNTIME[normalized["budget"]]
+            gate = self.controller._load_budget_module().CandidateGate(
+                {
+                    "soft_target_seconds": runtime["soft_target_seconds"],
+                    "hard_ceiling_seconds": runtime["hard_ceiling_seconds"],
+                    "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
+                },
+                normalized_change["candidate"],
+            )
 
             self.assertEqual(normalized, control)
             self.assertEqual(normalized_change, change)
+            self.assertEqual(
+                gate.candidate["estimated_cost"]["formal_paired"]["basis"],
+                "declared_upper_bound",
+            )
             self.assertIsNot(normalized, control)
             self.assertIsNot(normalized_change, change)
             control["mutation"]["project_paths"].append("later")
@@ -4620,8 +4647,7 @@ class WorkloadRoundTests(unittest.TestCase):
             control, run_dir, project = self._workspace(root)
             self.controller.start_run(control, run_dir)
             change = self._change()
-            change["candidate"]["estimated_cost"]["formal_paired"] = 90.0
-            change["candidate"]["estimated_cost"]["service"] = 90.0
+            change["candidate"]["estimated_cost"]["formal_paired"]["p90_seconds"] = 90.0
             self.controller.register_change(control, run_dir, change)
             config = project / "configs" / "value.json"
             config.write_text('{"workers": 8}\n', encoding="utf-8")

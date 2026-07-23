@@ -1583,12 +1583,26 @@ class Sm120AcceptanceTests(unittest.TestCase):
                 "claim_layer": "workload",
                 "cheapest_falsifier": "static_review",
                 "estimated_cost": {
-                    "static_review": 1,
-                    "build_correctness": 10,
-                    "short_paired": 30,
-                    "profiler": 60,
-                    "formal_paired": 120,
-                    "service": 300,
+                    "static_review": {
+                        "p90_seconds": 1,
+                        "basis": "declared_upper_bound",
+                    },
+                    "build_correctness": {
+                        "p90_seconds": 10,
+                        "basis": "declared_upper_bound",
+                    },
+                    "short_paired": {
+                        "p90_seconds": 30,
+                        "basis": "declared_upper_bound",
+                    },
+                    "profiler": {
+                        "p90_seconds": 60,
+                        "basis": "declared_upper_bound",
+                    },
+                    "formal_paired": {
+                        "p90_seconds": 120,
+                        "basis": "declared_upper_bound",
+                    },
                 },
                 "minimum_effect": {"metric": "service_pct", "value": 1.0},
                 "rejection_condition": "upper_bound_below_minimum_or_gate_failed",

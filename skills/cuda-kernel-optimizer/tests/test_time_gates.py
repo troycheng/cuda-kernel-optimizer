@@ -56,12 +56,26 @@ class TimeGateTests(unittest.TestCase):
             "claim_layer": "kernel",
             "cheapest_falsifier": "static_review",
             "estimated_cost": {
-                "static_review": 1.0,
-                "build_correctness": 4.0,
-                "short_paired": 5.0,
-                "profiler": 10.0,
-                "formal_paired": 20.0,
-                "service": 60.0,
+                "static_review": {
+                    "p90_seconds": 1.0,
+                    "basis": "declared_upper_bound",
+                },
+                "build_correctness": {
+                    "p90_seconds": 4.0,
+                    "basis": "declared_upper_bound",
+                },
+                "short_paired": {
+                    "p90_seconds": 5.0,
+                    "basis": "declared_upper_bound",
+                },
+                "profiler": {
+                    "p90_seconds": 10.0,
+                    "basis": "declared_upper_bound",
+                },
+                "formal_paired": {
+                    "p90_seconds": 20.0,
+                    "basis": "declared_upper_bound",
+                },
             },
             "minimum_effect": {"metric": "mechanism_us", "value": 1.0},
             "rejection_condition": "upper_bound_below_minimum_or_gate_failed",
@@ -468,8 +482,8 @@ class TimeGateTests(unittest.TestCase):
 
     def test_cheaper_late_stage_cannot_bypass_cost_order_or_missing_action(self) -> None:
         self.candidate["cheapest_falsifier"] = "profiler"
-        self.candidate["estimated_cost"]["static_review"] = 100.0
-        self.candidate["estimated_cost"]["profiler"] = 0.5
+        self.candidate["estimated_cost"]["static_review"]["p90_seconds"] = 100.0
+        self.candidate["estimated_cost"]["profiler"]["p90_seconds"] = 0.5
         calls = []
 
         with self.assertRaisesRegex(ValueError, "cost|cheapest_falsifier"):

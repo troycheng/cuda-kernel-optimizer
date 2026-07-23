@@ -408,59 +408,6 @@ def _state_nvcc_bin(state: dict) -> str:
     return value
 
 
-def _sealed_candidate_costs(
-    state: Mapping[str, object], baseline_sha256: str
-) -> dict[str, float] | None:
-    """Return only an identity-bound user authorization, never inferred timing."""
-    raw = state.get("candidate_cost_bound")
-    if not isinstance(raw, Mapping) or set(raw) != {
-        "basis",
-        "freshness",
-        "input_hash",
-        "baseline_sha256",
-        "p90_seconds",
-    }:
-        return None
-    if (
-        raw.get("basis") != "user_authorized_upper_bound"
-        or raw.get("freshness") != "current"
-        or raw.get("input_hash") != state.get("input_hash")
-        or raw.get("baseline_sha256") != baseline_sha256
-    ):
-        return None
-    costs = raw.get("p90_seconds")
-    required = {
-        "static_review",
-        "build_correctness",
-        "short_paired",
-        "formal_paired",
-        "service",
-    }
-    if not isinstance(costs, Mapping) or set(costs) != required:
-        return None
-    normalized = {}
-    for stage in required:
-        value = costs[stage]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, Real)
-            or not math.isfinite(float(value))
-            or float(value) <= 0
-        ):
-            return None
-        normalized[stage] = float(value)
-    ordered = [normalized[stage] for stage in (
-        "static_review",
-        "build_correctness",
-        "short_paired",
-        "formal_paired",
-        "service",
-    )]
-    if any(later < earlier for earlier, later in zip(ordered, ordered[1:])):
-        return None
-    return normalized
-
-
 def run(state_path: str, iteration: int, benchmark_py: str = None,
         warmup: int = 10, repeat: int = 20) -> dict:
     state = _load_json(state_path)
@@ -480,7 +427,6 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
         raise ValueError("state best_file must be a non-symlink regular file")
     baseline_file = str(baseline_path.absolute())
     baseline_sha256 = sha256_file(baseline_file)
-    candidate_costs = _sealed_candidate_costs(state, baseline_sha256)
     required_method_ids = sorted(
         {
             item.get("id")
@@ -597,34 +543,6 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
             "candidate_sha256": None,
             "profiler": None,
         }
-
-        if candidate_costs is None:
-            result["candidate_gate"] = {
-                "decision": "REVIEW_REQUIRED",
-                "elapsed_seconds": max(
-                    0.0, time.monotonic() - exploration_started
-                ),
-                "stop_reason": "cost_unavailable_for_next_action",
-                "skipped_expensive_stages": [
-                    "static_review",
-                    "build_correctness",
-                    "short_paired",
-                    "formal_paired",
-                ],
-                "completed_stages": [],
-                "soft_target_exceeded": False,
-                "next_stage": "static_review",
-                "blocked_action": {
-                    "action_id": "static_review",
-                    "p90_seconds": None,
-                    "reason": "cost_unavailable_for_next_action",
-                },
-                "projected_spend": {"p90_seconds": None},
-                "candidate_sha256": None,
-            }
-            results.append(result)
-            print(f"[branch {idx}] REVIEW_REQUIRED  N/A", file=sys.stderr)
-            continue
 
         def static_review():
             candidate_path = Path(kernel)
@@ -749,6 +667,7 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
                 "lower_bound": lower_bound_us,
             }
 
+        formal_cost = max(2.0, float(blocks))
         gate = CandidateGate(
             {
                 "soft_target_seconds": soft_target_seconds,
@@ -761,7 +680,24 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
             {
                 "claim_layer": "kernel",
                 "cheapest_falsifier": "static_review",
-                "estimated_cost": copy.deepcopy(candidate_costs),
+                "estimated_cost": {
+                    "static_review": {
+                        "p90_seconds": 0.01,
+                        "basis": "declared_upper_bound",
+                    },
+                    "build_correctness": {
+                        "p90_seconds": 1.0,
+                        "basis": "declared_upper_bound",
+                    },
+                    "short_paired": {
+                        "p90_seconds": 2.0,
+                        "basis": "declared_upper_bound",
+                    },
+                    "formal_paired": {
+                        "p90_seconds": formal_cost,
+                        "basis": "declared_upper_bound",
+                    },
+                },
                 "minimum_effect": {
                     "metric": "mechanism_us",
                     "value": minimum_effect_us,
@@ -833,24 +769,9 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
     }
 
     if not shortlist:
-        review_gate = next(
-            (
-                result.get("candidate_gate")
-                for result in results
-                if result.get("candidate_gate", {}).get("decision")
-                == "REVIEW_REQUIRED"
-            ),
-            None,
-        )
-        terminal_status = (
-            "review_required" if review_gate is not None else "no_confirmed_kernel_win"
-        )
         output = {
             "iter": iteration,
-            "status": terminal_status,
-            "terminal_reason": (
-                None if review_gate is None else review_gate["stop_reason"]
-            ),
+            "status": "no_confirmed_kernel_win",
             "branches": results,
             "champion": None,
             "shortlist": [],
@@ -865,10 +786,7 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
         _write_json(
             os.path.join(iter_dir, "decision.json"),
             {
-                "status": terminal_status,
-                "terminal_reason": (
-                    None if review_gate is None else review_gate["stop_reason"]
-                ),
+                "status": "no_confirmed_kernel_win",
                 "candidate_file": None,
                 "statistics": None,
             },

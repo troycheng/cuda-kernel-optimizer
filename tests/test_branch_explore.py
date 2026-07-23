@@ -18,6 +18,7 @@ SCRIPTS = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts"
 BRANCH_EXPLORE_PATH = SCRIPTS / "branch_explore.py"
 RUN_ITERATION_PATH = SCRIPTS / "run_iteration.py"
 STATE_PATH = SCRIPTS / "state.py"
+ORCHESTRATE_PATH = SCRIPTS / "orchestrate.py"
 
 
 def _load(path: Path, name: str):
@@ -34,6 +35,10 @@ def _load_branch_explore():
 
 def _load_run_iteration():
     return _load(RUN_ITERATION_PATH, "cuda_optimizer_run_iteration")
+
+
+def _load_orchestrate():
+    return _load(ORCHESTRATE_PATH, "cuda_optimizer_orchestrate")
 
 
 def _bench(passed: bool = True, average: float = 1.0) -> dict:
@@ -91,49 +96,34 @@ class BranchExploreTests(unittest.TestCase):
                 {"id": "fastsort.store", "iter": 124}
             ],
         }
-        payload["candidate_cost_bound"] = {
-            "basis": "user_authorized_upper_bound",
-            "freshness": "current",
-            "input_hash": payload["input_hash"],
-            "baseline_sha256": hashlib.sha256(baseline.read_bytes()).hexdigest(),
-            "p90_seconds": {
-                "static_review": 0.25,
-                "build_correctness": 1.0,
-                "short_paired": 2.0,
-                "formal_paired": 2.0,
-                "service": 2.0,
-            },
-        }
         state_path = root / "state.json"
         state_path.write_text(json.dumps(payload), encoding="utf-8")
         return state_path, payload
 
-    def test_missing_explicit_candidate_cost_bound_reviews_before_launch(self) -> None:
+    def test_branch_explore_terminal_status_is_accepted_by_orchestrate(self) -> None:
         branch_explore = _load_branch_explore()
+        orchestrate = _load_orchestrate()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            state_path, payload = self._state(root, branches=1)
-            del payload["candidate_cost_bound"]
-            state_path.write_text(json.dumps(payload), encoding="utf-8")
+            state_path, _payload = self._state(root, branches=1)
             with mock.patch.object(
                 branch_explore,
                 "_bench_kernel",
-                side_effect=AssertionError("unbounded candidate action launched"),
-            ) as benchmark:
+                return_value=_bench(),
+            ), mock.patch.object(
+                branch_explore,
+                "_paired_candidate",
+                return_value=_statistics("inconclusive", 0.2),
+            ):
                 with contextlib.redirect_stdout(io.StringIO()):
                     output = branch_explore.run(str(state_path), iteration=1)
 
-            benchmark.assert_not_called()
-            self.assertEqual(output["status"], "review_required")
+            self.assertEqual(output["status"], "no_confirmed_kernel_win")
+            artifact = root / "run" / "iterv1" / "branch_results.json"
             self.assertEqual(
-                output["terminal_reason"], "cost_unavailable_for_next_action"
+                orchestrate._read_branch_results(str(artifact))["status"],
+                output["status"],
             )
-            gate = output["branches"][0]["candidate_gate"]
-            self.assertEqual(gate["decision"], "REVIEW_REQUIRED")
-            self.assertEqual(
-                gate["stop_reason"], "cost_unavailable_for_next_action"
-            )
-            self.assertIsNone(gate["projected_spend"]["p90_seconds"])
 
     def test_failed_benchmark_cannot_reuse_a_stale_passing_result(self) -> None:
         branch_explore = _load_branch_explore()
@@ -252,6 +242,7 @@ class BranchExploreTests(unittest.TestCase):
 
     def test_only_confirmed_win_enters_shortlist_and_writes_decision(self) -> None:
         branch_explore = _load_branch_explore()
+        orchestrate = _load_orchestrate()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state_path, _payload = self._state(root)
@@ -271,6 +262,12 @@ class BranchExploreTests(unittest.TestCase):
                     output = branch_explore.run(str(state_path), iteration=1)
 
             self.assertEqual(output["status"], "shortlist_ready")
+            self.assertEqual(
+                orchestrate._read_branch_results(
+                    str(root / "run" / "iterv1" / "branch_results.json")
+                )["status"],
+                "shortlist_ready",
+            )
             self.assertEqual([item["branch_index"] for item in output["shortlist"]], [2])
             self.assertEqual(output["champion"], output["shortlist"][0])
             self.assertEqual(output["champion"]["status"], "confirmed_win")
@@ -467,7 +464,6 @@ class BranchExploreTests(unittest.TestCase):
             root = Path(tmp)
             state_path, payload = self._state(root, branches=2)
             payload["input_hash"] = "a" * 64
-            payload["candidate_cost_bound"]["input_hash"] = payload["input_hash"]
             payload["budget"].update(
                 {"max_pairs": 2, "max_seconds": 7.0, "soft_target_seconds": 7.0}
             )
@@ -549,7 +545,6 @@ class BranchExploreTests(unittest.TestCase):
             root = Path(tmp)
             state_path, payload = self._state(root, branches=1)
             payload["input_hash"] = "b" * 64
-            payload["candidate_cost_bound"]["input_hash"] = payload["input_hash"]
             payload["budget"].update(
                 {"max_pairs": 2, "max_seconds": 5.5, "soft_target_seconds": 5.5}
             )

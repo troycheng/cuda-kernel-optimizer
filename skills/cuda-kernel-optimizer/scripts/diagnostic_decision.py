@@ -371,7 +371,7 @@ def _investment_inputs(
         )
     elapsed = max(timed, explicit)
     if authorization is None:
-        maximum = elapsed + 86400.0
+        maximum = elapsed
     else:
         maximum = _number(
             _object(authorization, "authorization").get("max_seconds"),

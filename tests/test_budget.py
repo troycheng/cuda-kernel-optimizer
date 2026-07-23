@@ -32,6 +32,16 @@ budget = _load_budget()
 INVALID_TIME_VALUES = (True, False, "100", float("nan"), float("inf"), float("-inf"))
 
 
+def _declared_costs(**p90_seconds):
+    return {
+        stage: {
+            "p90_seconds": seconds,
+            "basis": "declared_upper_bound",
+        }
+        for stage, seconds in p90_seconds.items()
+    }
+
+
 class BudgetPolicyTests(unittest.TestCase):
     def test_presets_have_expected_fields(self) -> None:
         expected = {
@@ -266,6 +276,64 @@ class BudgetClockTests(unittest.TestCase):
 
 
 class CandidateGateTests(unittest.TestCase):
+    def test_workload_costs_stop_at_formal_paired(self) -> None:
+        contract = {
+            "soft_target_seconds": 30,
+            "hard_ceiling_seconds": 300,
+            "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
+        }
+        candidate = {
+            "claim_layer": "workload",
+            "cheapest_falsifier": "static_review",
+            "estimated_cost": _declared_costs(
+                static_review=4,
+                build_correctness=1,
+                short_paired=3,
+                formal_paired=2,
+            ),
+            "minimum_effect": {"metric": "service_pct", "value": 0.5},
+            "rejection_condition": "any gate fails",
+            "promotion_condition": "formal lower bound passes",
+        }
+
+        validated = budget.validate_candidate_declaration(candidate, contract)
+
+        self.assertNotIn("service", validated["estimated_cost"])
+        self.assertEqual(
+            validated["estimated_cost"]["build_correctness"]["p90_seconds"], 1.0
+        )
+        for stage in ("static_review", "build_correctness", "short_paired", "formal_paired"):
+            with self.subTest(missing_stage=stage):
+                incomplete = dict(candidate)
+                incomplete["estimated_cost"] = dict(candidate["estimated_cost"])
+                del incomplete["estimated_cost"][stage]
+                with self.assertRaisesRegex(ValueError, "mandatory candidate stage"):
+                    budget.validate_candidate_declaration(incomplete, contract)
+        invalid_p90 = dict(candidate)
+        invalid_p90["estimated_cost"] = dict(candidate["estimated_cost"])
+        invalid_p90["estimated_cost"]["formal_paired"] = {
+            "basis": "declared_upper_bound"
+        }
+        with self.assertRaisesRegex(
+            ValueError, "estimated_cost.formal_paired.p90_seconds"
+        ):
+            budget.validate_candidate_declaration(invalid_p90, contract)
+        invalid_basis = dict(candidate)
+        invalid_basis["estimated_cost"] = dict(candidate["estimated_cost"])
+        invalid_basis["estimated_cost"]["formal_paired"] = {
+            "p90_seconds": 5,
+            "basis": "identity_matched_history",
+        }
+        with self.assertRaisesRegex(ValueError, "estimated_cost.formal_paired.basis"):
+            budget.validate_candidate_declaration(invalid_basis, contract)
+        with_service = dict(candidate)
+        with_service["estimated_cost"] = {
+            **candidate["estimated_cost"],
+            **_declared_costs(service=6),
+        }
+        with self.assertRaisesRegex(ValueError, "applicable candidate stages"):
+            budget.validate_candidate_declaration(with_service, contract)
+
     def test_profiler_action_without_cost_fails_closed_before_any_action(self) -> None:
         gate = budget.CandidateGate(
             {
@@ -276,13 +344,12 @@ class CandidateGateTests(unittest.TestCase):
             {
                 "claim_layer": "workload",
                 "cheapest_falsifier": "static_review",
-                "estimated_cost": {
-                    "static_review": 1,
-                    "build_correctness": 2,
-                    "short_paired": 3,
-                    "formal_paired": 5,
-                    "service": 6,
-                },
+                "estimated_cost": _declared_costs(
+                    static_review=1,
+                    build_correctness=2,
+                    short_paired=3,
+                    formal_paired=5,
+                ),
                 "minimum_effect": {"metric": "service_pct", "value": 0.5},
                 "rejection_condition": "any gate fails",
                 "promotion_condition": "formal lower bound passes",
@@ -344,14 +411,13 @@ class CandidateGateTests(unittest.TestCase):
             {
                 "claim_layer": "kernel",
                 "cheapest_falsifier": "static_review",
-                "estimated_cost": {
-                    "static_review": 1,
-                    "build_correctness": 2,
-                    "short_paired": 3,
-                    "profiler": 4,
-                    "formal_paired": 5,
-                    "service": 6,
-                },
+                "estimated_cost": _declared_costs(
+                    static_review=1,
+                    build_correctness=2,
+                    short_paired=3,
+                    profiler=4,
+                    formal_paired=5,
+                ),
                 "minimum_effect": {"metric": "mechanism_us", "value": 1.0},
                 "rejection_condition": "any gate fails",
                 "promotion_condition": "formal lower bound passes",
@@ -378,14 +444,13 @@ class CandidateGateTests(unittest.TestCase):
             {
                 "claim_layer": "kernel",
                 "cheapest_falsifier": "static_review",
-                "estimated_cost": {
-                    "static_review": 4,
-                    "build_correctness": 4,
-                    "short_paired": 4,
-                    "profiler": 4,
-                    "formal_paired": 4,
-                    "service": 4,
-                },
+                "estimated_cost": _declared_costs(
+                    static_review=4,
+                    build_correctness=4,
+                    short_paired=4,
+                    profiler=4,
+                    formal_paired=4,
+                ),
                 "minimum_effect": {"metric": "mechanism_us", "value": 1.0},
                 "rejection_condition": "any evidence gate fails",
                 "promotion_condition": "formal lower bound passes",
@@ -413,14 +478,13 @@ class CandidateGateTests(unittest.TestCase):
             {
                 "claim_layer": "workload",
                 "cheapest_falsifier": "static_review",
-                "estimated_cost": {
-                    "static_review": 1,
-                    "build_correctness": 2,
-                    "short_paired": 3,
-                    "profiler": 4,
-                    "formal_paired": 5,
-                    "service": 6,
-                },
+                "estimated_cost": _declared_costs(
+                    static_review=1,
+                    build_correctness=2,
+                    short_paired=3,
+                    profiler=4,
+                    formal_paired=5,
+                ),
                 "minimum_effect": {"metric": "service_pct", "value": 0.5},
                 "rejection_condition": "any gate fails",
                 "promotion_condition": "all gates pass",

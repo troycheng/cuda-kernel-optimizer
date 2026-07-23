@@ -709,7 +709,10 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     ],
                 )
                 decision = self.decision_module.decide_next_step(
-                    model, hypothesis_result, selection
+                    model,
+                    hypothesis_result,
+                    selection,
+                    authorization={"max_seconds": 100.0},
                 )
 
                 self.assertEqual(decision["decision"], "MEASURE")
@@ -2213,8 +2216,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 )
                 change = helper._change("fast")
                 change["diagnosis_ids"] = ["h-framework-gap"]
-                change["candidate"]["estimated_cost"]["formal_paired"] = 90.0
-                change["candidate"]["estimated_cost"]["service"] = 90.0
+                change["candidate"]["estimated_cost"]["formal_paired"]["p90_seconds"] = 90.0
                 helper.controller.seal_active_diagnosis_candidate_proposal(
                     control,
                     run_dir,

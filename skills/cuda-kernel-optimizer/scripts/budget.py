@@ -184,6 +184,7 @@ _CLAIM_LAST_STAGE = {
     "serving": "service",
 }
 _PROJECTED_SPEND_UNSET = object()
+_DECLARED_UPPER_BOUND = "declared_upper_bound"
 
 
 def maintenance_budget_seconds(hard_ceiling_seconds: float) -> float:
@@ -249,31 +250,48 @@ def _validate_candidate(value: Mapping, contract: Mapping) -> dict:
     if value["cheapest_falsifier"] not in _CANDIDATE_STAGES:
         raise ValueError("cheapest_falsifier is invalid")
     costs = value["estimated_cost"]
-    required_costs = set(_CANDIDATE_STAGES) - {"profiler"}
+    last_stage = _CLAIM_LAST_STAGE[claim]
+    applicable_stages = _CANDIDATE_STAGES[
+        : _CANDIDATE_STAGES.index(last_stage) + 1
+    ]
+    required_costs = set(applicable_stages) - {"profiler"}
     if (
         not isinstance(costs, Mapping)
         or not required_costs.issubset(costs)
-        or not set(costs).issubset(_CANDIDATE_STAGES)
+        or not set(costs).issubset(applicable_stages)
     ):
         raise ValueError(
-            "estimated_cost must cover every mandatory candidate stage"
+            "estimated_cost must cover every mandatory candidate stage and only "
+            "applicable candidate stages"
         )
-    clean_costs = {
-        stage: _positive_number(costs[stage], f"estimated_cost.{stage}")
-        for stage in _CANDIDATE_STAGES
-        if stage in costs
-    }
-    last_stage = _CLAIM_LAST_STAGE[claim]
+    clean_costs = {}
+    for stage in _CANDIDATE_STAGES:
+        if stage not in costs:
+            continue
+        raw_cost = costs[stage]
+        if not isinstance(raw_cost, Mapping):
+            raise ValueError(f"estimated_cost.{stage} must be a mapping")
+        if "p90_seconds" not in raw_cost:
+            raise ValueError(f"estimated_cost.{stage}.p90_seconds is required")
+        if "basis" not in raw_cost:
+            raise ValueError(f"estimated_cost.{stage}.basis is required")
+        if set(raw_cost) != {"p90_seconds", "basis"}:
+            raise ValueError(
+                f"estimated_cost.{stage} fields are invalid"
+            )
+        if raw_cost["basis"] != _DECLARED_UPPER_BOUND:
+            raise ValueError(f"estimated_cost.{stage}.basis is invalid")
+        clean_costs[stage] = {
+            "p90_seconds": _positive_number(
+                raw_cost["p90_seconds"], f"estimated_cost.{stage}.p90_seconds"
+            ),
+            "basis": _DECLARED_UPPER_BOUND,
+        }
     applicable = [
         stage
-        for stage in _CANDIDATE_STAGES[: _CANDIDATE_STAGES.index(last_stage) + 1]
+        for stage in applicable_stages
         if stage in clean_costs
     ]
-    for earlier, later in zip(applicable, applicable[1:]):
-        if clean_costs[later] < clean_costs[earlier]:
-            raise ValueError(
-                "estimated_cost must be nondecreasing in executable stage order"
-            )
     cheapest = applicable[0]
     if value["cheapest_falsifier"] != cheapest:
         raise ValueError(
@@ -421,7 +439,7 @@ class CandidateGate:
             elapsed = self.pre_gate_elapsed_seconds + max(
                 0.0, float(self.now()) - started
             )
-            p90 = self.candidate["estimated_cost"][stage]
+            p90 = self.candidate["estimated_cost"][stage]["p90_seconds"]
             projected = elapsed + p90
             if projected > self.contract["hard_ceiling_seconds"]:
                 return self._result(
