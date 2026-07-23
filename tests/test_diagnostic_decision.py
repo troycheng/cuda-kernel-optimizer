@@ -96,6 +96,43 @@ class DiagnosticDecisionTests(unittest.TestCase):
             ).encode("utf-8")
         ).hexdigest()
 
+    def test_initial_investment_brief_is_bootstrap_bound_and_has_no_invented_cost(
+        self,
+    ) -> None:
+        model = self.model()
+        model["uncertainties"] = ["framework attribution is incomplete"]
+        primary = max(
+            model["node_directions"],
+            key=lambda item: item["benefit_ceiling_us"],
+        )
+
+        brief = self.module.build_initial_investment_brief(
+            model,
+            bootstrap_execution_seconds=12.5,
+        )
+
+        self.assertEqual(
+            brief,
+            {
+                "schema_version": "cuda-optimizer/initial-investment-brief-v1",
+                "primary_bottleneck": {
+                    "node_id": primary["node_id"],
+                    "layer": primary["layer"],
+                    "removable_time_ceiling_us": primary["benefit_ceiling_us"],
+                    "basis": primary["basis"],
+                },
+                "minimum_effect_us": model["minimum_effect_us"],
+                "largest_uncertainty": "framework attribution is incomplete",
+                "bootstrap_execution_seconds": 12.5,
+                "cost": {
+                    "p50_seconds": None,
+                    "p90_seconds": None,
+                    "basis": "unavailable",
+                },
+                "next_checkpoint": "propose_hypotheses",
+            },
+        )
+
     def test_unknown_selected_action_requires_review_without_inventing_cost(self) -> None:
         hypotheses = self.hypotheses()
         result = self.module.decide_next_step(

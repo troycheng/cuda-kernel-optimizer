@@ -306,6 +306,21 @@ def _change_set() -> dict:
     }
 
 
+def _run_grant(grant_id: str = "grant-initial", **overrides) -> dict:
+    grant = {
+        "schema_version": "cuda-workload-optimizer/authorization-v1",
+        "grant_id": grant_id,
+        "source": "initial_request",
+        "interaction_mode": "unattended",
+        "max_controlled_seconds": 3600,
+        "allowed_mutation_scopes": ["project"],
+        "max_risk": "medium",
+        "max_stage": "formal_paired",
+    }
+    grant.update(overrides)
+    return grant
+
+
 class WorkloadControllerContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.controller = _load_controller()
@@ -1651,21 +1666,216 @@ class WorkloadRoundTests(unittest.TestCase):
             )
             self.assertTrue((run_dir / "baseline" / "observation.json").is_file())
 
-    def test_active_diagnosis_builds_hash_bound_context_and_waits_for_ai(self) -> None:
+    def test_readiness_execution_uses_only_monotonic_gate_call_duration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            run_dir.mkdir()
+            reports = [
+                {"status": "ready", "can_start_diagnosis": True, "call": 1},
+                {"status": "ready", "can_start_diagnosis": True, "call": 2},
+            ]
+
+            with mock.patch.object(
+                self.controller,
+                "_run_readiness_gate",
+                side_effect=reports,
+            ), mock.patch.object(
+                self.controller.time,
+                "monotonic",
+                side_effect=(10.0, 12.0, 1000.0, 1003.0),
+            ), mock.patch.object(
+                self.controller.time,
+                "time",
+                side_effect=(100.0, 1000000.0),
+            ):
+                self.controller._run_readiness_gate_checked(control, run_dir, {})
+                self.controller._run_readiness_gate_checked(control, run_dir, {})
+
+            executions = [
+                json.loads(path.read_text("utf-8"))
+                for path in sorted(
+                    (run_dir / "readiness" / "executions").glob("*.json")
+                )
+            ]
+            self.assertEqual(
+                [item["sequence"] for item in executions],
+                [1, 2],
+            )
+            self.assertEqual(
+                [item["duration_seconds"] for item in executions],
+                [2.0, 3.0],
+            )
+            self.assertEqual(
+                sum(item["duration_seconds"] for item in executions),
+                5.0,
+            )
+
+    def test_command_workload_active_diagnosis_uses_unified_baseline_execution(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            manifest_path = project / "workload.json"
+            manifest = json.loads(manifest_path.read_text("utf-8"))
+            command_runner = project / "command_workload.py"
+            command_runner.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['CUDA_OPTIMIZER_OUTPUT']).write_text(json.dumps({\n"
+                "  'validation': {'valid': True},\n"
+                "  'benchmark': {'p50_latency_ms': 100.0, 'memory_mb': 100.0},\n"
+                "}))\n",
+                encoding="utf-8",
+            )
+            command_runner.chmod(0o755)
+            manifest["kind"] = "command"
+            manifest["source"] = [str(command_runner)]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+
+            state = self.controller.start_run(control, run_dir)
+
+            self.assertEqual(state["next_action"], "propose_hypotheses")
+            baseline_executions = [
+                json.loads(path.read_text("utf-8"))
+                for path in sorted(
+                    (run_dir / "baseline" / "executions").glob("*.json")
+                )
+            ]
+            self.assertEqual(len(baseline_executions), 1)
+            baseline_execution = baseline_executions[0]
+            self.assertEqual(
+                baseline_execution["schema_version"],
+                "cuda-workload-optimizer/baseline-execution-v1",
+            )
+            self.assertGreaterEqual(baseline_execution["duration_seconds"], 0.0)
+            initial_brief = json.loads(
+                (
+                    run_dir
+                    / "active_diagnosis"
+                    / "initial_investment_brief.json"
+                ).read_text("utf-8")
+            )
+            self.assertGreaterEqual(
+                initial_brief["bootstrap_execution_seconds"],
+                baseline_execution["duration_seconds"],
+            )
+
+    def test_failed_baseline_resume_accumulates_every_measurement_duration(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             control, run_dir, _project = self._workspace(root)
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
+            evaluate = self.controller._load_evaluate_module()
+            original_measure = evaluate.measure_candidate
+            measure_calls = 0
+
+            def fail_first_measurement(*args, **kwargs):
+                nonlocal measure_calls
+                measure_calls += 1
+                result = original_measure(*args, **kwargs)
+                if measure_calls == 1:
+                    result = copy.deepcopy(result)
+                    result["status"] = "failed"
+                return result
+
+            with mock.patch.object(
+                evaluate,
+                "measure_candidate",
+                side_effect=fail_first_measurement,
+            ):
+                with self.assertRaisesRegex(
+                    self.controller.ValidationError,
+                    "baseline workload failed",
+                ):
+                    self.controller.start_run(control, run_dir)
+                self.assertEqual(
+                    self.controller.read_run_state(run_dir)["next_action"],
+                    "baseline",
+                )
+                resumed = self.controller.resume_run(run_dir)
+
+            self.assertEqual(measure_calls, 2)
+            self.assertEqual(resumed["next_action"], "propose_hypotheses")
+            baseline_records = [
+                json.loads(path.read_text("utf-8"))
+                for path in sorted(
+                    (run_dir / "baseline" / "executions").glob("*.json")
+                )
+            ]
+            self.assertEqual(
+                [record["sequence"] for record in baseline_records],
+                [1, 2],
+            )
+            self.assertEqual(
+                [record["status"] for record in baseline_records],
+                ["failed", "measured"],
+            )
+            baseline_seconds = sum(
+                record["duration_seconds"] for record in baseline_records
+            )
+            readiness_seconds = sum(
+                json.loads(path.read_text("utf-8"))["duration_seconds"]
+                for path in sorted(
+                    (run_dir / "readiness" / "executions").glob("*.json")
+                )
+            )
+            profile_seconds = json.loads(
+                (run_dir / "probes" / "timeline.execution.json").read_text(
+                    "utf-8"
+                )
+            )["duration_seconds"]
+            brief = json.loads(
+                (
+                    run_dir
+                    / "active_diagnosis"
+                    / "initial_investment_brief.json"
+                ).read_text("utf-8")
+            )
+            self.assertAlmostEqual(
+                brief["bootstrap_execution_seconds"]
+                - readiness_seconds
+                - profile_seconds,
+                baseline_seconds,
+            )
+
+    def test_active_diagnosis_builds_hash_bound_context_and_waits_for_ai(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            normalized = self.controller.validate_control_manifest(control)
+            project_identity_before = self.controller._identity(
+                normalized, "project"
+            )["digest"]
 
             state = self.controller.start_run(control, run_dir)
 
             self.assertEqual(state["stage"], "active_diagnosis")
             self.assertEqual(state["next_action"], "propose_hypotheses")
             self.assertEqual(
+                state["investment_control_version"],
+                "run-grant-v1",
+            )
+            self.assertEqual(
                 state["completed_stages"],
                 ["readiness", "baseline", "probes", "diagnosis", "diagnosis_context"],
             )
+            self.assertEqual(
+                self.controller._identity(normalized, "project")["digest"],
+                project_identity_before,
+            )
+            self.assertTrue(project.is_dir())
             context = json.loads((run_dir / "diagnosis_context.json").read_text("utf-8"))
             self.assertEqual(
                 context["schema_version"],
@@ -1693,6 +1903,417 @@ class WorkloadRoundTests(unittest.TestCase):
                 context["knowledge_context"]["promotion_authority"], "none"
             )
             self.assertTrue((run_dir / "active_diagnosis" / "ledger" / "000001-context.json").is_file())
+            initial_brief = json.loads(
+                (
+                    run_dir
+                    / "active_diagnosis"
+                    / "initial_investment_brief.json"
+                ).read_text("utf-8")
+            )
+            readiness_seconds = sum(
+                json.loads(path.read_text("utf-8"))["duration_seconds"]
+                for path in (
+                    run_dir / "readiness" / "executions"
+                ).glob("*.json")
+            )
+            baseline_seconds = sum(
+                json.loads(path.read_text("utf-8"))["duration_seconds"]
+                for path in (
+                    run_dir / "baseline" / "executions"
+                ).glob("*.json")
+            )
+            bounded_python_attempts = list(
+                (run_dir / "workload_attempts").glob(
+                    "baseline-workload-*/execution.json"
+                )
+            )
+            self.assertTrue(bounded_python_attempts)
+            profile_seconds = json.loads(
+                (run_dir / "probes" / "timeline.execution.json").read_text(
+                    "utf-8"
+                )
+            )["duration_seconds"]
+            self.assertAlmostEqual(
+                initial_brief["bootstrap_execution_seconds"],
+                readiness_seconds + baseline_seconds + profile_seconds,
+            )
+            self.assertEqual(
+                initial_brief["next_checkpoint"],
+                "propose_hypotheses",
+            )
+            self.assertIsNone(initial_brief["cost"]["p50_seconds"])
+            self.assertIsNone(initial_brief["cost"]["p90_seconds"])
+            self.assertEqual(initial_brief["cost"]["basis"], "unavailable")
+            self.assertEqual(
+                state["initial_investment_brief_sha256"],
+                self.controller._canonical_digest(initial_brief),
+            )
+
+    def test_context_state_commit_fault_resumes_with_one_complete_state_write(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            original_atomic_json = self.controller._atomic_json
+            state_commit_attempts = 0
+
+            def fail_first_context_state_commit(path, value):
+                nonlocal state_commit_attempts
+                path = Path(path)
+                context_artifacts_ready = (
+                    (
+                        run_dir
+                        / "active_diagnosis"
+                        / "initial_investment_brief.json"
+                    ).is_file()
+                    and (
+                        run_dir
+                        / "active_diagnosis"
+                        / "ledger"
+                        / "000001-context.json"
+                    ).is_file()
+                )
+                if path == run_dir / "state_commit.json" and context_artifacts_ready:
+                    state_commit_attempts += 1
+                    if state_commit_attempts == 1:
+                        raise OSError("context state commit interrupted")
+                return original_atomic_json(path, value)
+
+            with mock.patch.object(
+                self.controller,
+                "_atomic_json",
+                side_effect=fail_first_context_state_commit,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "context state commit interrupted",
+                ):
+                    self.controller.start_run(control, run_dir)
+                interrupted = self.controller.read_run_state(run_dir)
+                self.assertEqual(interrupted["next_action"], "diagnosis_context")
+                resumed = self.controller.resume_run(run_dir)
+
+            self.assertEqual(state_commit_attempts, 2)
+            self.assertEqual(resumed["next_action"], "propose_hypotheses")
+            self.assertEqual(
+                resumed["completed_stages"],
+                [
+                    "readiness",
+                    "baseline",
+                    "probes",
+                    "diagnosis",
+                    "diagnosis_context",
+                ],
+            )
+            self.assertEqual(len(resumed["diagnosis_context_sha256"]), 64)
+            self.assertEqual(len(resumed["initial_investment_brief_sha256"]), 64)
+            authorized = self.controller.authorize_run(
+                control,
+                run_dir,
+                _run_grant("grant-after-context-recovery"),
+            )
+            self.assertEqual(len(authorized["authorization_grant_sha256"]), 64)
+
+    def test_authorize_run_fails_closed_and_replays_same_grant_idempotently(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            self.controller.start_run(control, run_dir)
+
+            invalid_grants = (
+                _run_grant(allowed_mutation_scopes=["host"]),
+                _run_grant(max_risk="critical"),
+                _run_grant(max_stage="service"),
+                _run_grant(max_controlled_seconds=-1),
+                _run_grant(max_controlled_seconds=True),
+            )
+            for grant in invalid_grants:
+                with self.subTest(grant=grant), self.assertRaises(
+                    self.controller.ValidationError
+                ):
+                    self.controller.authorize_run(control, run_dir, grant)
+
+            brief_path = (
+                run_dir / "active_diagnosis" / "initial_investment_brief.json"
+            )
+            original_brief = json.loads(brief_path.read_text("utf-8"))
+            tampered_brief = copy.deepcopy(original_brief)
+            tampered_brief["bootstrap_execution_seconds"] += 1.0
+            brief_path.write_text(json.dumps(tampered_brief), encoding="utf-8")
+            with self.assertRaisesRegex(
+                self.controller.ValidationError,
+                "initial investment brief.*drift",
+            ):
+                self.controller.authorize_run(
+                    control, run_dir, _run_grant("grant-tampered-brief")
+                )
+            brief_path.write_text(json.dumps(original_brief), encoding="utf-8")
+
+            grant = _run_grant()
+            authorized = self.controller.authorize_run(control, run_dir, grant)
+            repeated = self.controller.authorize_run(control, run_dir, grant)
+            self.assertEqual(repeated, authorized)
+            self.assertEqual(authorized["next_action"], "propose_hypotheses")
+            grant_path = (
+                run_dir
+                / "active_diagnosis"
+                / "authorization_grants"
+                / "grant-initial.json"
+            )
+            sealed = json.loads(grant_path.read_text("utf-8"))
+            self.assertEqual(
+                set(sealed),
+                set(grant)
+                | {
+                    "control_digest",
+                    "workload_source_hash",
+                    "baseline_identity_digest",
+                    "baseline_environment_identity_digest",
+                    "analysis_epoch_sha256",
+                    "previous_grant_sha256",
+                    "sealed_at_epoch",
+                },
+            )
+            self.assertIsNone(sealed["previous_grant_sha256"])
+            self.assertEqual(
+                authorized["authorization_grant_sha256"],
+                self.controller._canonical_digest(sealed),
+            )
+            first_grant_digest = authorized["authorization_grant_sha256"]
+            events = self.controller._verify_active_diagnosis_ledger(run_dir)
+            self.assertEqual(
+                sum(item["event_type"] == "run-authorization" for item in events),
+                1,
+            )
+
+            changed = _run_grant(max_controlled_seconds=7200)
+            with self.assertRaisesRegex(
+                self.controller.ValidationError,
+                "grant id.*different content",
+            ):
+                self.controller.authorize_run(control, run_dir, changed)
+
+            extension = _run_grant(
+                "grant-extension",
+                source="interactive_confirmation",
+                max_controlled_seconds=7200,
+            )
+            extended = self.controller.authorize_run(
+                control, run_dir, extension
+            )
+            repeated_extension = self.controller.authorize_run(
+                control, run_dir, extension
+            )
+            extension_path = (
+                run_dir
+                / "active_diagnosis"
+                / "authorization_grants"
+                / "grant-extension.json"
+            )
+            sealed_extension = json.loads(extension_path.read_text("utf-8"))
+            self.assertEqual(repeated_extension, extended)
+            self.assertEqual(
+                sealed_extension["previous_grant_sha256"],
+                first_grant_digest,
+            )
+            self.assertEqual(
+                extended["authorization_grant_sha256"],
+                self.controller._canonical_digest(sealed_extension),
+            )
+            self.assertNotEqual(
+                extended["authorization_grant_sha256"],
+                first_grant_digest,
+            )
+            replayed_first = self.controller.authorize_run(
+                control, run_dir, grant
+            )
+            self.assertEqual(replayed_first, extended)
+            self.assertEqual(
+                replayed_first["authorization_grant_sha256"],
+                self.controller._canonical_digest(sealed_extension),
+            )
+            events = self.controller._verify_active_diagnosis_ledger(run_dir)
+            self.assertEqual(
+                sum(item["event_type"] == "run-authorization" for item in events),
+                2,
+            )
+
+            rolled_back = copy.deepcopy(extended)
+            rolled_back["authorization_grant_sha256"] = first_grant_digest
+            self.controller._write_state(run_dir, rolled_back)
+            with self.assertRaises(self.controller.ValidationError):
+                self.controller._load_bound_authorization_grant(
+                    run_dir,
+                    rolled_back,
+                    control,
+                )
+            self.controller._write_state(run_dir, extended)
+
+            spent = copy.deepcopy(extended)
+            spent["controlled_spend_seconds"] = 5000.0
+            self.controller._write_state(run_dir, spent)
+            replayed_after_spend = self.controller.authorize_run(
+                control, run_dir, grant
+            )
+            self.assertEqual(replayed_after_spend, spent)
+            self.assertEqual(
+                sum(
+                    item["event_type"] == "run-authorization"
+                    for item in self.controller._verify_active_diagnosis_ledger(
+                        run_dir
+                    )
+                ),
+                2,
+            )
+
+            (project / "configs" / "value.json").write_text(
+                '{"workers": 99}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                self.controller.ValidationError,
+                "identity drifted",
+            ):
+                self.controller.authorize_run(
+                    control, run_dir, _run_grant("grant-after-drift")
+                )
+
+    def test_uncommitted_authorization_tail_blocks_foreign_proposal_append(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            self.controller.start_run(control, run_dir)
+            grant = _run_grant("grant-ledger-recovery")
+            grant_path = (
+                run_dir
+                / "active_diagnosis"
+                / "authorization_grants"
+                / "grant-ledger-recovery.json"
+            )
+            original_atomic_json = self.controller._atomic_json
+            interrupted = False
+
+            def interrupt_grant_state_commit(path, value):
+                nonlocal interrupted
+                path = Path(path)
+                ledger_has_grant = any(
+                    (run_dir / "active_diagnosis" / "ledger").glob(
+                        "*-run-authorization.json"
+                    )
+                )
+                if (
+                    path == run_dir / "state_commit.json"
+                    and grant_path.is_file()
+                    and ledger_has_grant
+                    and not interrupted
+                ):
+                    interrupted = True
+                    raise OSError("grant state commit interrupted")
+                return original_atomic_json(path, value)
+
+            with mock.patch.object(
+                self.controller,
+                "_atomic_json",
+                side_effect=interrupt_grant_state_commit,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "grant state commit interrupted",
+                ):
+                    self.controller.authorize_run(control, run_dir, grant)
+
+            interrupted_state = self.controller.read_run_state(run_dir)
+            self.assertNotIn(
+                "authorization_grant_sha256",
+                interrupted_state,
+            )
+            hypothesis, request = self._active_proposal(run_dir)
+            with self.assertRaisesRegex(
+                self.controller.ValidationError,
+                "uncommitted|foreign|ledger tail",
+            ):
+                self.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    hypothesis,
+                    request,
+                )
+            self.assertFalse(
+                any(
+                    item["event_type"] == "proposal"
+                    for item in self.controller._verify_active_diagnosis_ledger(
+                        run_dir
+                    )
+                )
+            )
+            with self.assertRaisesRegex(
+                self.controller.ValidationError,
+                "uncommitted|foreign|ledger tail",
+            ):
+                self.controller._prepare_active_diagnosis_event(
+                    run_dir,
+                    "candidate",
+                    {"candidate_sha256": "a" * 64},
+                    created_at_epoch=1.0,
+                )
+            recovered = self.controller.authorize_run(
+                control,
+                run_dir,
+                grant,
+            )
+            self.assertEqual(len(recovered["authorization_grant_sha256"]), 64)
+
+    def test_authorization_validates_prospective_binding_before_state_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            initial = self.controller.start_run(control, run_dir)
+            original_verify = self.controller._verify_active_diagnosis_ledger
+            verification_calls = 0
+
+            def inject_invalid_prospective_ledger(path):
+                nonlocal verification_calls
+                events = original_verify(path)
+                if any(
+                    item["event_type"] == "run-authorization"
+                    for item in events
+                ):
+                    verification_calls += 1
+                    if verification_calls >= 2:
+                        events = copy.deepcopy(events)
+                        events[-1]["payload_sha256"] = "f" * 64
+                return events
+
+            with mock.patch.object(
+                self.controller,
+                "_verify_active_diagnosis_ledger",
+                side_effect=inject_invalid_prospective_ledger,
+            ):
+                with self.assertRaises(self.controller.ValidationError):
+                    self.controller.authorize_run(
+                        control,
+                        run_dir,
+                        _run_grant("grant-prospective-validation"),
+                    )
+
+            committed = self.controller.read_run_state(run_dir)
+            self.assertEqual(committed, initial)
+            self.assertNotIn("authorization_grant_sha256", committed)
 
     def test_diagnosis_action_timeout_is_only_a_kill_deadline_not_p90(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

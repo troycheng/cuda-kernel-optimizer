@@ -1467,6 +1467,187 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 "proposal-cli-framework-0001",
             )
 
+    def test_cli_authorize_run_seals_unattended_grant_without_extra_review(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            helper = workload_fixtures.WorkloadRoundTests()
+            helper.setUp()
+            control, run_dir, _project = helper._workspace(root)
+            workload_fixtures._enable_v2_readiness(control, root)
+            workload_fixtures._enable_active_diagnosis(control, root)
+            initial = helper.controller.start_run(control, run_dir)
+            control_path = root / "control.json"
+            grant_path = root / "grant.json"
+            control_path.write_text(json.dumps(control), encoding="utf-8")
+            grant = workload_fixtures._run_grant("grant-cli")
+            grant_path.write_text(json.dumps(grant), encoding="utf-8")
+            review_paths_before = sorted(
+                path.relative_to(run_dir).as_posix()
+                for path in run_dir.rglob("*review*.json")
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "workload_controller.py"),
+                    "authorize-run",
+                    "--control",
+                    str(control_path),
+                    "--run-dir",
+                    str(run_dir),
+                    "--grant",
+                    str(grant_path),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state = json.loads(result.stdout)
+            self.assertEqual(state["next_action"], "propose_hypotheses")
+            self.assertEqual(state["stage"], "active_diagnosis")
+            self.assertNotIn("review_required", state["completed_stages"])
+            self.assertEqual(
+                sorted(
+                    path.relative_to(run_dir).as_posix()
+                    for path in run_dir.rglob("*review*.json")
+                ),
+                review_paths_before,
+            )
+            sealed_path = (
+                run_dir
+                / "active_diagnosis"
+                / "authorization_grants"
+                / "grant-cli.json"
+            )
+            sealed = json.loads(sealed_path.read_text("utf-8"))
+            self.assertEqual(
+                state["authorization_grant_sha256"],
+                helper.controller._canonical_digest(sealed),
+            )
+            self.assertEqual(
+                state["active_diagnosis_ledger_sequence"],
+                initial["active_diagnosis_ledger_sequence"] + 1,
+            )
+
+    def test_run_authorization_recovers_each_commit_boundary_idempotently(
+        self,
+    ) -> None:
+        for target in ("grant-artifact", "authorization-ledger", "state-commit"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                helper = workload_fixtures.WorkloadRoundTests()
+                helper.setUp()
+                control, run_dir, _project = helper._workspace(root)
+                workload_fixtures._enable_v2_readiness(control, root)
+                workload_fixtures._enable_active_diagnosis(control, root)
+                helper.controller.start_run(control, run_dir)
+                grant = workload_fixtures._run_grant("grant-fault")
+                artifact_path = (
+                    run_dir
+                    / "active_diagnosis"
+                    / "authorization_grants"
+                    / "grant-fault.json"
+                )
+                original_atomic = helper.controller._atomic_json
+                interrupted = False
+
+                def matches(path: Path) -> bool:
+                    relative = path.relative_to(run_dir).as_posix()
+                    if target == "grant-artifact":
+                        return relative.endswith(
+                            "authorization_grants/grant-fault.json"
+                        )
+                    if target == "authorization-ledger":
+                        return "ledger/" in relative and relative.endswith(
+                            "-run-authorization.json"
+                        )
+                    return (
+                        path.name == "state_commit.json"
+                        and artifact_path.is_file()
+                        and any(
+                            (
+                                run_dir
+                                / "active_diagnosis"
+                                / "ledger"
+                            ).glob("*-run-authorization.json")
+                        )
+                    )
+
+                def interrupt(path, value):
+                    nonlocal interrupted
+                    path = Path(path)
+                    if matches(path) and not interrupted:
+                        interrupted = True
+                        raise OSError(f"interrupted authorization at {target}")
+                    return original_atomic(path, value)
+
+                with mock.patch.object(
+                    helper.controller,
+                    "_atomic_json",
+                    side_effect=interrupt,
+                ):
+                    with self.assertRaisesRegex(
+                        OSError, "interrupted authorization"
+                    ):
+                        helper.controller.authorize_run(
+                            control, run_dir, grant
+                        )
+
+                if target == "state-commit":
+                    self.assertTrue(artifact_path.is_file())
+                    interrupted_events = (
+                        helper.controller._verify_active_diagnosis_ledger(
+                            run_dir
+                        )
+                    )
+                    self.assertEqual(
+                        sum(
+                            item["event_type"] == "run-authorization"
+                            for item in interrupted_events
+                        ),
+                        1,
+                    )
+                    self.assertNotIn(
+                        "authorization_grant_sha256",
+                        helper.controller.read_run_state(run_dir),
+                    )
+
+                recovered = helper.controller.authorize_run(
+                    control, run_dir, grant
+                )
+                repeated = helper.controller.authorize_run(
+                    control, run_dir, grant
+                )
+                events = helper.controller._verify_active_diagnosis_ledger(
+                    run_dir
+                )
+                artifacts = list(
+                    (
+                        run_dir
+                        / "active_diagnosis"
+                        / "authorization_grants"
+                    ).glob("*.json")
+                )
+
+                self.assertEqual(repeated, recovered)
+                self.assertEqual(len(artifacts), 1)
+                self.assertEqual(
+                    sum(
+                        item["event_type"] == "run-authorization"
+                        for item in events
+                    ),
+                    1,
+                )
+                sealed = json.loads(artifacts[0].read_text("utf-8"))
+                self.assertEqual(
+                    recovered["authorization_grant_sha256"],
+                    helper.controller._canonical_digest(sealed),
+                )
+
     def test_active_change_set_requires_exact_ids_and_matching_sealed_digests(self) -> None:
         for mismatch in ("extra_diagnosis", "candidate_digest", "change_digest"):
             with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as tmp:

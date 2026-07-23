@@ -84,6 +84,34 @@ _DIAGNOSTIC_DECISION_MODULE = None
 _KNOWLEDGE_ADAPTER_MODULE = None
 _ACTIVE_DIAGNOSIS_CONTRACT_SCHEMA = "cuda-optimizer/active-diagnosis-contract-v1"
 _GLOBAL_SCAN_DRAFT_SCHEMA = "cuda-optimizer/global-scan-draft-v1"
+_RUN_AUTHORIZATION_SCHEMA = "cuda-workload-optimizer/authorization-v1"
+_RUN_AUTHORIZATION_INPUT_FIELDS = {
+    "schema_version",
+    "grant_id",
+    "source",
+    "interaction_mode",
+    "max_controlled_seconds",
+    "allowed_mutation_scopes",
+    "max_risk",
+    "max_stage",
+}
+_RUN_AUTHORIZATION_BINDING_FIELDS = {
+    "control_digest",
+    "workload_source_hash",
+    "baseline_identity_digest",
+    "baseline_environment_identity_digest",
+    "analysis_epoch_sha256",
+    "previous_grant_sha256",
+    "sealed_at_epoch",
+}
+_RUN_AUTHORIZATION_STAGES = (
+    "diagnosis",
+    "static_review",
+    "build_correctness",
+    "short_paired",
+    "profiler",
+    "formal_paired",
+)
 _BUDGET_RUNTIME = {
     "quick": {
         "soft_target_seconds": 900,
@@ -270,6 +298,100 @@ def _sha256(value: Any, field: str) -> str:
     if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
         raise ValidationError(f"{field} must be lowercase SHA-256")
     return value
+
+
+def _validate_run_authorization_input(value: Mapping[str, Any]) -> dict:
+    grant = _object(value, "run authorization")
+    _closed(grant, _RUN_AUTHORIZATION_INPUT_FIELDS, "run authorization")
+    _required(grant, _RUN_AUTHORIZATION_INPUT_FIELDS, "run authorization")
+    if grant["schema_version"] != _RUN_AUTHORIZATION_SCHEMA:
+        raise ValidationError("run authorization schema is invalid")
+    grant_id = _identifier(grant["grant_id"], "run authorization grant_id")
+    source = grant["source"]
+    if source not in {"initial_request", "interactive_confirmation"}:
+        raise ValidationError("run authorization source is invalid")
+    interaction_mode = grant["interaction_mode"]
+    if interaction_mode not in {"interactive", "unattended"}:
+        raise ValidationError("run authorization interaction_mode is invalid")
+    maximum = grant["max_controlled_seconds"]
+    if (
+        type(maximum) not in {int, float}
+        or not math.isfinite(float(maximum))
+        or float(maximum) <= 0
+    ):
+        raise ValidationError(
+            "run authorization max_controlled_seconds must be positive and finite"
+        )
+    scopes = grant["allowed_mutation_scopes"]
+    if (
+        type(scopes) is not list
+        or any(type(scope) is not str for scope in scopes)
+        or len(scopes) != len(set(scopes))
+    ):
+        raise ValidationError(
+            "run authorization allowed_mutation_scopes must be a unique list"
+        )
+    if any(scope not in {"project", "isolated_environment"} for scope in scopes):
+        raise ValidationError("run authorization mutation scope is invalid")
+    max_risk = grant["max_risk"]
+    if max_risk not in {"none", "low", "medium", "high"}:
+        raise ValidationError("run authorization max_risk is invalid")
+    max_stage = grant["max_stage"]
+    if max_stage not in _RUN_AUTHORIZATION_STAGES:
+        raise ValidationError("run authorization max_stage is invalid")
+    return {
+        "schema_version": _RUN_AUTHORIZATION_SCHEMA,
+        "grant_id": grant_id,
+        "source": source,
+        "interaction_mode": interaction_mode,
+        "max_controlled_seconds": float(maximum),
+        "allowed_mutation_scopes": copy.deepcopy(scopes),
+        "max_risk": max_risk,
+        "max_stage": max_stage,
+    }
+
+
+def _validate_run_authorization_record(
+    value: Mapping[str, Any],
+    label: str = "sealed run authorization",
+) -> dict:
+    record = _object(value, label)
+    fields = _RUN_AUTHORIZATION_INPUT_FIELDS | _RUN_AUTHORIZATION_BINDING_FIELDS
+    _closed(record, fields, label)
+    _required(record, fields, label)
+    normalized = _validate_run_authorization_input(
+        {field: record[field] for field in _RUN_AUTHORIZATION_INPUT_FIELDS}
+    )
+    for field in (
+        "control_digest",
+        "workload_source_hash",
+        "baseline_identity_digest",
+        "analysis_epoch_sha256",
+    ):
+        _sha256(record[field], f"{label}.{field}")
+    environment_digest = record["baseline_environment_identity_digest"]
+    if environment_digest is not None:
+        _sha256(environment_digest, f"{label}.baseline_environment_identity_digest")
+    previous = record["previous_grant_sha256"]
+    if previous is not None:
+        _sha256(previous, f"{label}.previous_grant_sha256")
+    sealed_at = record["sealed_at_epoch"]
+    if (
+        type(sealed_at) not in {int, float}
+        or not math.isfinite(float(sealed_at))
+        or float(sealed_at) < 0
+    ):
+        raise ValidationError(f"{label}.sealed_at_epoch is invalid")
+    return {
+        **normalized,
+        "control_digest": record["control_digest"],
+        "workload_source_hash": record["workload_source_hash"],
+        "baseline_identity_digest": record["baseline_identity_digest"],
+        "baseline_environment_identity_digest": environment_digest,
+        "analysis_epoch_sha256": record["analysis_epoch_sha256"],
+        "previous_grant_sha256": previous,
+        "sealed_at_epoch": float(sealed_at),
+    }
 
 
 def _validate_active_diagnosis_contract(value: Mapping[str, Any]) -> dict:
@@ -2079,6 +2201,85 @@ def _run_readiness_gate(
     )
 
 
+def _readiness_execution_records(run_root: Path) -> list[dict]:
+    execution_root = run_root / "readiness" / "executions"
+    if not execution_root.exists():
+        return []
+    if execution_root.is_symlink() or not execution_root.is_dir():
+        raise ValidationError("readiness execution directory is invalid")
+    records = []
+    for expected_sequence, path in enumerate(
+        sorted(execution_root.glob("*.json")),
+        1,
+    ):
+        record = load_json_object(path)
+        fields = {
+            "schema_version",
+            "sequence",
+            "outcome",
+            "report_sha256",
+            "duration_seconds",
+        }
+        _closed(record, fields, f"readiness execution {path.name}")
+        _required(record, fields, f"readiness execution {path.name}")
+        if (
+            record["schema_version"]
+            != "cuda-workload-optimizer/readiness-execution-v1"
+        ):
+            raise ValidationError("readiness execution schema is invalid")
+        if (
+            path.name != f"{expected_sequence:06d}.json"
+            or record["sequence"] != expected_sequence
+        ):
+            raise ValidationError("readiness execution sequence is not contiguous")
+        if record["outcome"] not in {"completed", "failed"}:
+            raise ValidationError("readiness execution outcome is invalid")
+        report_sha = record["report_sha256"]
+        if report_sha is not None:
+            _sha256(report_sha, "readiness execution report_sha256")
+        if record["outcome"] == "completed" and report_sha is None:
+            raise ValidationError(
+                "completed readiness execution must bind its report"
+            )
+        duration = record["duration_seconds"]
+        if (
+            type(duration) not in {int, float}
+            or not math.isfinite(float(duration))
+            or float(duration) < 0
+        ):
+            raise ValidationError("readiness execution duration is invalid")
+        records.append(record)
+    return records
+
+
+def _record_readiness_execution(
+    run_root: Path,
+    *,
+    duration_seconds: float,
+    outcome: str,
+    report: Mapping[str, Any] | None,
+) -> dict:
+    records = _readiness_execution_records(run_root)
+    sequence = len(records) + 1
+    record = {
+        "schema_version": "cuda-workload-optimizer/readiness-execution-v1",
+        "sequence": sequence,
+        "outcome": outcome,
+        "report_sha256": (
+            None if report is None else _canonical_digest(dict(report))
+        ),
+        "duration_seconds": max(0.0, float(duration_seconds)),
+    }
+    _atomic_json(
+        run_root
+        / "readiness"
+        / "executions"
+        / f"{sequence:06d}.json",
+        record,
+    )
+    return record
+
+
 def _run_readiness_gate_checked(
     control: Mapping[str, Any], run_root: Path, state: Mapping[str, Any]
 ) -> dict:
@@ -2087,7 +2288,23 @@ def _run_readiness_gate_checked(
         if "analysis_contract" in control
         else None
     )
-    report = _run_readiness_gate(control, run_root, state)
+    started = time.monotonic()
+    try:
+        report = _run_readiness_gate(control, run_root, state)
+    except BaseException:
+        _record_readiness_execution(
+            run_root,
+            duration_seconds=time.monotonic() - started,
+            outcome="failed",
+            report=None,
+        )
+        raise
+    _record_readiness_execution(
+        run_root,
+        duration_seconds=time.monotonic() - started,
+        outcome="completed",
+        report=report,
+    )
     if (
         surface_before is not None
         and _project_surface_identity(Path(control["project_root"]))
@@ -2334,17 +2551,55 @@ def _verify_committed_active_ledger(
         raise ValidationError("committed active diagnosis ledger head drifted")
 
 
+def _active_ledger_append_boundary(
+    run_root: Path,
+    event_type: str,
+) -> tuple[list[dict], int]:
+    event_type = _identifier(event_type, "active diagnosis event_type")
+    state = read_run_state(run_root)
+    events = _verify_active_diagnosis_ledger(run_root)
+    sequence = state.get("active_diagnosis_ledger_sequence")
+    head = state.get("active_diagnosis_ledger_head_sha256")
+    if sequence is None and head is None:
+        committed_sequence = 0
+    else:
+        if type(sequence) is not int or sequence < 1 or type(head) is not str:
+            raise ValidationError(
+                "run state active diagnosis ledger binding is invalid"
+            )
+        committed_sequence = sequence
+        if len(events) < committed_sequence:
+            raise ValidationError("committed active diagnosis ledger tail is missing")
+        if _canonical_digest(events[committed_sequence - 1]) != head:
+            raise ValidationError("committed active diagnosis ledger head drifted")
+    if len(events) == committed_sequence:
+        return events, committed_sequence
+    if (
+        len(events) == committed_sequence + 1
+        and events[-1]["event_type"] == event_type
+    ):
+        return events, committed_sequence
+    raise ValidationError(
+        "active diagnosis ledger has an uncommitted foreign tail"
+    )
+
+
 def _append_active_diagnosis_event(
     run_root: Path, event_type: str, payload: Mapping[str, Any]
 ) -> dict:
     event_type = _identifier(event_type, "active diagnosis event_type")
     payload_sha = _canonical_digest(_json_copy(payload, "active diagnosis payload"))
-    events = _verify_active_diagnosis_ledger(run_root)
-    if events and events[-1]["event_type"] == event_type and events[-1][
-        "payload_sha256"
-    ] == payload_sha:
-        return events[-1]
-    sequence = len(events) + 1
+    events, committed_sequence = _active_ledger_append_boundary(
+        run_root,
+        event_type,
+    )
+    if len(events) == committed_sequence + 1:
+        if events[-1]["payload_sha256"] == payload_sha:
+            return events[-1]
+        raise ValidationError(
+            "active diagnosis ledger recovery payload conflicts with tail"
+        )
+    sequence = committed_sequence + 1
     event = {
         "schema_version": "cuda-optimizer/active-diagnosis-event-v1",
         "sequence": sequence,
@@ -2376,15 +2631,20 @@ def _prepare_active_diagnosis_event(
 ) -> tuple[str, dict]:
     event_type = _identifier(event_type, "active diagnosis event_type")
     payload_sha = _canonical_digest(_json_copy(payload, "active diagnosis payload"))
-    events = _verify_active_diagnosis_ledger(run_root)
-    if events and events[-1]["event_type"] == event_type and events[-1][
-        "payload_sha256"
-    ] == payload_sha:
+    events, committed_sequence = _active_ledger_append_boundary(
+        run_root,
+        event_type,
+    )
+    if len(events) == committed_sequence + 1:
+        if events[-1]["payload_sha256"] != payload_sha:
+            raise ValidationError(
+                "active diagnosis ledger recovery payload conflicts with tail"
+            )
         event = copy.deepcopy(events[-1])
     else:
         event = {
             "schema_version": "cuda-optimizer/active-diagnosis-event-v1",
-            "sequence": len(events) + 1,
+            "sequence": committed_sequence + 1,
             "event_type": event_type,
             "previous_event_sha256": (
                 None if not events else _canonical_digest(events[-1])
@@ -2929,6 +3189,138 @@ def _recover_active_diagnosis_transition(
     return _apply_active_diagnosis_transition(run_root, control, intent)
 
 
+def _baseline_execution_records(run_root: Path) -> list[dict]:
+    execution_root = run_root / "baseline" / "executions"
+    if not execution_root.exists():
+        return []
+    if execution_root.is_symlink() or not execution_root.is_dir():
+        raise ValidationError("baseline execution directory is invalid")
+    records = []
+    for expected_sequence, path in enumerate(
+        sorted(execution_root.iterdir()),
+        1,
+    ):
+        if path.is_symlink() or not path.is_file():
+            raise ValidationError("baseline execution record is invalid")
+        record = load_json_object(path)
+        fields = {
+            "schema_version",
+            "sequence",
+            "workload_kind",
+            "status",
+            "duration_seconds",
+        }
+        _closed(record, fields, f"baseline execution {path.name}")
+        _required(record, fields, f"baseline execution {path.name}")
+        if (
+            record["schema_version"]
+            != "cuda-workload-optimizer/baseline-execution-v1"
+        ):
+            raise ValidationError("baseline execution schema is invalid")
+        if (
+            path.name != f"{expected_sequence:06d}.json"
+            or record["sequence"] != expected_sequence
+        ):
+            raise ValidationError("baseline execution sequence is not contiguous")
+        if record["workload_kind"] not in {"python", "command"}:
+            raise ValidationError("baseline execution workload kind is invalid")
+        if record["status"] not in {"failed", "measured"}:
+            raise ValidationError("baseline execution status is invalid")
+        duration = record["duration_seconds"]
+        if (
+            type(duration) not in {int, float}
+            or not math.isfinite(float(duration))
+            or float(duration) < 0
+        ):
+            raise ValidationError("baseline execution duration is invalid")
+        records.append(record)
+    if len({record["workload_kind"] for record in records}) > 1:
+        raise ValidationError("baseline execution workload kind drifted")
+    return records
+
+
+def _record_baseline_execution(
+    run_root: Path,
+    *,
+    workload_kind: str,
+    status: str,
+    duration_seconds: float,
+) -> dict:
+    if workload_kind not in {"python", "command"}:
+        raise ValidationError("baseline execution workload kind is invalid")
+    if status not in {"failed", "measured"}:
+        raise ValidationError("baseline execution status is invalid")
+    if (
+        type(duration_seconds) not in {int, float}
+        or not math.isfinite(float(duration_seconds))
+        or float(duration_seconds) < 0
+    ):
+        raise ValidationError("baseline execution duration is invalid")
+    records = _baseline_execution_records(run_root)
+    if records and records[-1]["workload_kind"] != workload_kind:
+        raise ValidationError("baseline execution workload kind drifted")
+    sequence = len(records) + 1
+    record = {
+        "schema_version": "cuda-workload-optimizer/baseline-execution-v1",
+        "sequence": sequence,
+        "workload_kind": workload_kind,
+        "status": status,
+        "duration_seconds": float(duration_seconds),
+    }
+    _atomic_json(
+        run_root
+        / "baseline"
+        / "executions"
+        / f"{sequence:06d}.json",
+        record,
+    )
+    return record
+
+
+def _bootstrap_execution_seconds(
+    run_root: Path,
+    state: Mapping[str, Any],
+) -> float:
+    readiness_records = _readiness_execution_records(run_root)
+    if not readiness_records:
+        raise ValidationError("readiness execution record is missing")
+    readiness_seconds = sum(
+        float(record["duration_seconds"])
+        for record in readiness_records
+    )
+    baseline_records = _baseline_execution_records(run_root)
+    if not baseline_records:
+        raise ValidationError("baseline execution record is missing")
+    if baseline_records[-1]["status"] != "measured":
+        raise ValidationError("latest baseline execution was not measured")
+    baseline_seconds = sum(
+        float(record["duration_seconds"])
+        for record in baseline_records
+    )
+    baseline_observation = load_json_object(
+        run_root / "baseline" / "observation.json"
+    )
+    if baseline_observation.get("status") != "measured":
+        raise ValidationError("baseline observation is not measured")
+    contract = _load_frozen_analysis_contract(run_root, state)
+    global_scan_id = contract["global_scan_probe_id"]
+    profile_execution = load_json_object(
+        run_root / "probes" / f"{global_scan_id}.execution.json"
+    )
+    profile_seconds = profile_execution.get("duration_seconds")
+    if (
+        type(profile_seconds) not in {int, float}
+        or not math.isfinite(float(profile_seconds))
+        or float(profile_seconds) < 0
+    ):
+        raise ValidationError("global profile execution time is invalid")
+    return (
+        float(readiness_seconds)
+        + float(baseline_seconds)
+        + float(profile_seconds)
+    )
+
+
 def _build_active_diagnosis_context(
     control: Mapping[str, Any], run_root: Path, state: Mapping[str, Any]
 ) -> dict:
@@ -3056,6 +3448,21 @@ def _build_active_diagnosis_context(
         action_timings=[],
     )
     _atomic_json(active_root / "performance_model.json", performance_model)
+    try:
+        initial_brief = (
+            _load_diagnostic_decision_module().build_initial_investment_brief(
+                performance_model,
+                _bootstrap_execution_seconds(run_root, state),
+            )
+        )
+    except ValueError as error:
+        raise ValidationError(
+            f"invalid initial investment brief: {error}"
+        ) from error
+    _atomic_json(
+        active_root / "initial_investment_brief.json",
+        initial_brief,
+    )
     diagnosis = load_json_object(run_root / "diagnosis.json")
     knowledge_context = _load_diagnostic_knowledge_module().route_cards(
         diagnosis, execution_map, limit=3
@@ -3740,6 +4147,7 @@ def _start_run_unlocked(
             ),
             "control_digest": control_digest,
             "workload_source_hash": workload.source_hash,
+            "investment_control_version": "run-grant-v1",
             "started_at_epoch": now,
             "updated_at_epoch": now,
             "soft_target_epoch": now + runtime["soft_target_seconds"],
@@ -3910,6 +4318,7 @@ def _start_run_unlocked(
                 task=f"baseline-workload-{baseline_attempt}",
             )
 
+        baseline_started = time.monotonic()
         baseline = _load_evaluate_module().measure_candidate(
             workload,
             normalized["baseline_candidate"],
@@ -3918,6 +4327,13 @@ def _start_run_unlocked(
             timeout=timeout,
             deadline_epoch=state["deadline_epoch"],
             runner=run_baseline_once if workload.kind == "python" else None,
+        )
+        baseline_duration = max(0.0, time.monotonic() - baseline_started)
+        _record_baseline_execution(
+            run_root,
+            workload_kind=workload.kind,
+            status=baseline.get("status"),
+            duration_seconds=baseline_duration,
         )
         if (
             baseline_surface_before is not None
@@ -3997,15 +4413,21 @@ def _start_run_unlocked(
         and "diagnosis_context" not in state["completed_stages"]
     ):
         context = _build_active_diagnosis_context(normalized, run_root, state)
-        state = _advance(
-            run_root,
-            state,
-            "diagnosis_context",
-            stage="active_diagnosis",
-            next_action="propose_hypotheses",
-        )
         updated = copy.deepcopy(state)
+        if "diagnosis_context" not in updated["completed_stages"]:
+            updated["completed_stages"].append("diagnosis_context")
+        updated["stage"] = "active_diagnosis"
+        updated["next_action"] = "propose_hypotheses"
+        updated["updated_at_epoch"] = time.time()
         updated["diagnosis_context_sha256"] = _canonical_digest(context)
+        initial_brief = load_json_object(
+            run_root
+            / "active_diagnosis"
+            / "initial_investment_brief.json"
+        )
+        updated["initial_investment_brief_sha256"] = _canonical_digest(
+            initial_brief
+        )
         updated.update(
             _active_ledger_binding(_verify_active_diagnosis_ledger(run_root))
         )
@@ -4156,6 +4578,327 @@ def _adapt_controller_knowledge(
             }
         )
     return augmented_hypotheses, augmented_requests, adaptation
+
+
+def _load_initial_investment_brief(
+    run_root: Path,
+    state: Mapping[str, Any],
+) -> dict:
+    path = run_root / "active_diagnosis" / "initial_investment_brief.json"
+    if path.is_symlink() or not path.is_file():
+        raise ValidationError("initial investment brief must be a regular file")
+    brief = load_json_object(path)
+    if _canonical_digest(brief) != state.get(
+        "initial_investment_brief_sha256"
+    ):
+        raise ValidationError("initial investment brief digest drifted")
+    if (
+        brief.get("schema_version")
+        != "cuda-optimizer/initial-investment-brief-v1"
+        or brief.get("next_checkpoint") != "propose_hypotheses"
+    ):
+        raise ValidationError("initial investment brief contract is invalid")
+    return brief
+
+
+def _run_authorization_binding_facts(
+    control: Mapping[str, Any],
+    run_root: Path,
+    state: Mapping[str, Any],
+) -> dict:
+    if state.get("investment_control_version") != "run-grant-v1":
+        raise ValidationError("run does not use run-grant-v1 investment control")
+    if "analysis_contract" not in control:
+        raise ValidationError("run authorization requires active diagnosis")
+    if state.get("control_digest") != _canonical_digest(control):
+        raise ValidationError("control manifest drifted before run authorization")
+    _load_frozen_control(run_root, state)
+    _load_initial_investment_brief(run_root, state)
+    (
+        context,
+        _epoch,
+        _execution_map,
+        _evidence_catalog,
+        _action_catalog,
+        _selection_policy,
+    ) = _load_active_diagnosis_context(control, run_root, state)
+    return {
+        "control_digest": state["control_digest"],
+        "workload_source_hash": state["workload_source_hash"],
+        "baseline_identity_digest": state["baseline_identity_digest"],
+        "baseline_environment_identity_digest": state[
+            "baseline_environment_identity_digest"
+        ],
+        "analysis_epoch_sha256": context["epoch_sha256"],
+    }
+
+
+def _authorization_grant_artifacts(run_root: Path) -> dict[str, dict]:
+    grant_root = run_root / "active_diagnosis" / "authorization_grants"
+    if not grant_root.exists():
+        return {}
+    if grant_root.is_symlink() or not grant_root.is_dir():
+        raise ValidationError("authorization grant directory is invalid")
+    grants = {}
+    ids = set()
+    for path in sorted(grant_root.glob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            raise ValidationError("authorization grant must be a regular file")
+        grant = _validate_run_authorization_record(load_json_object(path))
+        if path.stem != grant["grant_id"]:
+            raise ValidationError("authorization grant filename does not match grant id")
+        if grant["grant_id"] in ids:
+            raise ValidationError("authorization grant id is duplicated")
+        ids.add(grant["grant_id"])
+        digest = _canonical_digest(grant)
+        if digest in grants:
+            raise ValidationError("authorization grant digest is duplicated")
+        grants[digest] = grant
+    return grants
+
+
+def _authorization_chain_digests(
+    grants: Mapping[str, Mapping[str, Any]],
+    current_digest: str,
+) -> list[str]:
+    chain = []
+    seen = set()
+    digest: str | None = current_digest
+    while digest is not None:
+        if digest in seen:
+            raise ValidationError("authorization grant chain contains a cycle")
+        seen.add(digest)
+        grant = grants.get(digest)
+        if grant is None:
+            raise ValidationError("state-bound authorization grant artifact is missing")
+        chain.append(digest)
+        digest = grant["previous_grant_sha256"]
+    return chain
+
+
+def _run_authorization_payload(
+    grant: Mapping[str, Any],
+    grant_digest: str,
+) -> dict:
+    return {
+        "grant_id": grant["grant_id"],
+        "grant_sha256": grant_digest,
+        "previous_grant_sha256": grant["previous_grant_sha256"],
+        "max_controlled_seconds": grant["max_controlled_seconds"],
+    }
+
+
+def _load_bound_authorization_grant(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any] | None = None,
+) -> dict:
+    digest = _sha256(
+        state.get("authorization_grant_sha256"),
+        "state authorization_grant_sha256",
+    )
+    normalized = (
+        _load_frozen_control(run_root, state)
+        if control is None
+        else validate_control_manifest(control)
+    )
+    facts = _run_authorization_binding_facts(
+        normalized,
+        run_root,
+        state,
+    )
+    grants = _authorization_grant_artifacts(run_root)
+    chain = _authorization_chain_digests(grants, digest)
+    for grant_digest in chain:
+        grant = grants[grant_digest]
+        if any(grant.get(field) != value for field, value in facts.items()):
+            raise ValidationError("authorization grant identity drifted")
+    events = _verify_active_diagnosis_ledger(run_root)
+    _verify_committed_active_ledger(state, events)
+    committed_events = events[: int(state["active_diagnosis_ledger_sequence"])]
+    committed_authorizations = [
+        event["payload_sha256"]
+        for event in committed_events
+        if event["event_type"] == "run-authorization"
+    ]
+    expected_authorizations = [
+        _canonical_digest(
+            _run_authorization_payload(grants[grant_digest], grant_digest)
+        )
+        for grant_digest in reversed(chain)
+    ]
+    if committed_authorizations != expected_authorizations:
+        raise ValidationError(
+            "state-bound authorization grant ledger chain drifted"
+        )
+    return copy.deepcopy(grants[digest])
+
+
+def _run_authorization_event(
+    state: Mapping[str, Any],
+    grant: Mapping[str, Any],
+    grant_digest: str,
+) -> tuple[Path, dict]:
+    sequence = int(state["active_diagnosis_ledger_sequence"]) + 1
+    payload = _run_authorization_payload(grant, grant_digest)
+    event = {
+        "schema_version": "cuda-optimizer/active-diagnosis-event-v1",
+        "sequence": sequence,
+        "event_type": "run-authorization",
+        "previous_event_sha256": state[
+            "active_diagnosis_ledger_head_sha256"
+        ],
+        "payload_sha256": _canonical_digest(payload),
+        "created_at_epoch": grant["sealed_at_epoch"],
+    }
+    relative = (
+        Path("active_diagnosis")
+        / "ledger"
+        / f"{sequence:06d}-run-authorization.json"
+    )
+    return relative, event
+
+
+def authorize_run(
+    control: Mapping[str, Any],
+    run_dir: os.PathLike[str] | str,
+    grant: Mapping[str, Any],
+) -> dict:
+    """Seal or replay one run-level investment authorization."""
+    normalized = validate_control_manifest(control)
+    requested = _validate_run_authorization_input(grant)
+    run_root = Path(run_dir).expanduser().resolve(strict=False)
+    with _run_lock(run_root):
+        state = read_run_state(run_root)
+        facts = _run_authorization_binding_facts(
+            normalized,
+            run_root,
+            state,
+        )
+        grants = _authorization_grant_artifacts(run_root)
+        grant_path = (
+            run_root
+            / "active_diagnosis"
+            / "authorization_grants"
+            / f"{requested['grant_id']}.json"
+        )
+        existing = next(
+            (
+                (digest, item)
+                for digest, item in grants.items()
+                if item["grant_id"] == requested["grant_id"]
+            ),
+            None,
+        )
+        current_digest = state.get("authorization_grant_sha256")
+        if current_digest is not None:
+            _sha256(current_digest, "state authorization_grant_sha256")
+            current = _load_bound_authorization_grant(
+                run_root,
+                state,
+                normalized,
+            )
+            chain = _authorization_chain_digests(grants, current_digest)
+        else:
+            current = None
+            chain = []
+
+        if existing is not None:
+            existing_digest, sealed = existing
+            existing_input = {
+                field: sealed[field]
+                for field in _RUN_AUTHORIZATION_INPUT_FIELDS
+            }
+            if existing_input != requested:
+                raise ValidationError(
+                    "grant id is already sealed with different content"
+                )
+            if existing_digest in chain:
+                return state
+
+        committed_spend = state.get("controlled_spend_seconds", 0.0)
+        if (
+            type(committed_spend) not in {int, float}
+            or not math.isfinite(float(committed_spend))
+            or float(committed_spend) < 0
+        ):
+            raise ValidationError("committed controlled spend is invalid")
+        if requested["max_controlled_seconds"] < float(committed_spend):
+            raise ValidationError(
+                "run authorization cannot be below committed controlled spend"
+            )
+
+        if existing is not None:
+            if any(sealed.get(field) != value for field, value in facts.items()):
+                raise ValidationError("authorization grant identity drifted")
+            if sealed["previous_grant_sha256"] != current_digest:
+                raise ValidationError(
+                    "authorization grant previous digest drifted"
+                )
+        else:
+            sealed_at = time.time()
+            if current is not None:
+                sealed_at = max(sealed_at, float(current["sealed_at_epoch"]))
+            sealed = {
+                **requested,
+                **facts,
+                "previous_grant_sha256": current_digest,
+                "sealed_at_epoch": sealed_at,
+            }
+            _atomic_json(grant_path, sealed)
+            sealed = _validate_run_authorization_record(
+                load_json_object(grant_path)
+            )
+            existing_digest = _canonical_digest(sealed)
+            grants[existing_digest] = sealed
+
+        ledger_path, ledger_event = _run_authorization_event(
+            state,
+            sealed,
+            existing_digest,
+        )
+        events = _verify_active_diagnosis_ledger(run_root)
+        _verify_committed_active_ledger(state, events)
+        expected_prior_count = int(state["active_diagnosis_ledger_sequence"])
+        if len(events) == expected_prior_count:
+            _atomic_json(run_root / ledger_path, ledger_event)
+        elif (
+            len(events) != expected_prior_count + 1
+            or events[-1] != ledger_event
+        ):
+            raise ValidationError(
+                "authorization ledger tail conflicts with sealed grant"
+            )
+        events = _verify_active_diagnosis_ledger(run_root)
+        if (
+            len(events) != expected_prior_count + 1
+            or events[-1] != ledger_event
+        ):
+            raise ValidationError("authorization ledger event was not committed")
+
+        updated = copy.deepcopy(state)
+        updated.update(
+            {
+                "authorization_grant_sha256": existing_digest,
+                "active_diagnosis_ledger_sequence": ledger_event["sequence"],
+                "active_diagnosis_ledger_head_sha256": _canonical_digest(
+                    ledger_event
+                ),
+                "updated_at_epoch": sealed["sealed_at_epoch"],
+            }
+        )
+        _load_bound_authorization_grant(
+            run_root,
+            updated,
+            normalized,
+        )
+        committed = _write_state(run_root, updated)
+        _load_bound_authorization_grant(
+            run_root,
+            committed,
+            normalized,
+        )
+        return committed
 
 
 def register_active_diagnosis_proposal(
@@ -4847,6 +5590,7 @@ def _register_active_diagnosis_proposal_unlocked(
     if state["next_action"] != "propose_hypotheses":
         raise ValidationError("run is not ready for an active diagnosis proposal")
     _check_deadline(state)
+    _active_ledger_append_boundary(run_root, "proposal")
     (
         context,
         epoch,
@@ -7671,6 +8415,13 @@ def _build_parser() -> argparse.ArgumentParser:
     diagnosis_proposal.add_argument("--hypothesis-set", required=True)
     diagnosis_proposal.add_argument("--request-set", required=True)
     diagnosis_proposal.add_argument("--knowledge-inputs")
+    authorize = subparsers.add_parser(
+        "authorize-run",
+        help="seal a run-level investment authorization",
+    )
+    authorize.add_argument("--control", required=True)
+    authorize.add_argument("--run-dir", required=True)
+    authorize.add_argument("--grant", required=True)
     candidate_proposal = subparsers.add_parser(
         "seal-candidate-proposal",
         help="seal a user-authorized active-diagnosis candidate proposal",
@@ -7776,6 +8527,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                             if args.knowledge_inputs
                             else None
                         ),
+                    ),
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "authorize-run":
+            print(
+                json.dumps(
+                    authorize_run(
+                        load_json_object(args.control),
+                        args.run_dir,
+                        load_json_object(args.grant),
                     ),
                     sort_keys=True,
                 )

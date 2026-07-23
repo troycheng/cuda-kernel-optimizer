@@ -56,6 +56,73 @@ def _number(value: Any, field: str, *, positive: bool = False) -> float:
     return result
 
 
+def build_initial_investment_brief(
+    performance_model: Mapping[str, Any],
+    bootstrap_execution_seconds: float,
+) -> dict:
+    """Summarize the first profile without inventing an unobserved next-action cost."""
+    model = _object(performance_model, "performance_model")
+    if model.get("schema_version") != "cuda-optimizer/performance-model-v1":
+        raise ValidationError("performance_model schema is unsupported")
+    nodes = model.get("node_directions")
+    if type(nodes) is not list or not nodes:
+        raise ValidationError("performance_model has no modeled bottleneck")
+    ranked = []
+    for index, raw in enumerate(nodes):
+        node = _object(raw, f"performance_model.node_directions[{index}]")
+        node_id = node.get("node_id")
+        layer = node.get("layer")
+        basis = node.get("basis")
+        if not all(type(value) is str and value for value in (node_id, layer, basis)):
+            raise ValidationError("performance_model bottleneck identity is invalid")
+        ranked.append(
+            (
+                _number(
+                    node.get("benefit_ceiling_us"),
+                    f"performance_model.node_directions[{index}].benefit_ceiling_us",
+                ),
+                index,
+                node,
+            )
+        )
+    _, _, primary = max(ranked, key=lambda item: (item[0], -item[1]))
+    uncertainties = model.get("uncertainties", [])
+    if type(uncertainties) is not list or any(
+        type(item) is not str or not item for item in uncertainties
+    ):
+        raise ValidationError("performance_model uncertainties are invalid")
+    return {
+        "schema_version": "cuda-optimizer/initial-investment-brief-v1",
+        "primary_bottleneck": {
+            "node_id": primary["node_id"],
+            "layer": primary["layer"],
+            "removable_time_ceiling_us": _number(
+                primary["benefit_ceiling_us"],
+                "performance_model primary benefit_ceiling_us",
+            ),
+            "basis": primary["basis"],
+        },
+        "minimum_effect_us": _number(
+            model.get("minimum_effect_us"),
+            "performance_model.minimum_effect_us",
+            positive=True,
+        ),
+        "largest_uncertainty": (
+            None if not uncertainties else uncertainties[0]
+        ),
+        "bootstrap_execution_seconds": _number(
+            bootstrap_execution_seconds,
+            "bootstrap_execution_seconds",
+        ),
+        "cost": {
+            "p50_seconds": None,
+            "p90_seconds": None,
+            "basis": "unavailable",
+        },
+        "next_checkpoint": "propose_hypotheses",
+    }
+
+
 def _active_hypotheses(result: Mapping[str, Any]) -> list[dict]:
     root = _object(result, "hypothesis_result")
     hypothesis_set = _object(root.get("hypothesis_set"), "hypothesis_set")
