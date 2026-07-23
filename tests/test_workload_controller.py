@@ -1580,6 +1580,37 @@ class WorkloadRoundTests(unittest.TestCase):
         }
         return hypothesis, request
 
+    def _authorize_active_run(
+        self,
+        control: dict,
+        run_dir: Path,
+        grant_id: str = "grant-test-active-run",
+    ) -> dict:
+        return self.controller.authorize_run(
+            control,
+            run_dir,
+            _run_grant(grant_id),
+        )
+
+    def _invalidate_active_run_grant(
+        self,
+        run_dir: Path,
+        grant_id: str,
+        mode: str,
+    ) -> None:
+        grant_path = (
+            run_dir
+            / "active_diagnosis"
+            / "authorization_grants"
+            / f"{grant_id}.json"
+        )
+        if mode == "missing":
+            grant_path.unlink()
+            return
+        grant = json.loads(grant_path.read_text("utf-8"))
+        grant["max_controlled_seconds"] += 1.0
+        grant_path.write_text(json.dumps(grant), encoding="utf-8")
+
     def test_concurrent_start_runs_baseline_and_probes_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -2185,6 +2216,29 @@ class WorkloadRoundTests(unittest.TestCase):
                     control, run_dir, _run_grant("grant-after-drift")
                 )
 
+    def test_authorization_rejects_a_symlinked_analysis_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            self.controller.start_run(control, run_dir)
+            epoch_path = run_dir / "active_diagnosis" / "epoch.json"
+            target = root / "epoch-copy.json"
+            target.write_bytes(epoch_path.read_bytes())
+            epoch_path.unlink()
+            epoch_path.symlink_to(target)
+
+            with self.assertRaisesRegex(
+                self.controller.ValidationError,
+                "analysis epoch.*regular",
+            ):
+                self.controller.authorize_run(
+                    control,
+                    run_dir,
+                    _run_grant("grant-symlinked-epoch"),
+                )
+
     def test_uncommitted_authorization_tail_blocks_foreign_proposal_append(
         self,
     ) -> None:
@@ -2315,36 +2369,146 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(committed, initial)
             self.assertNotIn("authorization_grant_sha256", committed)
 
+    def test_missing_or_tampered_grant_fails_before_direction_review(self) -> None:
+        for mode in ("missing", "tampered"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                control, run_dir, _project = self._workspace(root)
+                _enable_v2_readiness(control, root)
+                _enable_active_diagnosis(control, root)
+                self.controller.start_run(control, run_dir)
+                if mode == "tampered":
+                    self.controller.authorize_run(
+                        control,
+                        run_dir,
+                        _run_grant("grant-tampered-before-review"),
+                    )
+                    grant_path = (
+                        run_dir
+                        / "active_diagnosis"
+                        / "authorization_grants"
+                        / "grant-tampered-before-review.json"
+                    )
+                    grant = json.loads(grant_path.read_text("utf-8"))
+                    grant["max_controlled_seconds"] += 1.0
+                    grant_path.write_text(json.dumps(grant), encoding="utf-8")
+                before = self.controller.read_run_state(run_dir)
+                hypothesis, request = self._active_proposal(run_dir)
+                review = mock.Mock(return_value=None)
+
+                with mock.patch.object(
+                    self.controller,
+                    "_review_diagnostic_direction",
+                    review,
+                ):
+                    with self.assertRaises(self.controller.ValidationError):
+                        self.controller.register_active_diagnosis_proposal(
+                            control,
+                            run_dir,
+                            hypothesis,
+                            request,
+                        )
+
+                self.assertEqual(review.call_count, 0)
+                self.assertEqual(
+                    self.controller.read_run_state(run_dir),
+                    before,
+                )
+
     def test_diagnosis_action_timeout_is_only_a_kill_deadline_not_p90(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs = []
+            for name, timeout_seconds in (("short", 5.0), ("long", 3600.0)):
+                root = (Path(tmp) / name).resolve()
+                root.mkdir()
+                control, run_dir, _project = self._workspace(root)
+                _enable_v2_readiness(control, root)
+                _enable_active_diagnosis(control, root)
+                contract_path = Path(control["analysis_contract"])
+                contract = json.loads(contract_path.read_text("utf-8"))
+                contract["actions"][0]["timeout_seconds"] = timeout_seconds
+                contract_path.write_text(json.dumps(contract), encoding="utf-8")
+                self.controller.start_run(control, run_dir)
+                self._authorize_active_run(control, run_dir)
+                state = self.controller.read_run_state(run_dir)
+                context = json.loads(
+                    (run_dir / "diagnosis_context.json").read_text("utf-8")
+                )
+                inputs.append(
+                    self.controller._diagnostic_investment_inputs(
+                        run_dir,
+                        state,
+                        context,
+                    )
+                )
+
+            action_id = "pytorch-operator-trace"
+            self.assertTrue(
+                all(
+                    item["action_bounds"][action_id]["p90_seconds"] == 2.0
+                    for item in inputs
+                )
+            )
+            self.assertEqual(
+                inputs[0]["action_bounds"][action_id]["basis"],
+                "user_authorized_upper_bound",
+            )
+            self.assertNotIn("controller_timeout", json.dumps(inputs))
+
+    def test_wall_clock_jump_does_not_expand_controlled_spend_authorization(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             control, run_dir, _project = self._workspace(root)
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
-            state = self.controller.read_run_state(run_dir)
-            context = json.loads(
-                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            authorized = self.controller.authorize_run(
+                control,
+                run_dir,
+                _run_grant(
+                    "grant-one-second",
+                    max_controlled_seconds=1.0,
+                    allowed_mutation_scopes=[],
+                    max_risk="none",
+                    max_stage="diagnosis",
+                ),
             )
-            first = self.controller._diagnostic_investment_inputs(
-                run_dir, state, context
-            )
-            frozen_path = run_dir / "active_diagnosis" / "analysis_contract.json"
-            frozen = json.loads(frozen_path.read_text("utf-8"))
-            frozen["actions"][0]["timeout_seconds"] = 3600.0
-            frozen_path.write_text(json.dumps(frozen), encoding="utf-8")
-            second = self.controller._diagnostic_investment_inputs(
-                run_dir, state, context
+            shifted = copy.deepcopy(authorized)
+            shifted["optimization_started_at_epoch"] -= 3600.0
+            self.controller._write_state(run_dir, shifted)
+            hypothesis, request = self._active_proposal(run_dir)
+
+            state = self.controller.register_active_diagnosis_proposal(
+                control,
+                run_dir,
+                hypothesis,
+                request,
             )
 
-            action_id = "pytorch-operator-trace"
-            self.assertEqual(first["action_bounds"][action_id]["p90_seconds"], 2.0)
-            self.assertEqual(second["action_bounds"][action_id]["p90_seconds"], 2.0)
-            self.assertEqual(
-                first["action_bounds"][action_id]["basis"],
-                "user_authorized_upper_bound",
+            decision = json.loads(
+                (
+                    run_dir / "active_diagnosis" / "decision.json"
+                ).read_text("utf-8")
             )
-            self.assertNotIn("controller_timeout", json.dumps(first))
+            cumulative = decision["investment_brief"]["cumulative_investment"]
+            self.assertEqual(state["next_action"], "review_required")
+            self.assertEqual(decision["decision"], "REVIEW_REQUIRED")
+            self.assertNotEqual(decision["decision"], "STOP")
+            self.assertEqual(
+                decision["terminal_reason"],
+                "cumulative_authorization_exceeded",
+            )
+            self.assertEqual(state["controlled_spend_seconds"], 0.0)
+            self.assertEqual(cumulative["elapsed_seconds"], 0.0)
+            self.assertEqual(cumulative["remaining_authorization_seconds"], 1.0)
+            self.assertEqual(cumulative["projected_p90_seconds"], 2.0)
+            self.assertGreaterEqual(cumulative["wall_elapsed_seconds"], 3600.0)
+            self.assertEqual(
+                cumulative["bound_basis"],
+                "committed_controlled_execution",
+            )
 
     def test_active_diagnosis_rejects_adapter_digest_mismatch_before_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2406,6 +2570,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
 
             state = self.controller.register_active_diagnosis_proposal(
@@ -2431,7 +2596,7 @@ class WorkloadRoundTests(unittest.TestCase):
                 self.controller._canonical_digest(decision),
             )
             self.assertTrue(
-                (run_dir / "active_diagnosis" / "ledger" / "000002-proposal.json").is_file()
+                (run_dir / "active_diagnosis" / "ledger" / "000003-proposal.json").is_file()
             )
 
     def test_active_diagnosis_collects_evidence_and_returns_to_proposal(self) -> None:
@@ -2441,6 +2606,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -2489,6 +2655,117 @@ class WorkloadRoundTests(unittest.TestCase):
                 self.controller._canonical_digest(after_model),
             )
 
+    def test_active_diagnosis_accounts_completed_evidence_exactly_once(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            self.controller.start_run(control, run_dir)
+            self.controller.authorize_run(
+                control,
+                run_dir,
+                _run_grant("grant-evidence-spend"),
+            )
+            hypothesis, request = self._active_proposal(run_dir)
+            pending = self.controller.register_active_diagnosis_proposal(
+                control,
+                run_dir,
+                hypothesis,
+                request,
+            )
+
+            completed = self.controller.collect_active_diagnosis_evidence(
+                control,
+                run_dir,
+            )
+
+            signature = completed["last_request_signature"]
+            execution = json.loads(
+                (
+                    run_dir
+                    / "active_diagnosis"
+                    / "evidence"
+                    / signature
+                    / "execution.json"
+                ).read_text("utf-8")
+            )
+            expected = (
+                float(pending.get("controlled_spend_seconds", 0.0))
+                + execution["duration_seconds"]
+            )
+            self.assertAlmostEqual(
+                completed.get("controlled_spend_seconds", -1.0),
+                expected,
+            )
+
+            replayed_collect = self.controller.collect_active_diagnosis_evidence(
+                control,
+                run_dir,
+            )
+            replayed_resume = self.controller.resume_run(run_dir)
+            self.assertAlmostEqual(
+                replayed_collect["controlled_spend_seconds"],
+                expected,
+            )
+            self.assertAlmostEqual(
+                replayed_resume["controlled_spend_seconds"],
+                expected,
+            )
+
+    def test_collect_revalidates_missing_or_tampered_grant_before_adapter(
+        self,
+    ) -> None:
+        for mode in ("missing", "tampered"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                control, run_dir, _project = self._workspace(root)
+                _enable_v2_readiness(control, root)
+                _enable_active_diagnosis(control, root)
+                self.controller.start_run(control, run_dir)
+                grant_id = f"grant-collect-{mode}"
+                self._authorize_active_run(control, run_dir, grant_id)
+                hypothesis, request = self._active_proposal(run_dir)
+                pending = self.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    hypothesis,
+                    request,
+                )
+                self.assertEqual(pending["next_action"], "collect_evidence")
+                self._invalidate_active_run_grant(
+                    run_dir,
+                    grant_id,
+                    mode,
+                )
+                before = self.controller.read_run_state(run_dir)
+                adapter = mock.Mock(
+                    side_effect=self.controller.ValidationError(
+                        "adapter unexpectedly reached"
+                    )
+                )
+
+                with mock.patch.object(
+                    self.controller,
+                    "_run_active_evidence_adapter",
+                    adapter,
+                ):
+                    with self.assertRaises(self.controller.ValidationError):
+                        self.controller.collect_active_diagnosis_evidence(
+                            control,
+                            run_dir,
+                        )
+
+                self.assertEqual(adapter.call_count, 0)
+                after = self.controller.read_run_state(run_dir)
+                self.assertEqual(after, before)
+                self.assertEqual(
+                    after["controlled_spend_seconds"],
+                    before["controlled_spend_seconds"],
+                )
+
     def test_tampered_decision_or_investment_brief_blocks_evidence_execution(self) -> None:
         for artifact_name in ("decision.json", "investment_brief.json"):
             with self.subTest(artifact=artifact_name), tempfile.TemporaryDirectory() as tmp:
@@ -2497,6 +2774,7 @@ class WorkloadRoundTests(unittest.TestCase):
                 _enable_v2_readiness(control, root)
                 _enable_active_diagnosis(control, root)
                 self.controller.start_run(control, run_dir)
+                self._authorize_active_run(control, run_dir)
                 hypothesis, request = self._active_proposal(run_dir)
                 self.controller.register_active_diagnosis_proposal(
                     control, run_dir, hypothesis, request
@@ -2526,6 +2804,7 @@ class WorkloadRoundTests(unittest.TestCase):
                     contract["selection_policy"]["max_cost"] = "none"
                 contract_path.write_text(json.dumps(contract), encoding="utf-8")
                 self.controller.start_run(control, run_dir)
+                self._authorize_active_run(control, run_dir)
                 hypothesis, request = self._active_proposal(run_dir)
 
                 state = self.controller.register_active_diagnosis_proposal(
@@ -2590,6 +2869,7 @@ class WorkloadRoundTests(unittest.TestCase):
                 )
             ]
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
 
             state = self.controller.register_active_diagnosis_proposal(
@@ -2647,6 +2927,7 @@ class WorkloadRoundTests(unittest.TestCase):
             ).hexdigest()
             Path(control["analysis_contract"]).write_text(json.dumps(contract), encoding="utf-8")
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -2680,6 +2961,7 @@ class WorkloadRoundTests(unittest.TestCase):
             ).hexdigest()
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -2711,6 +2993,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             state = self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -2740,6 +3023,11 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(
+                control,
+                run_dir,
+                "grant-completion-recovery",
+            )
             hypothesis, request = self._active_proposal(run_dir)
             pending = self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -2748,6 +3036,19 @@ class WorkloadRoundTests(unittest.TestCase):
             signature = completed["last_request_signature"]
             complete_path = (
                 run_dir / "active_diagnosis" / "evidence" / signature / "complete.json"
+            )
+            execution = json.loads(
+                (
+                    complete_path.parent / "execution.json"
+                ).read_text("utf-8")
+            )
+            expected_spend = (
+                pending["controlled_spend_seconds"]
+                + execution["duration_seconds"]
+            )
+            self.assertAlmostEqual(
+                completed["controlled_spend_seconds"],
+                expected_spend,
             )
             complete_mtime = complete_path.stat().st_mtime_ns
             pending_digest = self.controller._canonical_digest(pending)
@@ -2762,10 +3063,93 @@ class WorkloadRoundTests(unittest.TestCase):
             )
 
             recovered = self.controller.resume_run(run_dir)
+            replayed = self.controller.resume_run(run_dir)
 
             self.assertEqual(recovered["next_action"], "propose_hypotheses")
             self.assertEqual(recovered["last_request_signature"], signature)
+            self.assertAlmostEqual(
+                recovered["controlled_spend_seconds"],
+                expected_spend,
+            )
+            self.assertEqual(replayed, recovered)
             self.assertEqual(complete_path.stat().st_mtime_ns, complete_mtime)
+
+    def test_completion_recovery_revalidates_missing_or_tampered_grant(
+        self,
+    ) -> None:
+        for mode in ("missing", "tampered"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                control, run_dir, _project = self._workspace(root)
+                _enable_v2_readiness(control, root)
+                _enable_active_diagnosis(control, root)
+                self.controller.start_run(control, run_dir)
+                grant_id = f"grant-recovery-{mode}"
+                self._authorize_active_run(control, run_dir, grant_id)
+                hypothesis, request = self._active_proposal(run_dir)
+                pending = self.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    hypothesis,
+                    request,
+                )
+                completed = self.controller.collect_active_diagnosis_evidence(
+                    control,
+                    run_dir,
+                )
+                signature = completed["last_request_signature"]
+                attempt = (
+                    run_dir
+                    / "active_diagnosis"
+                    / "evidence"
+                    / signature
+                )
+                complete_path = attempt / "complete.json"
+                execution_path = attempt / "execution.json"
+                complete_bytes = complete_path.read_bytes()
+                execution_bytes = execution_path.read_bytes()
+                complete_mtime = complete_path.stat().st_mtime_ns
+                execution_mtime = execution_path.stat().st_mtime_ns
+                (run_dir / "state_commit.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": (
+                                "cuda-workload-optimizer/state-commit-v1"
+                            ),
+                            "state_digest": self.controller._canonical_digest(
+                                pending
+                            ),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                self._invalidate_active_run_grant(
+                    run_dir,
+                    grant_id,
+                    mode,
+                )
+                before = self.controller.read_run_state(run_dir)
+
+                with self.assertRaises(self.controller.ValidationError):
+                    self.controller.resume_run(run_dir)
+
+                after = self.controller.read_run_state(run_dir)
+                self.assertEqual(after, before)
+                self.assertEqual(after["next_action"], "collect_evidence")
+                self.assertEqual(
+                    after["controlled_spend_seconds"],
+                    before["controlled_spend_seconds"],
+                )
+                self.assertEqual(complete_path.read_bytes(), complete_bytes)
+                self.assertEqual(execution_path.read_bytes(), execution_bytes)
+                self.assertEqual(
+                    complete_path.stat().st_mtime_ns,
+                    complete_mtime,
+                )
+                self.assertEqual(
+                    execution_path.stat().st_mtime_ns,
+                    execution_mtime,
+                )
 
     def test_equivalent_request_history_survives_the_next_round(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2774,6 +3158,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -2825,6 +3210,7 @@ class WorkloadRoundTests(unittest.TestCase):
             ).hexdigest()
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             active = run_dir / "active_diagnosis"
             before = json.loads((active / "performance_model.json").read_text("utf-8"))
             hypothesis, request = self._active_proposal(run_dir)
@@ -2880,6 +3266,7 @@ class WorkloadRoundTests(unittest.TestCase):
             ).hexdigest()
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
 
             first_hypothesis, first_request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
@@ -3084,6 +3471,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -3732,6 +4120,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -3752,6 +4141,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -3781,6 +4171,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -3816,6 +4207,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -3839,6 +4231,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_active_diagnosis(control, root)
             _enable_v2_readiness(control, root, capability_ids=("gpu-execute",))
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             policy = json.loads(
                 (run_dir / "active_diagnosis" / "selection_policy.json").read_text("utf-8")
             )
@@ -3913,6 +4306,7 @@ class WorkloadRoundTests(unittest.TestCase):
             )
             readiness_path.write_text(json.dumps(readiness), encoding="utf-8")
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             request["requests"][0]["action_id"] = "direction-experiment-project-copy"
             self.controller.register_active_diagnosis_proposal(
@@ -3959,6 +4353,7 @@ class WorkloadRoundTests(unittest.TestCase):
             ).hexdigest()
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -3995,6 +4390,7 @@ class WorkloadRoundTests(unittest.TestCase):
             ).hexdigest()
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -4038,6 +4434,7 @@ class WorkloadRoundTests(unittest.TestCase):
             contract["actions"][0]["argv"][0] = str(launcher)
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -4073,6 +4470,7 @@ class WorkloadRoundTests(unittest.TestCase):
             ).hexdigest()
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -4114,6 +4512,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -4138,6 +4537,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -4162,6 +4562,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             self.controller.register_active_diagnosis_proposal(
                 control, run_dir, hypothesis, request
@@ -4183,6 +4584,7 @@ class WorkloadRoundTests(unittest.TestCase):
             _enable_v2_readiness(control, root)
             _enable_active_diagnosis(control, root)
             self.controller.start_run(control, run_dir)
+            self._authorize_active_run(control, run_dir)
             hypothesis, request = self._active_proposal(run_dir)
             request["epoch_id"] = "epoch-stale"
             with self.assertRaisesRegex(ValueError, "epoch"):

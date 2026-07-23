@@ -4148,6 +4148,7 @@ def _start_run_unlocked(
             "control_digest": control_digest,
             "workload_source_hash": workload.source_hash,
             "investment_control_version": "run-grant-v1",
+            "controlled_spend_seconds": 0.0,
             "started_at_epoch": now,
             "updated_at_epoch": now,
             "soft_target_epoch": now + runtime["soft_target_seconds"],
@@ -4614,14 +4615,41 @@ def _run_authorization_binding_facts(
         raise ValidationError("control manifest drifted before run authorization")
     _load_frozen_control(run_root, state)
     _load_initial_investment_brief(run_root, state)
-    (
-        context,
-        _epoch,
-        _execution_map,
-        _evidence_catalog,
-        _action_catalog,
-        _selection_policy,
-    ) = _load_active_diagnosis_context(control, run_root, state)
+    if _identity(control, "project")["digest"] != state.get(
+        "baseline_identity_digest"
+    ):
+        raise ValidationError("run authorization project identity drifted")
+    workload = _normalize_frozen_workload(control)
+    if workload.source_hash != state.get("workload_source_hash"):
+        raise ValidationError("run authorization workload identity drifted")
+    environment_identity = state.get("baseline_environment_identity_digest")
+    if (
+        environment_identity is not None
+        and _identity(control, "isolated_environment")["digest"]
+        != environment_identity
+    ):
+        raise ValidationError("run authorization environment identity drifted")
+    contract = _load_frozen_analysis_contract(run_root, state)
+    epoch_path = run_root / "active_diagnosis" / "epoch.json"
+    if epoch_path.is_symlink() or not epoch_path.is_file():
+        raise ValidationError("run authorization analysis epoch must be a regular file")
+    epoch = load_json_object(epoch_path)
+    epoch_module = _load_analysis_epoch_module()
+    expected_identities = {
+        "workload_contract_sha256": _sha256_path(Path(control["workload_manifest"])),
+        "environment_sha256": environment_identity,
+        "source_sha256": state["baseline_identity_digest"],
+        "analysis_policy_sha256": contract["analysis_policy_sha256"],
+    }
+    try:
+        epoch = epoch_module.validate_epoch(
+            epoch,
+            expected_identities=expected_identities,
+        )
+    except ValueError as error:
+        raise ValidationError(
+            f"run authorization analysis epoch is invalid: {error}"
+        ) from error
     return {
         "control_digest": state["control_digest"],
         "workload_source_hash": state["workload_source_hash"],
@@ -4629,7 +4657,7 @@ def _run_authorization_binding_facts(
         "baseline_environment_identity_digest": state[
             "baseline_environment_identity_digest"
         ],
-        "analysis_epoch_sha256": context["epoch_sha256"],
+        "analysis_epoch_sha256": epoch_module.epoch_digest(epoch),
     }
 
 
@@ -5397,13 +5425,42 @@ def _load_bound_diagnostic_artifacts(
     return decision
 
 
+def _controlled_spend_seconds(state: Mapping[str, Any]) -> float:
+    value = state.get("controlled_spend_seconds")
+    if (
+        type(value) not in {int, float}
+        or not math.isfinite(float(value))
+        or float(value) < 0
+    ):
+        raise ValidationError("run state controlled_spend_seconds is invalid")
+    return float(value)
+
+
+def _controlled_spend_after_execution(
+    state: Mapping[str, Any],
+    execution: Mapping[str, Any],
+) -> float:
+    duration = execution.get("duration_seconds")
+    if (
+        type(duration) not in {int, float}
+        or not math.isfinite(float(duration))
+        or float(duration) < 0
+    ):
+        raise ValidationError("evidence execution duration_seconds is invalid")
+    total = _controlled_spend_seconds(state) + float(duration)
+    if not math.isfinite(total):
+        raise ValidationError("run controlled spend overflowed")
+    return total
+
+
 def _diagnostic_investment_inputs(
     run_root: Path, state: Mapping[str, Any], context: Mapping[str, Any]
 ) -> dict:
     now = time.time()
     started = state.get("optimization_started_at_epoch", state["started_at_epoch"])
-    elapsed = max(0.0, now - float(started))
-    remaining = max(0.0, float(state["deadline_epoch"]) - now)
+    wall_elapsed = max(0.0, now - float(started))
+    grant = _load_bound_authorization_grant(run_root, state)
+    controlled_spend = _controlled_spend_seconds(state)
     contract = load_json_object(
         run_root / "active_diagnosis" / "analysis_contract.json"
     )
@@ -5433,8 +5490,11 @@ def _diagnostic_investment_inputs(
             }
         )
     return {
-        "authorization": {"max_seconds": elapsed + remaining},
-        "spend": {"elapsed_seconds": elapsed},
+        "authorization": {
+            "max_seconds": float(grant["max_controlled_seconds"]),
+        },
+        "spend": {"elapsed_seconds": controlled_spend},
+        "wall_elapsed_seconds": wall_elapsed,
         "candidate_history": copy.deepcopy(context.get("candidate_history", [])),
         "candidate_proposals": candidate_proposals,
         "action_bounds": action_bounds,
@@ -5589,8 +5649,9 @@ def _register_active_diagnosis_proposal_unlocked(
     _load_frozen_control(run_root, state)
     if state["next_action"] != "propose_hypotheses":
         raise ValidationError("run is not ready for an active diagnosis proposal")
-    _check_deadline(state)
     _active_ledger_append_boundary(run_root, "proposal")
+    _load_bound_authorization_grant(run_root, state, normalized)
+    _check_deadline(state)
     (
         context,
         epoch,
@@ -6216,11 +6277,13 @@ def _recover_or_block_active_evidence_attempt(
         **expected_digests,
     }
     payload_sha = _canonical_digest(event_payload)
-    events = _verify_active_diagnosis_ledger(run_root)
-    if not any(
-        event["event_type"] == "evidence"
-        and event["payload_sha256"] == payload_sha
-        for event in events
+    events, committed_sequence = _active_ledger_append_boundary(
+        run_root,
+        "evidence",
+    )
+    if (
+        len(events) != committed_sequence + 1
+        or events[-1]["payload_sha256"] != payload_sha
     ):
         raise ValidationError("evidence completion has no matching ledger event")
     recovered = copy.deepcopy(dict(state))
@@ -6232,6 +6295,10 @@ def _recover_or_block_active_evidence_attempt(
             "diagnosis_context_sha256": completion["context_sha256"],
             "last_request_signature": signature,
             "active_diagnosis_round": int(state.get("active_diagnosis_round", 1)) + 1,
+            "controlled_spend_seconds": _controlled_spend_after_execution(
+                state,
+                execution,
+            ),
         }
     )
     recovered.update(_active_ledger_binding(events))
@@ -6263,6 +6330,7 @@ def _collect_active_diagnosis_evidence_unlocked(
         return state
     if state["next_action"] != "collect_evidence":
         raise ValidationError("run is not ready to collect active diagnosis evidence")
+    _load_bound_authorization_grant(run_root, state, normalized)
     decision = _load_bound_diagnostic_artifacts(
         run_root, state, expected_decision="MEASURE"
     )
@@ -6468,6 +6536,10 @@ def _collect_active_diagnosis_evidence_unlocked(
             "diagnosis_context_sha256": _canonical_digest(refreshed_context),
             "last_request_signature": signature,
             "active_diagnosis_round": int(state.get("active_diagnosis_round", 1)) + 1,
+            "controlled_spend_seconds": _controlled_spend_after_execution(
+                state,
+                execution,
+            ),
         }
     )
     updated.update(_active_ledger_binding(_verify_active_diagnosis_ledger(run_root)))

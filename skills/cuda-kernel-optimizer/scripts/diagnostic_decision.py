@@ -429,14 +429,13 @@ def _investment_inputs(
     authorization: Mapping[str, Any] | None,
     spend: Mapping[str, Any] | None,
 ) -> tuple[dict, dict]:
-    timed = _timing_spend(model)
-    explicit = 0.0
-    if spend is not None:
-        explicit = _number(
+    if spend is None:
+        elapsed = _timing_spend(model)
+    else:
+        elapsed = _number(
             _object(spend, "spend").get("elapsed_seconds"),
             "spend.elapsed_seconds",
         )
-    elapsed = max(timed, explicit)
     if authorization is None:
         maximum = elapsed
     else:
@@ -695,6 +694,7 @@ def decide_next_step(
     external_review: Mapping[str, Any] | None = None,
     authorization: Mapping[str, Any] | None = None,
     spend: Mapping[str, Any] | None = None,
+    wall_elapsed_seconds: float | None = None,
     candidate_history: Sequence[Mapping[str, Any]] | None = None,
     candidate_proposals: Sequence[Mapping[str, Any]] | None = None,
     knowledge_adaptation: Mapping[str, Any] | None = None,
@@ -719,6 +719,11 @@ def decide_next_step(
     )
     adaptive_authorization, adaptive_spend = _investment_inputs(
         model, authorization, spend
+    )
+    wall_elapsed = (
+        adaptive_spend["elapsed_seconds"]
+        if wall_elapsed_seconds is None
+        else _number(wall_elapsed_seconds, "wall_elapsed_seconds")
     )
     adaptive = _ADAPTIVE_INVESTMENT.decide_next_action(
         directions,
@@ -1018,6 +1023,7 @@ def decide_next_step(
         "portfolio": copy.deepcopy(adaptive["portfolio"]),
         "cumulative_investment": {
             "elapsed_seconds": adaptive_spend["elapsed_seconds"],
+            "wall_elapsed_seconds": wall_elapsed,
             "remaining_authorization_seconds": remaining,
             "projected_p90_seconds": (
                 None
@@ -1025,7 +1031,7 @@ def decide_next_step(
                 and blocked_summary.get("p90_seconds") is None
                 else adaptive["projected_spend"]["p90_seconds"]
             ),
-            "bound_basis": "controller_elapsed_or_identity_matched_history",
+            "bound_basis": "committed_controlled_execution",
         },
         "selected_action": copy.deepcopy(effective_selected_action),
         "blocked_action": blocked_summary,

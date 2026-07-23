@@ -194,6 +194,25 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
         self.epoch = epoch_fixture()
         self.evidence = evidence_catalog()
 
+    def test_explicit_controlled_spend_is_not_inflated_by_timing_history(
+        self,
+    ) -> None:
+        authorization, spend = self.decision_module._investment_inputs(
+            {
+                "action_timing_estimates": {
+                    "pytorch-operator-trace": {
+                        "sample_count": 2,
+                        "p50_seconds": 20.0,
+                    }
+                }
+            },
+            {"max_seconds": 30.0},
+            {"elapsed_seconds": 7.0},
+        )
+
+        self.assertEqual(authorization, {"max_seconds": 30.0})
+        self.assertEqual(spend, {"elapsed_seconds": 7.0})
+
     def _controller_with_two_supported_directions(self, root: Path):
         helper = workload_fixtures.WorkloadRoundTests()
         helper.setUp()
@@ -269,6 +288,11 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
         )
         contract_path.write_text(json.dumps(contract), encoding="utf-8")
         helper.controller.start_run(control, run_dir)
+        helper._authorize_active_run(
+            control,
+            run_dir,
+            "grant-vertical-supported-directions",
+        )
 
         def bind(hypothesis, request):
             active = run_dir / "active_diagnosis"
@@ -732,7 +756,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     investment["cumulative_investment"]["bound_basis"],
-                    "controller_elapsed_or_identity_matched_history",
+                    "committed_controlled_execution",
                 )
                 self.assertEqual(
                     investment["next_feedback_point"], action_id
@@ -2184,6 +2208,11 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             workload_fixtures._enable_v2_readiness(control, root)
             workload_fixtures._enable_active_diagnosis(control, root)
             helper.controller.start_run(control, run_dir)
+            helper._authorize_active_run(
+                control,
+                run_dir,
+                "grant-vertical-raw-knowledge",
+            )
             hypothesis, request = helper._active_proposal(run_dir)
             request["requests"] = []
             raw = {
@@ -2254,6 +2283,11 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             workload_fixtures._enable_v2_readiness(control, root)
             workload_fixtures._enable_active_diagnosis(control, root)
             helper.controller.start_run(control, run_dir)
+            helper._authorize_active_run(
+                control,
+                run_dir,
+                "grant-vertical-cli-knowledge",
+            )
             hypothesis, request = helper._active_proposal(run_dir)
             request["requests"] = []
             raw = {
