@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import copy
 import math
 import os
 import signal
@@ -323,50 +322,29 @@ def validate_candidate_declaration(value: Mapping, contract: Mapping) -> dict:
 
 
 class CandidateGate:
-    """Run the cheapest eligible evidence first and stop on a conclusive gate."""
+    """Purely select the next candidate stage or a terminal gate decision."""
 
     def __init__(
         self,
         contract: Mapping,
         candidate: Mapping,
-        *,
-        now: Callable[[], float] = time.monotonic,
-        pre_gate_elapsed_seconds: float = 0.0,
     ) -> None:
         self.contract = _validate_gate_contract(contract)
         self.candidate = _validate_candidate(candidate, self.contract)
-        if not callable(now):
-            raise ValueError("now must be callable")
-        self.now = now
-        elapsed = _validate_time(
-            pre_gate_elapsed_seconds, "pre_gate_elapsed_seconds"
-        )
-        if elapsed < 0.0:
-            raise ValueError(
-                "pre_gate_elapsed_seconds must be a non-negative finite number"
-            )
-        self.pre_gate_elapsed_seconds = elapsed
-        self._terminal_result: dict | None = None
 
     def _result(
         self,
         *,
-        started_at: float,
+        controlled_spend_seconds: float,
         decision: str,
         stop_reason: str,
         completed: Sequence[str],
         next_stage: str | None = None,
         blocked_action: Mapping | None = None,
         projected_p90_seconds: float | None | object = _PROJECTED_SPEND_UNSET,
-        observed_elapsed_seconds: float | None = None,
         details: Mapping | None = None,
     ) -> dict:
-        elapsed = (
-            self.pre_gate_elapsed_seconds
-            + max(0.0, float(self.now()) - started_at)
-            if observed_elapsed_seconds is None
-            else observed_elapsed_seconds
-        )
+        elapsed = float(controlled_spend_seconds)
         last_stage = _CLAIM_LAST_STAGE[self.candidate["claim_layer"]]
         applicable = _CANDIDATE_STAGES[: _CANDIDATE_STAGES.index(last_stage) + 1]
         skipped = [stage for stage in applicable if stage not in completed]
@@ -394,25 +372,71 @@ class CandidateGate:
         }
         if details is not None:
             result.update(dict(details))
-        self._terminal_result = copy.deepcopy(result)
         return result
 
-    def run(self, actions: Mapping[str, Callable[[], Mapping]]) -> dict:
-        if not isinstance(actions, Mapping):
-            raise ValueError("actions must be a mapping")
-        if self._terminal_result is not None:
-            return copy.deepcopy(self._terminal_result)
-        started = float(self.now())
-        completed: list[str] = []
+    def decide(
+        self,
+        completed_results: Mapping[str, Mapping],
+        controlled_spend_seconds: float,
+        authorization: Mapping,
+    ) -> dict:
+        """Return one deterministic decision without invoking any stage runner."""
+        if not isinstance(completed_results, Mapping):
+            raise ValueError("completed_results must be a mapping")
+        if not isinstance(authorization, Mapping):
+            raise ValueError("authorization must be a mapping")
+        authorization_fields = {
+            "max_controlled_seconds",
+            "max_stage",
+            "applicable_stages",
+        }
+        if set(authorization) != authorization_fields:
+            raise ValueError("authorization fields are invalid")
+        spend = _validate_time(
+            controlled_spend_seconds, "controlled_spend_seconds"
+        )
+        if spend < 0.0:
+            raise ValueError(
+                "controlled_spend_seconds must be a non-negative finite number"
+            )
         last_stage = _CLAIM_LAST_STAGE[self.candidate["claim_layer"]]
         applicable = _CANDIDATE_STAGES[: _CANDIDATE_STAGES.index(last_stage) + 1]
-        for stage in applicable:
-            if (
-                callable(actions.get(stage))
-                and stage not in self.candidate["estimated_cost"]
-            ):
+        mandatory = [stage for stage in applicable if stage != "profiler"]
+        requested = authorization["applicable_stages"]
+        if (
+            not isinstance(requested, Sequence)
+            or isinstance(requested, (str, bytes))
+            or len(set(requested)) != len(requested)
+            or any(stage not in applicable for stage in requested)
+        ):
+            raise ValueError("authorization applicable_stages are invalid")
+        required = [stage for stage in applicable if stage in requested]
+        if list(requested) != required:
+            raise ValueError("authorization applicable_stages are out of order")
+        if any(stage not in required for stage in mandatory):
+            raise ValueError(
+                "authorization applicable_stages must include every mandatory stage"
+            )
+
+        unknown_results = sorted(set(completed_results) - set(required))
+        if unknown_results:
+            raise ValueError(
+                "completed_results contain inapplicable stages: "
+                + ", ".join(unknown_results)
+            )
+        completed = [
+            stage for stage in required if stage in completed_results
+        ]
+        if completed != required[: len(completed)]:
+            raise ValueError("completed_results must form an ordered stage prefix")
+        for stage in completed:
+            if not isinstance(completed_results[stage], Mapping):
+                raise ValueError(f"{stage} result must be a mapping")
+
+        for stage in required:
+            if stage not in self.candidate["estimated_cost"]:
                 return self._result(
-                    started_at=started,
+                    controlled_spend_seconds=spend,
                     decision="REVIEW_REQUIRED",
                     stop_reason="cost_unavailable_for_next_action",
                     completed=completed,
@@ -424,54 +448,54 @@ class CandidateGate:
                     },
                     projected_p90_seconds=None,
                 )
-        threshold = self.candidate["minimum_effect"]["value"]
-        for stage in applicable:
-            action = actions.get(stage)
-            if stage == "profiler" and not callable(action):
-                continue
-            if not callable(action):
-                return self._result(
-                    started_at=started,
-                    decision="STOP",
-                    stop_reason=f"missing_{stage}_action",
-                    completed=completed,
-                )
-            elapsed = self.pre_gate_elapsed_seconds + max(
-                0.0, float(self.now()) - started
+
+        maximum = authorization["max_controlled_seconds"]
+        maximum = _validate_time(maximum, "authorization.max_controlled_seconds")
+        if maximum < 0.0:
+            raise ValueError(
+                "authorization.max_controlled_seconds must be non-negative"
             )
-            p90 = self.candidate["estimated_cost"][stage]["p90_seconds"]
-            projected = elapsed + p90
-            if projected > self.contract["hard_ceiling_seconds"]:
+        maximum = min(maximum, self.contract["hard_ceiling_seconds"])
+        max_stage = authorization.get("max_stage", last_stage)
+        stage_rank = {"diagnosis": -1, **{
+            stage: index for index, stage in enumerate(_CANDIDATE_STAGES)
+        }}
+        if max_stage not in stage_rank:
+            raise ValueError("authorization.max_stage is invalid")
+
+        threshold = self.candidate["minimum_effect"]["value"]
+        for stage in completed:
+            outcome = completed_results[stage]
+            if (
+                outcome.get("timed_out") is True
+                and outcome.get("reason") == "candidate_stage_timeout"
+            ):
                 return self._result(
-                    started_at=started,
+                    controlled_spend_seconds=spend,
                     decision="REVIEW_REQUIRED",
-                    stop_reason="authorization_insufficient_for_next_action",
+                    stop_reason="candidate_stage_timeout",
                     completed=completed,
                     next_stage=stage,
                     blocked_action={
                         "action_id": stage,
-                        "p90_seconds": p90,
-                        "reason": "authorization_insufficient_for_next_action",
+                        "p90_seconds": self.candidate["estimated_cost"][stage][
+                            "p90_seconds"
+                        ],
+                        "reason": "candidate_stage_timeout",
                     },
-                    projected_p90_seconds=projected,
-                    observed_elapsed_seconds=elapsed,
+                    projected_p90_seconds=spend,
                 )
-            try:
-                outcome = action()
-                if not isinstance(outcome, Mapping):
-                    raise ValueError(f"{stage} result must be a mapping")
-            except Exception as error:
+            if outcome.get("action_failed") is True:
                 return self._result(
-                    started_at=started,
+                    controlled_spend_seconds=spend,
                     decision="STOP",
                     stop_reason=f"{stage}_action_failed",
                     completed=completed,
                     details={
                         "failed_stage": stage,
-                        "failure_type": type(error).__name__,
+                        "failure_type": outcome.get("failure_type", "Exception"),
                     },
                 )
-            completed.append(stage)
             status = outcome.get("status")
             allowed_statuses = (
                 {"passed", "not_applicable"}
@@ -488,7 +512,7 @@ class CandidateGate:
                     "service": "service_failed",
                 }[stage]
                 return self._result(
-                    started_at=started,
+                    controlled_spend_seconds=spend,
                     decision="STOP",
                     stop_reason=reason,
                     completed=completed,
@@ -498,42 +522,42 @@ class CandidateGate:
                 upper = outcome.get("upper_bound")
                 if isinstance(lower, bool) or not isinstance(lower, (int, float)):
                     return self._result(
-                        started_at=started,
+                        controlled_spend_seconds=spend,
                         decision="STOP",
                         stop_reason="short_pair_missing_lower_bound",
                         completed=completed,
                     )
                 if isinstance(upper, bool) or not isinstance(upper, (int, float)):
                     return self._result(
-                        started_at=started,
+                        controlled_spend_seconds=spend,
                         decision="STOP",
                         stop_reason="short_pair_missing_upper_bound",
                         completed=completed,
                     )
                 if not math.isfinite(float(lower)):
                     return self._result(
-                        started_at=started,
+                        controlled_spend_seconds=spend,
                         decision="STOP",
                         stop_reason="short_pair_invalid_lower_bound",
                         completed=completed,
                     )
                 if not math.isfinite(float(upper)):
                     return self._result(
-                        started_at=started,
+                        controlled_spend_seconds=spend,
                         decision="STOP",
                         stop_reason="short_pair_invalid_upper_bound",
                         completed=completed,
                     )
                 if float(lower) > float(upper):
                     return self._result(
-                        started_at=started,
+                        controlled_spend_seconds=spend,
                         decision="STOP",
                         stop_reason="short_pair_invalid_interval",
                         completed=completed,
                     )
                 if float(upper) < threshold:
                     return self._result(
-                        started_at=started,
+                        controlled_spend_seconds=spend,
                         decision="STOP",
                         stop_reason="effect_upper_bound_below_minimum",
                         completed=completed,
@@ -542,27 +566,58 @@ class CandidateGate:
                 lower = outcome.get("lower_bound")
                 if isinstance(lower, bool) or not isinstance(lower, (int, float)):
                     return self._result(
-                        started_at=started,
+                        controlled_spend_seconds=spend,
                         decision="STOP",
                         stop_reason=f"{stage}_missing_lower_bound",
                         completed=completed,
                     )
                 if not math.isfinite(float(lower)):
                     return self._result(
-                        started_at=started,
+                        controlled_spend_seconds=spend,
                         decision="STOP",
                         stop_reason=f"{stage}_invalid_lower_bound",
                         completed=completed,
                     )
                 if float(lower) < threshold:
                     return self._result(
-                        started_at=started,
+                        controlled_spend_seconds=spend,
                         decision="STOP",
                         stop_reason="effect_not_confirmed",
                         completed=completed,
                     )
+
+        if len(completed) < len(required):
+            next_stage = required[len(completed)]
+            p90 = self.candidate["estimated_cost"][next_stage]["p90_seconds"]
+            projected = spend + p90
+            if (
+                stage_rank[next_stage] > stage_rank[max_stage]
+                or projected > maximum
+            ):
+                return self._result(
+                    controlled_spend_seconds=spend,
+                    decision="REVIEW_REQUIRED",
+                    stop_reason="authorization_insufficient_for_next_action",
+                    completed=completed,
+                    next_stage=next_stage,
+                    blocked_action={
+                        "action_id": next_stage,
+                        "p90_seconds": p90,
+                        "reason": "authorization_insufficient_for_next_action",
+                    },
+                    projected_p90_seconds=projected,
+                )
+            return self._result(
+                controlled_spend_seconds=spend,
+                decision="RUN_STAGE",
+                stop_reason="next_stage_authorized",
+                completed=completed,
+                next_stage=next_stage,
+                projected_p90_seconds=projected,
+            )
+
         return self._result(
-            started_at=started,
+            controlled_spend_seconds=spend,
             decision="PROMOTE",
             stop_reason="promotion_condition_satisfied",
             completed=completed,

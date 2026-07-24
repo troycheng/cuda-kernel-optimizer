@@ -4,6 +4,8 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -2414,6 +2416,272 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             self.assertEqual(state["next_action"], "refresh_required")
             self.assertEqual(state["candidate_hypothesis_id"], "h-framework-gap")
 
+    def test_candidate_stage_timeout_uses_remaining_grant_and_seals_completion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (
+                helper,
+                control,
+                run_dir,
+                project,
+                hypothesis,
+                request,
+            ) = self._controller_with_two_supported_directions(root)
+            state = helper.controller.read_run_state(run_dir)
+            narrowed_maximum = float(state["controlled_spend_seconds"]) + 0.5
+            helper.controller.authorize_run(
+                control,
+                run_dir,
+                workload_fixtures._run_grant(
+                    "grant-candidate-stage-timeout",
+                    max_controlled_seconds=narrowed_maximum,
+                ),
+            )
+            helper.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            change = helper._change("fast")
+            change["diagnosis_ids"] = ["h-framework-gap"]
+            change["candidate"]["estimated_cost"]["static_review"][
+                "p90_seconds"
+            ] = 0.01
+            change["candidate"]["estimated_cost"]["build_correctness"][
+                "p90_seconds"
+            ] = 0.01
+            helper.controller.seal_active_diagnosis_candidate_proposal(
+                control,
+                run_dir,
+                {
+                    "proposal_id": "proposal-stage-timeout",
+                    "hypothesis_id": "h-framework-gap",
+                    "mutation_scope": "project",
+                    "risk": "low",
+                    "candidate_digest": helper.controller._canonical_digest(
+                        change["candidate"]
+                    ),
+                    "change_set_digest": helper.controller._canonical_digest(
+                        change
+                    ),
+                    "estimated_cost": {
+                        "p50_seconds": 0.01,
+                        "p90_seconds": 0.02,
+                        "basis": "user_authorized_upper_bound",
+                    },
+                    "fresh_until_epoch": time.time() + 600.0,
+                },
+            )
+            helper.controller.register_change(control, run_dir, change)
+            (project / "configs" / "value.json").write_text(
+                '{"workers": 8}\n', encoding="utf-8"
+            )
+            state = helper.controller.read_run_state(run_dir)
+            grant = helper.controller._authorization_grant_artifacts(run_dir)[
+                state["authorization_grant_sha256"]
+            ]
+            remaining_authorization = 0.2
+            state["controlled_spend_seconds"] = (
+                float(grant["max_controlled_seconds"])
+                - remaining_authorization
+            )
+            starting_spend = state["controlled_spend_seconds"]
+            helper.controller._write_state(run_dir, state)
+
+            child_pid_path = root / "candidate-timeout-child.pid"
+            stage_script = root / "candidate-timeout-stage.py"
+            stage_script.write_text(
+                "import signal, subprocess, sys, time\n"
+                "from pathlib import Path\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])\n"
+                f"Path({str(child_pid_path)!r}).write_text(str(child.pid))\n"
+                "time.sleep(60)\n",
+                encoding="utf-8",
+            )
+            observed_timeouts = []
+
+            def timed_workload(
+                _control,
+                _run_root,
+                *,
+                timeout_seconds,
+                **_kwargs,
+            ):
+                observed_timeouts.append(float(timeout_seconds))
+                if float(timeout_seconds) > remaining_authorization:
+                    raise AssertionError(
+                        "candidate stage timeout exceeded remaining authorization"
+                    )
+                result = helper.controller._load_budget_module().run_budgeted_command(
+                    [sys.executable, str(stage_script)],
+                    timeout_seconds=timeout_seconds,
+                    grace_seconds=0.05,
+                )
+                if result.timed_out:
+                    raise TimeoutError("candidate stage reached its controlled timeout")
+                raise AssertionError("candidate timeout command unexpectedly completed")
+
+            try:
+                with mock.patch.object(
+                    helper.controller,
+                    "_run_python_workload_once_bounded",
+                    side_effect=timed_workload,
+                ):
+                    decision = helper.controller.evaluate_change(run_dir)
+
+                committed = helper.controller.read_run_state(run_dir)
+                completion = committed["candidate_stage_completions"][
+                    "build_correctness"
+                ]
+                self.assertEqual(decision["status"], "review_required")
+                self.assertEqual(decision["reason"], "candidate_stage_timeout")
+                self.assertEqual(
+                    completion["result"],
+                    {
+                        "status": "review_required",
+                        "reason": "candidate_stage_timeout",
+                        "timed_out": True,
+                    },
+                )
+                self.assertEqual(
+                    json.loads(
+                        (run_dir / completion["stage_artifact_path"]).read_text(
+                            "utf-8"
+                        )
+                    ),
+                    completion["result"],
+                )
+                self.assertGreater(
+                    completion["duration_seconds"],
+                    0.0,
+                )
+                self.assertGreater(
+                    committed["controlled_spend_seconds"],
+                    starting_spend,
+                )
+                self.assertLessEqual(
+                    committed["controlled_spend_seconds"],
+                    float(grant["max_controlled_seconds"]),
+                )
+                self.assertEqual(len(observed_timeouts), 1)
+                self.assertGreater(observed_timeouts[0], 0.01)
+                self.assertLessEqual(
+                    observed_timeouts[0],
+                    remaining_authorization,
+                )
+                self.assertTrue(child_pid_path.is_file())
+                self.assertTrue(
+                    workload_fixtures._wait_pid_gone(
+                        int(child_pid_path.read_text("utf-8"))
+                    )
+                )
+            finally:
+                if child_pid_path.is_file():
+                    child_pid = int(child_pid_path.read_text("utf-8"))
+                    if workload_fixtures._pid_exists(child_pid):
+                        os.kill(child_pid, signal.SIGKILL)
+
+    def test_active_candidate_drift_after_runner_seals_spend_before_manual_recovery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (
+                helper,
+                control,
+                run_dir,
+                project,
+                hypothesis,
+                request,
+            ) = self._controller_with_two_supported_directions(root)
+            helper.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            change = helper._change("fast")
+            change["diagnosis_ids"] = ["h-framework-gap"]
+            helper.controller.seal_active_diagnosis_candidate_proposal(
+                control,
+                run_dir,
+                {
+                    "proposal_id": "proposal-runner-drift",
+                    "hypothesis_id": "h-framework-gap",
+                    "mutation_scope": "project",
+                    "risk": "low",
+                    "candidate_digest": helper.controller._canonical_digest(
+                        change["candidate"]
+                    ),
+                    "change_set_digest": helper.controller._canonical_digest(
+                        change
+                    ),
+                    "estimated_cost": {
+                        "p50_seconds": 10.0,
+                        "p90_seconds": 20.0,
+                        "basis": "user_authorized_upper_bound",
+                    },
+                    "fresh_until_epoch": time.time() + 600.0,
+                },
+            )
+            helper.controller.register_change(control, run_dir, change)
+            config = project / "configs" / "value.json"
+            config.write_text('{"workers": 8}\n', encoding="utf-8")
+            starting_spend = helper.controller.read_run_state(run_dir)[
+                "controlled_spend_seconds"
+            ]
+            original_runner = (
+                helper.controller._run_candidate_static_review_bounded
+            )
+
+            def drift_after_runner(*args, **kwargs):
+                result = original_runner(*args, **kwargs)
+                config.write_text('{"workers": 11}\n', encoding="utf-8")
+                return result
+
+            with mock.patch.object(
+                helper.controller,
+                "_run_candidate_static_review_bounded",
+                side_effect=drift_after_runner,
+            ):
+                decision = helper.controller.evaluate_change(run_dir)
+
+            committed = helper.controller.read_run_state(run_dir)
+            self.assertEqual(
+                (
+                    decision["status"],
+                    decision["next_action"],
+                    decision["manual_recovery_reason"],
+                ),
+                (
+                    "manual_recovery_required",
+                    "manual_recovery",
+                    "candidate_identity_drift",
+                ),
+            )
+            self.assertEqual(decision, committed)
+            self.assertEqual(
+                json.loads(config.read_text("utf-8"))["workers"],
+                11,
+            )
+            completion = committed["candidate_stage_completions"][
+                "static_review"
+            ]
+            self.assertEqual(
+                completion["result"]["reason"],
+                "candidate_identity_drift",
+            )
+            self.assertGreater(completion["duration_seconds"], 0.0)
+            self.assertGreater(
+                committed["controlled_spend_seconds"],
+                starting_spend,
+            )
+            self.assertFalse(
+                (run_dir / "candidate_stage_intent.json").exists()
+            )
+            self.assertFalse(
+                (run_dir / "candidate_stage_complete.json").exists()
+            )
+
     def test_active_review_replay_rejects_epoch_and_execution_map_drift(self) -> None:
         for target in ("epoch", "execution_map"):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
@@ -2459,10 +2727,12 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     '{"workers": 8}\n', encoding="utf-8"
                 )
                 state = helper.controller.read_run_state(run_dir)
-                started = time.time()
-                state["optimization_started_at_epoch"] = started
-                state["soft_target_epoch"] = started + 5.0
-                state["deadline_epoch"] = started + 5.0
+                grant = helper.controller._authorization_grant_artifacts(
+                    run_dir
+                )[state["authorization_grant_sha256"]]
+                state["controlled_spend_seconds"] = (
+                    float(grant["max_controlled_seconds"]) - 80.0
+                )
                 helper.controller._write_state(run_dir, state)
 
                 decision = helper.controller.evaluate_change(run_dir)

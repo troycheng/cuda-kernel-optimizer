@@ -6,7 +6,6 @@ import sys
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -276,6 +275,45 @@ class BudgetClockTests(unittest.TestCase):
 
 
 class CandidateGateTests(unittest.TestCase):
+    def _gate(self, *, include_profiler_cost: bool = True):
+        costs = {
+            "static_review": 1,
+            "build_correctness": 2,
+            "short_paired": 3,
+            "formal_paired": 5,
+        }
+        if include_profiler_cost:
+            costs["profiler"] = 4
+        return budget.CandidateGate(
+            {
+                "soft_target_seconds": 30,
+                "hard_ceiling_seconds": 300,
+                "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
+            },
+            {
+                "claim_layer": "workload",
+                "cheapest_falsifier": "static_review",
+                "estimated_cost": _declared_costs(**costs),
+                "minimum_effect": {"metric": "service_pct", "value": 0.5},
+                "rejection_condition": "any gate fails",
+                "promotion_condition": "formal lower bound passes",
+            },
+        )
+
+    def _authorization(self, **overrides):
+        authorization = {
+            "max_controlled_seconds": 300,
+            "max_stage": "formal_paired",
+            "applicable_stages": [
+                "static_review",
+                "build_correctness",
+                "short_paired",
+                "formal_paired",
+            ],
+        }
+        authorization.update(overrides)
+        return authorization
+
     def test_workload_costs_stop_at_formal_paired(self) -> None:
         contract = {
             "soft_target_seconds": 30,
@@ -334,50 +372,61 @@ class CandidateGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "applicable candidate stages"):
             budget.validate_candidate_declaration(with_service, contract)
 
-    def test_profiler_action_without_cost_fails_closed_before_any_action(self) -> None:
-        gate = budget.CandidateGate(
+    def test_decide_is_pure_and_selects_exactly_one_authorized_stage(self) -> None:
+        gate = self._gate()
+        completed = {}
+        authorization = self._authorization()
+        original_completed = dict(completed)
+        original_authorization = json.loads(json.dumps(authorization))
+
+        first = gate.decide(completed, 7.0, authorization)
+        second = gate.decide(completed, 7.0, authorization)
+
+        self.assertEqual(first, second)
+        self.assertEqual(completed, original_completed)
+        self.assertEqual(authorization, original_authorization)
+        self.assertEqual(first["decision"], "RUN_STAGE")
+        self.assertEqual(first["next_stage"], "static_review")
+        self.assertEqual(first["elapsed_seconds"], 7.0)
+        self.assertEqual(first["projected_spend"]["p90_seconds"], 8.0)
+
+    def test_sealed_stage_timeout_requires_review_instead_of_performance_stop(
+        self,
+    ) -> None:
+        result = self._gate().decide(
             {
-                "soft_target_seconds": 30,
-                "hard_ceiling_seconds": 300,
-                "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
+                "static_review": {"status": "passed"},
+                "build_correctness": {
+                    "status": "review_required",
+                    "reason": "candidate_stage_timeout",
+                    "timed_out": True,
+                },
             },
-            {
-                "claim_layer": "workload",
-                "cheapest_falsifier": "static_review",
-                "estimated_cost": _declared_costs(
-                    static_review=1,
-                    build_correctness=2,
-                    short_paired=3,
-                    formal_paired=5,
-                ),
-                "minimum_effect": {"metric": "service_pct", "value": 0.5},
-                "rejection_condition": "any gate fails",
-                "promotion_condition": "formal lower bound passes",
-            },
+            12.0,
+            self._authorization(),
         )
-        actions = {
-            "static_review": mock.Mock(return_value={"status": "passed"}),
-            "build_correctness": mock.Mock(return_value={"status": "passed"}),
-            "short_paired": mock.Mock(
-                return_value={
-                    "status": "passed",
-                    "lower_bound": 0.1,
-                    "upper_bound": 1.0,
-                }
-            ),
-            "profiler": mock.Mock(return_value={"status": "passed"}),
-            "formal_paired": mock.Mock(
-                return_value={"status": "passed", "lower_bound": 1.0}
-            ),
-        }
 
-        try:
-            result = gate.run(actions)
-        except KeyError as error:
-            self.fail(f"missing profiler cost escaped as KeyError: {error}")
+        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
+        self.assertEqual(result["stop_reason"], "candidate_stage_timeout")
+        self.assertEqual(result["next_stage"], "build_correctness")
 
-        for action in actions.values():
-            action.assert_not_called()
+    def test_requested_profiler_without_cost_fails_closed_before_any_stage(self) -> None:
+        gate = self._gate(include_profiler_cost=False)
+
+        result = gate.decide(
+            {},
+            0.0,
+            self._authorization(
+                applicable_stages=[
+                    "static_review",
+                    "build_correctness",
+                    "short_paired",
+                    "profiler",
+                    "formal_paired",
+                ]
+            ),
+        )
+
         self.assertEqual(result["decision"], "REVIEW_REQUIRED")
         self.assertEqual(result["stop_reason"], "cost_unavailable_for_next_action")
         self.assertEqual(result["next_stage"], "profiler")
@@ -401,115 +450,84 @@ class CandidateGateTests(unittest.TestCase):
             ],
         )
 
-    def test_action_exception_terminal_is_cached_after_failure_details_are_added(self) -> None:
-        gate = budget.CandidateGate(
-            {
-                "soft_target_seconds": 30,
-                "hard_ceiling_seconds": 300,
-                "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
-            },
-            {
-                "claim_layer": "kernel",
-                "cheapest_falsifier": "static_review",
-                "estimated_cost": _declared_costs(
-                    static_review=1,
-                    build_correctness=2,
-                    short_paired=3,
-                    profiler=4,
-                    formal_paired=5,
-                ),
-                "minimum_effect": {"metric": "mechanism_us", "value": 1.0},
-                "rejection_condition": "any gate fails",
-                "promotion_condition": "formal lower bound passes",
-            },
+    def test_authoritative_controlled_spend_exhaustion_requires_review(self) -> None:
+        gate = self._gate()
+
+        result = gate.decide(
+            {},
+            297.0,
+            self._authorization(max_controlled_seconds=297.5),
         )
-        action = mock.Mock(side_effect=RuntimeError("private"))
 
-        first = gate.run({"static_review": action})
-        second = gate.run({"static_review": action})
-
-        self.assertEqual(first, second)
-        self.assertEqual(first["failed_stage"], "static_review")
-        self.assertEqual(first["failure_type"], "RuntimeError")
-        self.assertEqual(action.call_count, 1)
-
-    def test_authorization_exhaustion_is_review_required_not_performance_stop(self) -> None:
-        now = mock.Mock(side_effect=[100.0, 100.0, 100.0])
-        gate = budget.CandidateGate(
-            {
-                "soft_target_seconds": 3,
-                "hard_ceiling_seconds": 3,
-                "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
-            },
-            {
-                "claim_layer": "kernel",
-                "cheapest_falsifier": "static_review",
-                "estimated_cost": _declared_costs(
-                    static_review=4,
-                    build_correctness=4,
-                    short_paired=4,
-                    profiler=4,
-                    formal_paired=4,
-                ),
-                "minimum_effect": {"metric": "mechanism_us", "value": 1.0},
-                "rejection_condition": "any evidence gate fails",
-                "promotion_condition": "formal lower bound passes",
-            },
-            now=now,
-        )
-        action = mock.Mock(return_value={"status": "passed"})
-
-        result = gate.run({"static_review": action})
-
-        action.assert_not_called()
         self.assertEqual(result["decision"], "REVIEW_REQUIRED")
         self.assertEqual(
             result["stop_reason"], "authorization_insufficient_for_next_action"
         )
+        self.assertEqual(result["blocked_action"]["action_id"], "static_review")
+        self.assertEqual(result["elapsed_seconds"], 297.0)
+        self.assertEqual(result["projected_spend"]["p90_seconds"], 298.0)
         self.assertNotIn("budget_expired", json.dumps(result))
 
-    def test_action_exception_returns_terminal_stop(self) -> None:
-        gate = budget.CandidateGate(
+    def test_authorization_is_a_closed_applicable_stage_view(self) -> None:
+        gate = self._gate()
+        for authorization in (
             {
-                "soft_target_seconds": 30,
-                "hard_ceiling_seconds": 300,
-                "minimum_effect": {"mechanism_us": 1.0, "service_pct": 0.5},
+                "max_controlled_seconds": 300,
+                "max_stage": "formal_paired",
             },
             {
-                "claim_layer": "workload",
-                "cheapest_falsifier": "static_review",
-                "estimated_cost": _declared_costs(
-                    static_review=1,
-                    build_correctness=2,
-                    short_paired=3,
-                    profiler=4,
-                    formal_paired=5,
-                ),
-                "minimum_effect": {"metric": "service_pct", "value": 0.5},
-                "rejection_condition": "any gate fails",
-                "promotion_condition": "all gates pass",
+                **self._authorization(),
+                "grant_id": "must-not-become-a-second-protocol",
             },
-        )
+        ):
+            with self.subTest(fields=sorted(authorization)):
+                with self.assertRaisesRegex(ValueError, "authorization fields"):
+                    gate.decide({}, 0.0, authorization)
 
-        result = gate.run(
-            {
-                "static_review": lambda: {"status": "passed"},
-                "build_correctness": lambda: {"status": "passed"},
-                "short_paired": lambda: (_ for _ in ()).throw(
-                    RuntimeError("sensitive backend detail")
-                ),
-            }
+    def test_failed_prerequisite_never_selects_a_downstream_stage(self) -> None:
+        cases = (
+            (
+                {"static_review": {"status": "failed"}},
+                "static_falsified",
+                "build_correctness",
+            ),
+            (
+                {
+                    "static_review": {"status": "passed"},
+                    "build_correctness": {"status": "failed"},
+                },
+                "correctness_failed",
+                "short_paired",
+            ),
+            (
+                {
+                    "static_review": {"status": "passed"},
+                    "build_correctness": {"status": "passed"},
+                    "short_paired": {
+                        "status": "passed",
+                        "lower_bound": -0.2,
+                        "upper_bound": 0.4,
+                    },
+                },
+                "effect_upper_bound_below_minimum",
+                "formal_paired",
+            ),
         )
+        for completed, stop_reason, forbidden_stage in cases:
+            with self.subTest(stop_reason=stop_reason):
+                result = self._gate().decide(
+                    completed,
+                    3.0,
+                    self._authorization(),
+                )
 
-        self.assertEqual(result["decision"], "STOP")
-        self.assertEqual(result["stop_reason"], "short_paired_action_failed")
-        self.assertEqual(result["failed_stage"], "short_paired")
-        self.assertEqual(result["failure_type"], "RuntimeError")
-        self.assertNotIn("sensitive backend detail", json.dumps(result))
-        self.assertEqual(
-            result["completed_stages"], ["static_review", "build_correctness"]
-        )
-        self.assertIn("formal_paired", result["skipped_expensive_stages"])
+                self.assertEqual(result["decision"], "STOP")
+                self.assertEqual(result["stop_reason"], stop_reason)
+                self.assertIsNone(result["next_stage"])
+                self.assertIn(
+                    forbidden_stage,
+                    result["skipped_expensive_stages"],
+                )
 
 
 if __name__ == "__main__":

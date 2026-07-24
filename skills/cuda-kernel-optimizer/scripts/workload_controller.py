@@ -141,6 +141,10 @@ class ValidationError(ValueError):
     """Raised when a workload-controller contract is not closed and safe."""
 
 
+class _CandidateStageTimeout(TimeoutError):
+    """Signal a known, bounded candidate command timeout to the stage committer."""
+
+
 def _pairs_without_duplicates(pairs):
     result = {}
     for key, value in pairs:
@@ -1561,8 +1565,6 @@ def review_change(
             redacted_diff = _redact_log(diff_path.read_text("utf-8"), ())
         else:
             redacted_diff += f" sha256={_sha256_path(diff_path)}"
-    change_path = run_root / "change_set.json"
-    _atomic_json(change_path, change)
     reviewer = _load_reviewer_module()
     blocks = {"quick": 3, "balanced": 5, "thorough": 9}[normalized["budget"]]
     request = reviewer.build_review_request(
@@ -1576,7 +1578,7 @@ def review_change(
         },
         artifact_hashes={
             "diagnosis.json": _sha256_path(diagnosis_path),
-            "change_set.json": _sha256_path(change_path),
+            "change_set.json": _canonical_digest(change),
         },
     )
     _atomic_json(run_root / "review_request.json", request)
@@ -2805,7 +2807,7 @@ def _validate_active_diagnosis_transition_contract(
             "candidate_started_at_epoch",
             "candidate_proposal_id",
             "candidate_proposal_digest",
-        }
+        } | _CANDIDATE_STAGE_STATE_FIELDS
     missing = object()
     changed_state_keys = {
         key
@@ -2913,6 +2915,12 @@ def _validate_active_diagnosis_transition_contract(
             "candidate_binding.json",
             "candidate.diff",
             "static_review.json",
+            "correctness.json",
+            "short_paired_evaluation.json",
+            "profiler_stage.json",
+            "formal_paired_evaluation.json",
+            "candidate_stage_intent.json",
+            "candidate_stage_complete.json",
             "evaluation.json",
             "time_gate.json",
             "review.json",
@@ -4606,6 +4614,9 @@ def _run_authorization_binding_facts(
     control: Mapping[str, Any],
     run_root: Path,
     state: Mapping[str, Any],
+    *,
+    active_scope_identity_digest: str | None = None,
+    allow_active_scope_identity_drift: bool = False,
 ) -> dict:
     if state.get("investment_control_version") != "run-grant-v1":
         raise ValidationError("run does not use run-grant-v1 investment control")
@@ -4615,8 +4626,33 @@ def _run_authorization_binding_facts(
         raise ValidationError("control manifest drifted before run authorization")
     _load_frozen_control(run_root, state)
     _load_initial_investment_brief(run_root, state)
-    if _identity(control, "project")["digest"] != state.get(
-        "baseline_identity_digest"
+    expected_project_identity = state.get("baseline_identity_digest")
+    expected_environment_identity = state.get(
+        "baseline_environment_identity_digest"
+    )
+    active_scope = state.get("change_scope")
+    if active_scope_identity_digest is not None:
+        active_identity = _sha256(
+            active_scope_identity_digest,
+            "active candidate scope identity",
+        )
+        if active_scope == "project":
+            expected_project_identity = active_identity
+        elif active_scope == "isolated_environment":
+            expected_environment_identity = active_identity
+        else:
+            raise ValidationError(
+                "active candidate authorization lacks a valid change scope"
+            )
+    elif allow_active_scope_identity_drift:
+        raise ValidationError(
+            "active scope drift allowance requires a candidate identity"
+        )
+    project_identity_drifted = (
+        _identity(control, "project")["digest"] != expected_project_identity
+    )
+    if project_identity_drifted and not (
+        allow_active_scope_identity_drift and active_scope == "project"
     ):
         raise ValidationError("run authorization project identity drifted")
     workload = _normalize_frozen_workload(control)
@@ -4624,9 +4660,13 @@ def _run_authorization_binding_facts(
         raise ValidationError("run authorization workload identity drifted")
     environment_identity = state.get("baseline_environment_identity_digest")
     if (
-        environment_identity is not None
+        expected_environment_identity is not None
         and _identity(control, "isolated_environment")["digest"]
-        != environment_identity
+        != expected_environment_identity
+        and not (
+            allow_active_scope_identity_drift
+            and active_scope == "isolated_environment"
+        )
     ):
         raise ValidationError("run authorization environment identity drifted")
     contract = _load_frozen_analysis_contract(run_root, state)
@@ -4720,6 +4760,9 @@ def _load_bound_authorization_grant(
     run_root: Path,
     state: Mapping[str, Any],
     control: Mapping[str, Any] | None = None,
+    *,
+    active_scope_identity_digest: str | None = None,
+    allow_active_scope_identity_drift: bool = False,
 ) -> dict:
     digest = _sha256(
         state.get("authorization_grant_sha256"),
@@ -4734,6 +4777,8 @@ def _load_bound_authorization_grant(
         normalized,
         run_root,
         state,
+        active_scope_identity_digest=active_scope_identity_digest,
+        allow_active_scope_identity_drift=allow_active_scope_identity_drift,
     )
     grants = _authorization_grant_artifacts(run_root)
     chain = _authorization_chain_digests(grants, digest)
@@ -6881,6 +6926,8 @@ def _register_change_unlocked(
     _atomic_json(run_root / "change_set.json", change)
     _atomic_json(run_root / "rounds" / "round-1" / "change_set.json", change)
     updated = copy.deepcopy(state)
+    for field in _CANDIDATE_STAGE_STATE_FIELDS:
+        updated.pop(field, None)
     if "change" not in updated["completed_stages"]:
         updated["completed_stages"].append("change")
     updated.update(
@@ -6994,6 +7041,74 @@ def _run_python_workload_once_bounded(
     return load_json_object(output_path)
 
 
+def _run_candidate_static_review_bounded(
+    control: Mapping[str, Any],
+    run_root: Path,
+    *,
+    timeout_seconds: float,
+) -> dict:
+    """Run the static candidate falsifier in a killable process group."""
+    if isinstance(timeout_seconds, bool) or not isinstance(
+        timeout_seconds, (int, float)
+    ):
+        raise ValidationError(
+            "candidate static review timeout must be a positive finite number"
+        )
+    timeout = float(timeout_seconds)
+    if not math.isfinite(timeout) or timeout <= 0.0:
+        raise ValidationError(
+            "candidate static review timeout must be a positive finite number"
+        )
+    artifact_path = run_root / _CANDIDATE_STAGE_ARTIFACTS["static_review"]
+    environment, _secrets = _probe_environment({})
+
+    def emit(event: Mapping[str, Any]) -> None:
+        if (
+            event.get("event") == "heartbeat"
+            or event.get("stop_reason") != "completed"
+        ):
+            print(
+                json.dumps(
+                    {**event, "task": "candidate-static-review"},
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+
+    result = _load_budget_module().run_budgeted_command(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "_candidate-static-review",
+            "--run-dir",
+            str(run_root),
+            "--out",
+            str(artifact_path),
+        ],
+        timeout_seconds=timeout,
+        grace_seconds=min(0.5, timeout),
+        popen_options={
+            "cwd": control["project_root"],
+            "env": environment,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        },
+        heartbeat_interval_seconds=min(30.0, timeout),
+        event_sink=emit,
+    )
+    if result.timed_out:
+        raise _CandidateStageTimeout(
+            "candidate static review exhausted its controlled timeout"
+        )
+    if result.returncode != 0:
+        raise RuntimeError("candidate static review child failed")
+    if artifact_path.is_symlink() or not artifact_path.is_file():
+        raise RuntimeError("candidate static review child produced no artifact")
+    return load_json_object(artifact_path)
+
+
 def _resume_active_diagnosis_after_candidate_rejection(
     run_root: Path,
     state: Mapping[str, Any],
@@ -7068,6 +7183,12 @@ def _resume_active_diagnosis_after_candidate_rejection(
         "candidate_binding.json",
         "candidate.diff",
         "static_review.json",
+        "correctness.json",
+        "short_paired_evaluation.json",
+        "profiler_stage.json",
+        "formal_paired_evaluation.json",
+        "candidate_stage_intent.json",
+        "candidate_stage_complete.json",
         "evaluation.json",
         "time_gate.json",
         "review.json",
@@ -7090,6 +7211,7 @@ def _resume_active_diagnosis_after_candidate_rejection(
         "candidate_started_at_epoch",
         "candidate_proposal_id",
         "candidate_proposal_digest",
+        *_CANDIDATE_STAGE_STATE_FIELDS,
     ):
         updated.pop(field, None)
     updated.update(
@@ -7872,6 +7994,795 @@ def _explicit_profiler_uncertainty(
     return uncertainty
 
 
+_CANDIDATE_STAGE_ARTIFACTS = {
+    "static_review": "static_review.json",
+    "build_correctness": "correctness.json",
+    "short_paired": "short_paired_evaluation.json",
+    "profiler": "profiler_stage.json",
+    "formal_paired": "formal_paired_evaluation.json",
+}
+_CANDIDATE_STAGE_STATE_FIELDS = {
+    "candidate_stage_intent_sha256",
+    "candidate_stage_intent_stage",
+    "candidate_stage_completions",
+}
+
+
+def _load_registered_change_set(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+) -> dict:
+    path = run_root / "rounds" / "round-1" / "change_set.json"
+    if path.is_symlink() or not path.is_file():
+        raise ValidationError("registered ChangeSet must be a regular file")
+    frozen = validate_change_set(load_json_object(path), control)
+    if (
+        _canonical_digest(frozen) != state.get("change_set_digest")
+        or frozen["scope"] != state.get("change_scope")
+    ):
+        raise ValidationError("registered ChangeSet artifact drifted")
+    return frozen
+
+
+def _validate_candidate_binding(
+    value: Mapping[str, Any],
+    *,
+    candidate: Mapping[str, Any],
+    change_set_sha256: str,
+) -> dict:
+    binding = _object(value, "candidate binding")
+    fields = {
+        "schema_version",
+        "candidate",
+        "candidate_digest",
+        "change_set_digest",
+        "after_identity_digest",
+        "digest",
+    }
+    _closed(binding, fields, "candidate binding")
+    _required(binding, fields, "candidate binding")
+    if (
+        binding["schema_version"]
+        != "cuda-workload-optimizer/candidate-binding-v1"
+    ):
+        raise ValidationError("candidate binding schema_version is unsupported")
+    if binding["candidate"] != candidate:
+        raise ValidationError("candidate binding candidate drifted")
+    if binding["candidate_digest"] != _canonical_digest(candidate):
+        raise ValidationError("candidate binding candidate digest drifted")
+    if binding["change_set_digest"] != change_set_sha256:
+        raise ValidationError("candidate binding ChangeSet drifted")
+    _sha256(binding["after_identity_digest"], "candidate binding identity")
+    without_digest = dict(binding)
+    digest = without_digest.pop("digest")
+    if digest != _canonical_digest(without_digest):
+        raise ValidationError("candidate binding digest drifted")
+    return copy.deepcopy(binding)
+
+
+def _candidate_stage_admission_view(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+    applicable_stages: Sequence[str],
+    candidate_identity_sha256: str,
+    *,
+    allow_active_scope_identity_drift: bool = False,
+) -> tuple[dict, str]:
+    """Build the closed, non-persisted Gate view from the authoritative ceiling."""
+    stages = list(applicable_stages)
+    if "analysis_contract" in control:
+        grant = _load_bound_authorization_grant(
+            run_root,
+            state,
+            control,
+            active_scope_identity_digest=candidate_identity_sha256,
+            allow_active_scope_identity_drift=(
+                allow_active_scope_identity_drift
+            ),
+        )
+        authorization_sha256 = _sha256(
+            state.get("authorization_grant_sha256"),
+            "state authorization_grant_sha256",
+        )
+        maximum = float(grant["max_controlled_seconds"])
+        max_stage = grant["max_stage"]
+    else:
+        runtime = _BUDGET_RUNTIME[control["budget"]]
+        maximum = float(runtime["hard_ceiling_seconds"])
+        max_stage = "formal_paired"
+        authorization_sha256 = _sha256(
+            state.get("control_digest"),
+            "state control_digest",
+        )
+    return (
+        {
+            "max_controlled_seconds": maximum,
+            "max_stage": max_stage,
+            "applicable_stages": stages,
+        },
+        authorization_sha256,
+    )
+
+
+def _candidate_stage_marker(
+    run_root: Path, name: str
+) -> Path:
+    return run_root / name
+
+
+def _load_candidate_stage_marker(path: Path, label: str) -> dict:
+    if path.is_symlink() or not path.is_file():
+        raise ValidationError(f"{label} must be a regular file")
+    return load_json_object(path)
+
+
+def _validate_candidate_stage_intent(
+    run_root: Path,
+    value: Mapping[str, Any],
+    *,
+    state: Mapping[str, Any],
+    candidate_binding: Mapping[str, Any],
+) -> dict:
+    intent = _object(value, "candidate stage intent")
+    fields = {
+        "schema_version",
+        "stage",
+        "base_state_sha256",
+        "authorization",
+        "authorization_sha256",
+        "authorization_view_sha256",
+        "change_set_sha256",
+        "candidate_digest",
+        "candidate_identity_sha256",
+        "candidate_binding_sha256",
+        "stage_artifact_path",
+        "created_at_epoch",
+    }
+    _closed(intent, fields, "candidate stage intent")
+    _required(intent, fields, "candidate stage intent")
+    if (
+        intent["schema_version"]
+        != "cuda-workload-optimizer/candidate-stage-intent-v1"
+    ):
+        raise ValidationError("candidate stage intent schema_version is unsupported")
+    stage = intent["stage"]
+    if stage not in _CANDIDATE_STAGE_ARTIFACTS:
+        raise ValidationError("candidate stage intent stage is invalid")
+    if intent["stage_artifact_path"] != _CANDIDATE_STAGE_ARTIFACTS[stage]:
+        raise ValidationError("candidate stage intent artifact path drifted")
+    authorization = _object(
+        intent["authorization"], "candidate stage intent authorization"
+    )
+    if set(authorization) != {
+        "max_controlled_seconds",
+        "max_stage",
+        "applicable_stages",
+    }:
+        raise ValidationError("candidate stage intent authorization fields are invalid")
+    if _canonical_digest(authorization) != _sha256(
+        intent["authorization_view_sha256"],
+        "candidate stage intent authorization view",
+    ):
+        raise ValidationError("candidate stage intent authorization view drifted")
+    for field in (
+        "base_state_sha256",
+        "authorization_sha256",
+        "change_set_sha256",
+        "candidate_digest",
+        "candidate_identity_sha256",
+        "candidate_binding_sha256",
+    ):
+        _sha256(intent[field], f"candidate stage intent {field}")
+    try:
+        base_state = load_json_object(
+            run_root
+            / "state_generations"
+            / f"{intent['base_state_sha256']}.json"
+        )
+    except (OSError, ValidationError) as error:
+        raise ValidationError(
+            "candidate stage intent base state is unavailable"
+        ) from error
+    if _canonical_digest(base_state) != intent["base_state_sha256"]:
+        raise ValidationError("candidate stage intent base state drifted")
+    current = copy.deepcopy(dict(state))
+    if current.get("candidate_stage_intent_sha256") is None:
+        if _canonical_digest(current) != intent["base_state_sha256"]:
+            raise ValidationError("candidate stage intent base state is not current")
+    else:
+        current.pop("candidate_stage_intent_sha256", None)
+        current.pop("candidate_stage_intent_stage", None)
+        current["updated_at_epoch"] = base_state.get("updated_at_epoch")
+        if current != base_state:
+            raise ValidationError("candidate stage intent state binding drifted")
+    if intent["change_set_sha256"] != state.get("change_set_digest"):
+        raise ValidationError("candidate stage intent ChangeSet drifted")
+    if intent["candidate_digest"] != candidate_binding.get("candidate_digest"):
+        raise ValidationError("candidate stage intent candidate drifted")
+    if (
+        intent["candidate_identity_sha256"]
+        != candidate_binding.get("after_identity_digest")
+    ):
+        raise ValidationError("candidate stage intent identity drifted")
+    if intent["candidate_binding_sha256"] != candidate_binding.get("digest"):
+        raise ValidationError("candidate stage intent binding drifted")
+    created = intent["created_at_epoch"]
+    if type(created) not in {int, float} or not math.isfinite(float(created)):
+        raise ValidationError("candidate stage intent time is invalid")
+    return copy.deepcopy(intent)
+
+
+def _validate_candidate_stage_completion(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+    intent: Mapping[str, Any],
+    value: Mapping[str, Any],
+) -> dict:
+    completion = _object(value, "candidate stage completion")
+    fields = {
+        "schema_version",
+        "stage",
+        "intent_sha256",
+        "authorization_sha256",
+        "authorization_view_sha256",
+        "change_set_sha256",
+        "candidate_digest",
+        "candidate_identity_sha256",
+        "candidate_binding_sha256",
+        "stage_artifact_path",
+        "stage_artifact_sha256",
+        "result",
+        "duration_seconds",
+        "completed_at_epoch",
+    }
+    _closed(completion, fields, "candidate stage completion")
+    _required(completion, fields, "candidate stage completion")
+    if (
+        completion["schema_version"]
+        != "cuda-workload-optimizer/candidate-stage-completion-v1"
+    ):
+        raise ValidationError(
+            "candidate stage completion schema_version is unsupported"
+        )
+    if completion["stage"] != intent["stage"]:
+        raise ValidationError("candidate stage completion stage drifted")
+    if completion["intent_sha256"] != _canonical_digest(intent):
+        raise ValidationError("candidate stage completion intent drifted")
+    for field in (
+        "authorization_sha256",
+        "authorization_view_sha256",
+        "change_set_sha256",
+        "candidate_digest",
+        "candidate_identity_sha256",
+        "candidate_binding_sha256",
+    ):
+        if completion[field] != intent[field]:
+            raise ValidationError(f"candidate stage completion {field} drifted")
+    result = _object(
+        completion["result"], "candidate stage completion result"
+    )
+    identity_drift_completion = (
+        result.get("reason") == "candidate_identity_drift"
+    )
+    admission, authorization_sha256 = _candidate_stage_admission_view(
+        run_root,
+        state,
+        control,
+        intent["authorization"]["applicable_stages"],
+        intent["candidate_identity_sha256"],
+        allow_active_scope_identity_drift=identity_drift_completion,
+    )
+    if (
+        authorization_sha256 != intent["authorization_sha256"]
+        or _canonical_digest(admission) != intent["authorization_view_sha256"]
+    ):
+        raise ValidationError("candidate stage completion authorization drifted")
+    artifact_path = intent["stage_artifact_path"]
+    if completion["stage_artifact_path"] != artifact_path:
+        raise ValidationError("candidate stage completion artifact path drifted")
+    artifact = run_root / artifact_path
+    if (
+        artifact.is_symlink()
+        or not artifact.is_file()
+        or completion["stage_artifact_sha256"] != _sha256_path(artifact)
+    ):
+        raise ValidationError("candidate stage completion artifact drifted")
+    duration = completion["duration_seconds"]
+    if (
+        type(duration) not in {int, float}
+        or not math.isfinite(float(duration))
+        or float(duration) < 0.0
+    ):
+        raise ValidationError("candidate stage completion duration is invalid")
+    if (
+        _controlled_spend_seconds(state) + float(duration)
+        > min(
+            float(intent["authorization"]["max_controlled_seconds"]),
+            float(_BUDGET_RUNTIME[control["budget"]]["hard_ceiling_seconds"]),
+        )
+    ):
+        raise ValidationError(
+            "candidate stage completion exceeds controlled authorization"
+        )
+    completed_at = completion["completed_at_epoch"]
+    if (
+        type(completed_at) not in {int, float}
+        or not math.isfinite(float(completed_at))
+    ):
+        raise ValidationError("candidate stage completion time is invalid")
+    current_identity = _identity(control, state["change_scope"])["digest"]
+    identity_drifted = (
+        current_identity != intent["candidate_identity_sha256"]
+    )
+    if identity_drifted and not identity_drift_completion:
+        raise ValidationError("candidate identity drifted after stage execution")
+    if identity_drift_completion and not identity_drifted:
+        raise ValidationError(
+            "candidate stage completion claims identity drift without drift"
+        )
+    return copy.deepcopy(completion)
+
+
+def _candidate_stage_heartbeat(stage: str, completion_sha256: str) -> None:
+    print(
+        json.dumps(
+            {
+                "event": "heartbeat",
+                "checkpoint": "candidate_stage_committed",
+                "stage": stage,
+                "completion_sha256": completion_sha256,
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _cleanup_candidate_stage_markers(run_root: Path) -> None:
+    for name in (
+        "candidate_stage_complete.json",
+        "candidate_stage_intent.json",
+    ):
+        try:
+            _candidate_stage_marker(run_root, name).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _commit_candidate_stage_completion(
+    run_root: Path,
+    state: Mapping[str, Any],
+    completion: Mapping[str, Any],
+) -> dict:
+    stage = completion["stage"]
+    completion_sha256 = _canonical_digest(completion)
+    completions = dict(state.get("candidate_stage_completions", {}))
+    if stage in completions:
+        if _canonical_digest(completions[stage]) != completion_sha256:
+            raise ValidationError("candidate stage completion digest conflicts with state")
+        return copy.deepcopy(dict(state))
+    updated = copy.deepcopy(dict(state))
+    completions[stage] = copy.deepcopy(dict(completion))
+    updated["candidate_stage_completions"] = completions
+    updated["controlled_spend_seconds"] = (
+        _controlled_spend_seconds(state)
+        + float(completion["duration_seconds"])
+    )
+    if not math.isfinite(updated["controlled_spend_seconds"]):
+        raise ValidationError("candidate controlled spend overflowed")
+    updated.pop("candidate_stage_intent_sha256", None)
+    updated.pop("candidate_stage_intent_stage", None)
+    updated["updated_at_epoch"] = time.time()
+    committed = _write_state(run_root, updated)
+    _candidate_stage_heartbeat(stage, completion_sha256)
+    return committed
+
+
+def _validated_candidate_stage_results(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+    candidate_binding: Mapping[str, Any],
+) -> dict:
+    completions = state.get("candidate_stage_completions", {})
+    if not isinstance(completions, Mapping):
+        raise ValidationError("candidate stage state is invalid")
+    validated = {}
+    for stage, raw_completion in completions.items():
+        if stage not in _CANDIDATE_STAGE_ARTIFACTS:
+            raise ValidationError("candidate stage state contains an invalid stage")
+        completion = _object(raw_completion, "candidate stage state completion")
+        if completion.get("change_set_sha256") != state.get("change_set_digest"):
+            raise ValidationError("candidate stage state ChangeSet drifted")
+        if completion.get("candidate_digest") != candidate_binding.get(
+            "candidate_digest"
+        ):
+            raise ValidationError("candidate stage state candidate drifted")
+        if completion.get("candidate_identity_sha256") != candidate_binding.get(
+            "after_identity_digest"
+        ):
+            raise ValidationError("candidate stage state identity drifted")
+        if completion.get("candidate_binding_sha256") != candidate_binding.get(
+            "digest"
+        ):
+            raise ValidationError("candidate stage state binding drifted")
+        artifact = run_root / _CANDIDATE_STAGE_ARTIFACTS[stage]
+        if (
+            completion.get("stage_artifact_path")
+            != _CANDIDATE_STAGE_ARTIFACTS[stage]
+            or artifact.is_symlink()
+            or not artifact.is_file()
+            or completion.get("stage_artifact_sha256") != _sha256_path(artifact)
+        ):
+            raise ValidationError("candidate stage sealed artifact drifted")
+        validated[stage] = copy.deepcopy(
+            _object(completion.get("result"), "candidate stage state result")
+        )
+    return validated
+
+
+def _recover_candidate_stage_checkpoint(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+    candidate_binding: Mapping[str, Any],
+) -> dict:
+    intent_path = _candidate_stage_marker(
+        run_root, "candidate_stage_intent.json"
+    )
+    complete_path = _candidate_stage_marker(
+        run_root, "candidate_stage_complete.json"
+    )
+    pending_sha256 = state.get("candidate_stage_intent_sha256")
+    pending_stage = state.get("candidate_stage_intent_stage")
+    if pending_sha256 is None and pending_stage is not None:
+        raise ValidationError("candidate stage intent state binding is incomplete")
+
+    raw_intent = None
+    if intent_path.exists() or intent_path.is_symlink():
+        raw_intent = _load_candidate_stage_marker(
+            intent_path, "candidate stage intent"
+        )
+
+    raw_completion = None
+    if complete_path.exists() or complete_path.is_symlink():
+        if raw_intent is None:
+            raise ValidationError("candidate stage completion lacks its intent")
+        raw_completion = _load_candidate_stage_marker(
+            complete_path, "candidate stage completion"
+        )
+
+    if pending_sha256 is None:
+        completions = state.get("candidate_stage_completions", {})
+        if not isinstance(completions, Mapping):
+            raise ValidationError("candidate stage consumed state is invalid")
+        if raw_completion is not None:
+            stage = raw_completion.get("stage")
+            if (
+                not isinstance(stage, str)
+                or stage not in _CANDIDATE_STAGE_ARTIFACTS
+                or completions.get(stage) != raw_completion
+                or raw_completion.get("intent_sha256")
+                != _canonical_digest(raw_intent)
+            ):
+                raise ValidationError(
+                    "unbound candidate stage completion is not consumed"
+                )
+            _cleanup_candidate_stage_markers(run_root)
+            return copy.deepcopy(dict(state))
+        if raw_intent is not None:
+            intent_sha256 = _canonical_digest(raw_intent)
+            if any(
+                isinstance(completion, Mapping)
+                and completion.get("intent_sha256") == intent_sha256
+                for completion in completions.values()
+            ):
+                intent_path.unlink()
+                return copy.deepcopy(dict(state))
+            _validate_candidate_stage_intent(
+                run_root,
+                raw_intent,
+                state=state,
+                candidate_binding=candidate_binding,
+            )
+            intent_path.unlink()
+        return copy.deepcopy(dict(state))
+
+    intent = None
+    if raw_intent is not None:
+        intent = _validate_candidate_stage_intent(
+            run_root,
+            raw_intent,
+            state=state,
+            candidate_binding=candidate_binding,
+        )
+    completion = None
+    if raw_completion is not None:
+        completion = _validate_candidate_stage_completion(
+            run_root,
+            state,
+            control,
+            intent,
+            raw_completion,
+        )
+
+    if pending_sha256 is not None:
+        _sha256(pending_sha256, "state candidate stage intent")
+        if (
+            intent is None
+            or _canonical_digest(intent) != pending_sha256
+            or pending_stage != intent["stage"]
+        ):
+            raise ValidationError("state-bound candidate stage intent drifted")
+        if completion is None:
+            blocked = copy.deepcopy(dict(state))
+            blocked.update(
+                {
+                    "status": "manual_recovery_required",
+                    "stage": "candidate_validation",
+                    "next_action": "manual_recovery",
+                    "manual_recovery_reason": (
+                        "candidate_stage_interrupted_not_reexecuted"
+                    ),
+                    "updated_at_epoch": time.time(),
+                }
+            )
+            return _write_state(run_root, blocked)
+        committed = _commit_candidate_stage_completion(
+            run_root,
+            state,
+            completion,
+        )
+        _cleanup_candidate_stage_markers(run_root)
+        return committed
+
+
+def _persist_candidate_manual_recovery(
+    run_root: Path,
+    state: Mapping[str, Any],
+    *,
+    reason: str,
+) -> dict:
+    blocked = copy.deepcopy(dict(state))
+    blocked.update(
+        {
+            "status": "manual_recovery_required",
+            "stage": "candidate_validation",
+            "next_action": "manual_recovery",
+            "manual_recovery_reason": _identifier(
+                reason, "candidate manual recovery reason"
+            ),
+            "updated_at_epoch": time.time(),
+        }
+    )
+    return _write_state(run_root, blocked)
+
+
+def _execute_candidate_stage(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+    candidate_binding: Mapping[str, Any],
+    admission: Mapping[str, Any],
+    authorization_sha256: str,
+    stage: str,
+    runner,
+    command_safety_timeout_seconds: float,
+) -> tuple[dict, str | None]:
+    current_identity = _identity(control, state["change_scope"])["digest"]
+    if current_identity != candidate_binding["after_identity_digest"]:
+        return (
+            _persist_candidate_manual_recovery(
+                run_root,
+                state,
+                reason="candidate_identity_drift",
+            ),
+            "manual_recovery",
+        )
+    try:
+        _load_registered_change_set(
+            run_root,
+            state,
+            control,
+        )
+    except ValidationError:
+        return copy.deepcopy(dict(state)), "frozen_artifact_drift"
+    effective_maximum = min(
+        float(admission["max_controlled_seconds"]),
+        float(_BUDGET_RUNTIME[control["budget"]]["hard_ceiling_seconds"]),
+    )
+    remaining_authorization = (
+        effective_maximum - _controlled_spend_seconds(state)
+    )
+    if remaining_authorization <= 0.0:
+        raise ValidationError(
+            "candidate stage lacks remaining controlled authorization"
+        )
+    if (
+        isinstance(command_safety_timeout_seconds, bool)
+        or not isinstance(command_safety_timeout_seconds, (int, float))
+        or not math.isfinite(float(command_safety_timeout_seconds))
+        or float(command_safety_timeout_seconds) <= 0.0
+    ):
+        raise ValidationError("candidate stage command safety timeout is invalid")
+    total_stage_window = min(
+        float(command_safety_timeout_seconds),
+        remaining_authorization,
+    )
+    termination_reserve = min(0.5, total_stage_window * 0.6)
+    execution_timeout = total_stage_window - termination_reserve
+    if execution_timeout <= 0.0:
+        raise ValidationError(
+            "candidate stage lacks executable controlled authorization"
+        )
+    intent = {
+        "schema_version": "cuda-workload-optimizer/candidate-stage-intent-v1",
+        "stage": stage,
+        "base_state_sha256": _canonical_digest(state),
+        "authorization": copy.deepcopy(dict(admission)),
+        "authorization_sha256": authorization_sha256,
+        "authorization_view_sha256": _canonical_digest(admission),
+        "change_set_sha256": state["change_set_digest"],
+        "candidate_digest": candidate_binding["candidate_digest"],
+        "candidate_identity_sha256": candidate_binding["after_identity_digest"],
+        "candidate_binding_sha256": candidate_binding["digest"],
+        "stage_artifact_path": _CANDIDATE_STAGE_ARTIFACTS[stage],
+        "created_at_epoch": time.time(),
+    }
+    intent = _validate_candidate_stage_intent(
+        run_root,
+        intent,
+        state=state,
+        candidate_binding=candidate_binding,
+    )
+    intent_path = _candidate_stage_marker(
+        run_root, "candidate_stage_intent.json"
+    )
+    complete_path = _candidate_stage_marker(
+        run_root, "candidate_stage_complete.json"
+    )
+    _atomic_json(intent_path, intent)
+    intent_sha256 = _canonical_digest(intent)
+    bound = copy.deepcopy(dict(state))
+    bound.update(
+        {
+            "candidate_stage_intent_sha256": intent_sha256,
+            "candidate_stage_intent_stage": stage,
+            "updated_at_epoch": time.time(),
+        }
+    )
+    bound = _write_state(run_root, bound)
+
+    current_admission, current_authorization_sha256 = (
+        _candidate_stage_admission_view(
+            run_root,
+            bound,
+            control,
+            admission["applicable_stages"],
+            candidate_binding["after_identity_digest"],
+        )
+    )
+    if (
+        current_authorization_sha256 != authorization_sha256
+        or current_admission != admission
+    ):
+        raise ValidationError("candidate stage authorization drifted before runner")
+
+    artifact_path = run_root / _CANDIDATE_STAGE_ARTIFACTS[stage]
+    if _identity(control, state["change_scope"])["digest"] != candidate_binding[
+        "after_identity_digest"
+    ]:
+        return (
+            _persist_candidate_manual_recovery(
+                run_root,
+                bound,
+                reason="candidate_identity_drift",
+            ),
+            "manual_recovery",
+        )
+    else:
+        try:
+            _load_registered_change_set(
+                run_root,
+                bound,
+                control,
+            )
+        except ValidationError:
+            unbound = copy.deepcopy(bound)
+            unbound.pop("candidate_stage_intent_sha256", None)
+            unbound.pop("candidate_stage_intent_stage", None)
+            unbound["updated_at_epoch"] = time.time()
+            unbound = _write_state(run_root, unbound)
+            try:
+                intent_path.unlink()
+            except FileNotFoundError:
+                pass
+            return unbound, "frozen_artifact_drift"
+        started = time.monotonic()
+        try:
+            result = runner(execution_timeout)
+            if not isinstance(result, Mapping):
+                raise ValueError(f"{stage} result must be a mapping")
+            result = copy.deepcopy(dict(result))
+        except _CandidateStageTimeout:
+            result = {
+                "status": "review_required",
+                "reason": "candidate_stage_timeout",
+                "timed_out": True,
+            }
+            _atomic_json(artifact_path, result)
+        except Exception as error:
+            result = {
+                "status": "failed",
+                "action_failed": True,
+                "failure_type": type(error).__name__,
+            }
+            _atomic_json(artifact_path, result)
+        duration = max(0.0, time.monotonic() - started)
+        identity_drifted_after_runner = (
+            _identity(control, state["change_scope"])["digest"]
+            != candidate_binding["after_identity_digest"]
+        )
+        if identity_drifted_after_runner:
+            result = {
+                "status": "manual_recovery_required",
+                "reason": "candidate_identity_drift",
+                "stage_result": result,
+            }
+    if artifact_path.is_symlink() or not artifact_path.is_file():
+        raise ValidationError("candidate stage runner did not write its artifact")
+    completion = {
+        "schema_version": (
+            "cuda-workload-optimizer/candidate-stage-completion-v1"
+        ),
+        "stage": stage,
+        "intent_sha256": intent_sha256,
+        "authorization_sha256": authorization_sha256,
+        "authorization_view_sha256": _canonical_digest(admission),
+        "change_set_sha256": state["change_set_digest"],
+        "candidate_digest": candidate_binding["candidate_digest"],
+        "candidate_identity_sha256": candidate_binding[
+            "after_identity_digest"
+        ],
+        "candidate_binding_sha256": candidate_binding["digest"],
+        "stage_artifact_path": _CANDIDATE_STAGE_ARTIFACTS[stage],
+        "stage_artifact_sha256": _sha256_path(artifact_path),
+        "result": result,
+        "duration_seconds": duration,
+        "completed_at_epoch": time.time(),
+    }
+    _atomic_json(complete_path, completion)
+    completion = _validate_candidate_stage_completion(
+        run_root,
+        bound,
+        control,
+        intent,
+        _load_candidate_stage_marker(
+            complete_path, "candidate stage completion"
+        ),
+    )
+    committed = _commit_candidate_stage_completion(
+        run_root,
+        bound,
+        completion,
+    )
+    _cleanup_candidate_stage_markers(run_root)
+    if identity_drifted_after_runner:
+        return (
+            _persist_candidate_manual_recovery(
+                run_root,
+                committed,
+                reason="candidate_identity_drift",
+            ),
+            "manual_recovery",
+        )
+    return committed, None
+
+
 def evaluate_change(run_dir: os.PathLike[str] | str) -> dict:
     """Serialize and evaluate one registered ChangeSet exactly once."""
     run_root = Path(run_dir).expanduser().resolve(strict=False)
@@ -7894,19 +8805,13 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
     if state["next_action"] != "edit_then_evaluate":
         raise ValidationError("run is not ready to evaluate a ChangeSet")
     control = _load_frozen_control(run_root, state)
-    change = validate_change_set(
-        load_json_object(run_root / "change_set.json"), control
-    )
-    frozen_change = validate_change_set(
-        load_json_object(run_root / "rounds" / "round-1" / "change_set.json"),
-        control,
-    )
-    change_digest = _canonical_digest(change)
-    if (
-        change != frozen_change
-        or change_digest != state.get("change_set_digest")
-        or change["scope"] != state.get("change_scope")
-    ):
+    try:
+        change = _load_registered_change_set(
+            run_root,
+            state,
+            control,
+        )
+    except ValidationError:
         return _finish_rejected(
             run_root,
             state,
@@ -7915,6 +8820,7 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             reason="frozen_artifact_drift",
             primary_status=None,
         )
+    change_digest = _canonical_digest(change)
     workload = _normalize_frozen_workload(control)
     if workload.source_hash != state["workload_source_hash"]:
         decision = _finish_rejected(
@@ -7985,36 +8891,54 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         raise ValidationError(
             "actual scoped diff is outside ChangeSet paths: " + ", ".join(outside)
         )
-    _atomic_json(run_root / "rounds" / "round-1" / "after_identity.json", after)
     bound_candidate = copy.deepcopy(change["candidate"])
-    candidate_binding = {
-        "schema_version": "cuda-workload-optimizer/candidate-binding-v1",
-        "candidate": bound_candidate,
-        "candidate_digest": _canonical_digest(bound_candidate),
-        "change_set_digest": change_digest,
-        "after_identity_digest": after["digest"],
-    }
-    candidate_binding["digest"] = _canonical_digest(candidate_binding)
-    _atomic_json(run_root / "candidate_binding.json", candidate_binding)
-    (run_root / "candidate.diff").write_text(
-        _candidate_diff(control, run_root, changed, change["scope"]), encoding="utf-8"
+    has_candidate_checkpoint = (
+        any(field in state for field in _CANDIDATE_STAGE_STATE_FIELDS)
+        or (run_root / "candidate_stage_intent.json").exists()
+        or (run_root / "candidate_stage_complete.json").exists()
     )
+    if has_candidate_checkpoint:
+        candidate_binding = _validate_candidate_binding(
+            _load_candidate_stage_marker(
+                run_root / "candidate_binding.json", "candidate binding"
+            ),
+            candidate=bound_candidate,
+            change_set_sha256=change_digest,
+        )
+        _validated_identity_artifact(
+            load_json_object(
+                run_root / "rounds" / "round-1" / "after_identity.json"
+            ),
+            candidate_binding["after_identity_digest"],
+        )
+    else:
+        _atomic_json(
+            run_root / "rounds" / "round-1" / "after_identity.json",
+            after,
+        )
+        candidate_binding = {
+            "schema_version": "cuda-workload-optimizer/candidate-binding-v1",
+            "candidate": bound_candidate,
+            "candidate_digest": _canonical_digest(bound_candidate),
+            "change_set_digest": change_digest,
+            "after_identity_digest": after["digest"],
+        }
+        candidate_binding["digest"] = _canonical_digest(candidate_binding)
+        _atomic_json(run_root / "candidate_binding.json", candidate_binding)
+        (run_root / "candidate.diff").write_text(
+            _candidate_diff(control, run_root, changed, change["scope"]),
+            encoding="utf-8",
+        )
 
     runtime = _BUDGET_RUNTIME[control["budget"]]
-    evaluations: dict[str, dict] = {}
     workload_attempt = 0
 
-    def static_review_stage() -> dict:
-        artifact = _static_review_changed_files(
+    def static_review_stage(timeout_seconds: float) -> dict:
+        return _run_candidate_static_review_bounded(
             control,
-            scope=change["scope"],
-            changed=changed,
-            candidate_binding=candidate_binding,
-            change_set_digest=change_digest,
-            after_identity_digest=after["digest"],
+            run_root,
+            timeout_seconds=timeout_seconds,
         )
-        _atomic_json(run_root / "static_review.json", artifact)
-        return artifact
 
     def run_workload_once(
         evaluation_workload: Any,
@@ -8023,20 +8947,30 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         role: str,
         case: Mapping[str, Any] | None = None,
         timeout: float | None = None,
+        controlled_deadline_epoch: float | None = None,
     ) -> dict:
         nonlocal workload_attempt
         if evaluation_workload.source_hash != workload.source_hash:
             raise ValidationError("workload changed inside the evaluation stage")
+        deadlines = [float(state["deadline_epoch"])]
+        if controlled_deadline_epoch is not None:
+            deadlines.append(float(controlled_deadline_epoch))
+        remaining = min(deadlines) - time.time()
+        if remaining <= 0.0:
+            raise _CandidateStageTimeout(
+                "candidate workload exhausted its controlled timeout"
+            )
+        effective_timeout = (
+            remaining if timeout is None else min(float(timeout), remaining)
+        )
         if workload.kind != "python":
             return _load_workload_module().run_spec_once(
                 workload,
                 candidate=candidate,
                 role=role,
                 case=case,
-                timeout=timeout,
+                timeout=effective_timeout,
             )
-        remaining = max(0.001, state["deadline_epoch"] - time.time())
-        effective_timeout = remaining if timeout is None else min(timeout, remaining)
         workload_attempt += 1
         return _run_python_workload_once_bounded(
             control,
@@ -8048,8 +8982,33 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             task=f"workload-{role}-{workload_attempt}",
         )
 
-    def evaluate_pairs(stage: str, blocks: int) -> dict:
-        timeout = min(120, max(0.001, state["deadline_epoch"] - time.time()))
+    def evaluate_pairs(
+        stage: str,
+        blocks: int,
+        timeout_seconds: float,
+    ) -> dict:
+        controlled_deadline_epoch = min(
+            float(state["deadline_epoch"]),
+            time.time() + float(timeout_seconds),
+        )
+
+        def paired_runner(
+            evaluation_workload: Any,
+            *,
+            candidate: Any,
+            role: str,
+            case: Mapping[str, Any] | None = None,
+            timeout: float | None = None,
+        ) -> dict:
+            return run_workload_once(
+                evaluation_workload,
+                candidate=candidate,
+                role=role,
+                case=case,
+                timeout=timeout,
+                controlled_deadline_epoch=controlled_deadline_epoch,
+            )
+
         evaluation = _load_evaluate_module().evaluate_pairs(
             workload,
             control["baseline_candidate"],
@@ -8057,12 +9016,18 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             blocks=blocks,
             retries=runtime["retries"],
             seed=0,
-            timeout=timeout,
-            deadline_epoch=state["deadline_epoch"],
+            timeout=float(timeout_seconds),
+            deadline_epoch=controlled_deadline_epoch,
             bootstrap_samples=runtime["bootstrap"],
-            runner=run_workload_once,
+            runner=paired_runner,
         )
-        evaluations[stage] = evaluation
+        if evaluation.get("failure", {}).get("error_type") in {
+            "TimeoutError",
+            "_CandidateStageTimeout",
+        }:
+            raise _CandidateStageTimeout(
+                "paired evaluation exhausted its controlled timeout"
+            )
         _atomic_json(run_root / f"{stage}_evaluation.json", evaluation)
         primary = evaluation.get("primary", {})
         constraints_passed = all(
@@ -8108,7 +9073,7 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         None,
     )
 
-    def profiler_stage() -> dict:
+    def profiler_stage(timeout_seconds: float) -> dict:
         if selected_profiler is None:
             artifact = {
                 "status": "failed",
@@ -8122,11 +9087,23 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             selected_profiler,
             control,
             profile_root,
-            deadline_epoch=state["deadline_epoch"],
+            deadline_epoch=min(
+                float(state["deadline_epoch"]),
+                time.time() + float(timeout_seconds),
+            ),
         )
         result_path = (
             profile_root / "probes" / f"{selected_profiler['id']}.json"
         )
+        execution = load_json_object(
+            profile_root
+            / "probes"
+            / f"{selected_profiler['id']}.execution.json"
+        )
+        if execution.get("timed_out") is True:
+            raise _CandidateStageTimeout(
+                "candidate profiler exhausted its controlled timeout"
+            )
         artifact = {
             "status": (
                 "passed"
@@ -8143,8 +9120,7 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         _atomic_json(run_root / "profiler_stage.json", artifact)
         return artifact
 
-    def minimum_correctness_stage() -> dict:
-        timeout = min(60.0, max(0.001, state["deadline_epoch"] - time.time()))
+    def minimum_correctness_stage(timeout_seconds: float) -> dict:
         cases = list(workload.cases) or [{}]
         try:
             observation = run_workload_once(
@@ -8152,9 +9128,16 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
                 candidate=bound_candidate,
                 role="candidate",
                 case=cases[0],
-                timeout=timeout,
+                timeout=float(timeout_seconds),
+                controlled_deadline_epoch=(
+                    time.time() + float(timeout_seconds)
+                ),
             )
-        except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+        except TimeoutError as error:
+            raise _CandidateStageTimeout(
+                "candidate correctness exhausted its controlled timeout"
+            ) from error
+        except (OSError, RuntimeError, ValueError) as error:
             artifact = {
                 "status": "failed",
                 "failure": type(error).__name__,
@@ -8167,25 +9150,9 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         _atomic_json(run_root / "correctness.json", artifact)
         return artifact
 
-    gate_now = time.time()
-    optimization_started = float(
-        state.get("optimization_started_at_epoch", state["started_at_epoch"])
-    )
-    pre_gate_elapsed = max(0.0, gate_now - optimization_started)
-    hard_authorization = max(
-        0.001, float(state["deadline_epoch"]) - optimization_started
-    )
-    soft_authorization = max(
-        0.001,
-        min(
-            hard_authorization,
-            float(state.get("soft_target_epoch", state["deadline_epoch"]))
-            - optimization_started,
-        ),
-    )
     gate_contract = {
-        "soft_target_seconds": soft_authorization,
-        "hard_ceiling_seconds": hard_authorization,
+        "soft_target_seconds": runtime["soft_target_seconds"],
+        "hard_ceiling_seconds": runtime["hard_ceiling_seconds"],
         "minimum_effect": {
             "mechanism_us": 1.0,
             "service_pct": max(0.5, float(workload.objective["min_effect_pct"])),
@@ -8194,28 +9161,122 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
     gate = _load_budget_module().CandidateGate(
         gate_contract,
         bound_candidate,
-        pre_gate_elapsed_seconds=pre_gate_elapsed,
     )
     candidate_actions = {
         "static_review": static_review_stage,
         "build_correctness": minimum_correctness_stage,
-        "short_paired": lambda: evaluate_pairs(
-            "short_paired", min(2, runtime["blocks"])
+        "short_paired": lambda timeout_seconds: evaluate_pairs(
+            "short_paired",
+            min(2, runtime["blocks"]),
+            timeout_seconds,
         ),
-        "formal_paired": lambda: evaluate_pairs(
-            "formal_paired", runtime["blocks"]
+        "formal_paired": lambda timeout_seconds: evaluate_pairs(
+            "formal_paired",
+            runtime["blocks"],
+            timeout_seconds,
         ),
     }
-    if explicit_uncertainty:
-        candidate_actions["profiler"] = profiler_stage
-    gate_result = gate.run(candidate_actions)
-    evaluation = evaluations.get(
+    candidate_action_safety_timeouts = {
+        "static_review": 60.0,
+        "build_correctness": 60.0,
+        "short_paired": 120.0,
+        "formal_paired": 120.0,
+    }
+    applicable_stages = [
+        "static_review",
+        "build_correctness",
+        "short_paired",
         "formal_paired",
-        evaluations.get(
-            "short_paired",
-            {"schema_version": "cuda-workload-optimizer/evaluation-v1", "status": gate_result["stop_reason"]},
-        ),
+    ]
+    if explicit_uncertainty and selected_profiler is not None:
+        applicable_stages.insert(3, "profiler")
+        candidate_actions["profiler"] = profiler_stage
+        candidate_action_safety_timeouts["profiler"] = float(
+            selected_profiler["timeout_seconds"]
+        )
+
+    state = _recover_candidate_stage_checkpoint(
+        run_root,
+        state,
+        control,
+        candidate_binding,
     )
+    if state.get("next_action") == "manual_recovery":
+        return state
+    while True:
+        if (
+            _identity(control, change["scope"])["digest"]
+            != candidate_binding["after_identity_digest"]
+        ):
+            return _persist_candidate_manual_recovery(
+                run_root,
+                state,
+                reason="candidate_identity_drift",
+            )
+        completed_results = _validated_candidate_stage_results(
+            run_root,
+            state,
+            control,
+            candidate_binding,
+        )
+        admission, authorization_sha256 = _candidate_stage_admission_view(
+            run_root,
+            state,
+            control,
+            applicable_stages,
+            candidate_binding["after_identity_digest"],
+        )
+        gate_result = gate.decide(
+            completed_results,
+            _controlled_spend_seconds(state),
+            admission,
+        )
+        if gate_result["decision"] != "RUN_STAGE":
+            break
+        next_stage = gate_result["next_stage"]
+        if (
+            _identity(control, change["scope"])["digest"]
+            != candidate_binding["after_identity_digest"]
+        ):
+            return _persist_candidate_manual_recovery(
+                run_root,
+                state,
+                reason="candidate_identity_drift",
+            )
+        state, change_set_drift = _execute_candidate_stage(
+            run_root,
+            state,
+            control,
+            candidate_binding,
+            admission,
+            authorization_sha256,
+            next_stage,
+            candidate_actions[next_stage],
+            candidate_action_safety_timeouts[next_stage],
+        )
+        if change_set_drift == "manual_recovery":
+            return state
+        if change_set_drift is not None:
+            return _finish_rejected(
+                run_root,
+                state,
+                control,
+                scope=change["scope"],
+                reason=change_set_drift,
+                primary_status=None,
+            )
+
+    formal_path = run_root / "formal_paired_evaluation.json"
+    short_path = run_root / "short_paired_evaluation.json"
+    if formal_path.is_file() and not formal_path.is_symlink():
+        evaluation = load_json_object(formal_path)
+    elif short_path.is_file() and not short_path.is_symlink():
+        evaluation = load_json_object(short_path)
+    else:
+        evaluation = {
+            "schema_version": "cuda-workload-optimizer/evaluation-v1",
+            "status": gate_result["stop_reason"],
+        }
     _atomic_json(run_root / "evaluation.json", evaluation)
     _atomic_json(run_root / "time_gate.json", gate_result)
     if gate_result["decision"] == "REVIEW_REQUIRED":
@@ -8239,7 +9300,11 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         )
     if gate_result["decision"] != "PROMOTE":
         rejection_reason = gate_result["stop_reason"]
-        if evaluations and evaluation.get("status") != "evaluated":
+        if (
+            gate_result["stop_reason"]
+            in {"short_pair_failed", "formal_pair_failed"}
+            and evaluation.get("status") != "evaluated"
+        ):
             rejection_reason = "workload_failed"
         _atomic_json(
             run_root / "review.json",
@@ -8282,6 +9347,37 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             time_gate=gate_result,
         )
 
+    _candidate_stage_admission_view(
+        run_root,
+        state,
+        control,
+        applicable_stages,
+        candidate_binding["after_identity_digest"],
+    )
+    if (
+        _identity(control, change["scope"])["digest"]
+        != candidate_binding["after_identity_digest"]
+    ):
+        return _persist_candidate_manual_recovery(
+            run_root,
+            state,
+            reason="candidate_identity_drift",
+        )
+    try:
+        change = _load_registered_change_set(
+            run_root,
+            state,
+            control,
+        )
+    except ValidationError:
+        return _finish_rejected(
+            run_root,
+            state,
+            control,
+            scope=change["scope"],
+            reason="frozen_artifact_drift",
+            primary_status=evaluation.get("primary", {}).get("status"),
+        )
     review_artifact = review_change(
         control,
         run_root,
@@ -8289,20 +9385,30 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         deadline_epoch=min(state["deadline_epoch"], time.time() + 180),
     )
     _write_final_review_adjudication(run_root, review_artifact, evaluation)
-    if _identity(control, change["scope"])["digest"] != after["digest"]:
-        decision = _finish_rejected(
+    if (
+        _identity(control, change["scope"])["digest"]
+        != candidate_binding["after_identity_digest"]
+    ):
+        return _persist_candidate_manual_recovery(
+            run_root,
+            state,
+            reason="candidate_identity_drift",
+        )
+    try:
+        change = _load_registered_change_set(
+            run_root,
+            state,
+            control,
+        )
+    except ValidationError:
+        return _finish_rejected(
             run_root,
             state,
             control,
             scope=change["scope"],
-            reason="scoped_identity_drift",
+            reason="frozen_artifact_drift",
             primary_status=evaluation.get("primary", {}).get("status"),
         )
-        if decision["status"] == "manual_recovery_required":
-            return decision
-        if decision["status"] == "review_required":
-            return decision
-        raise ValidationError("scoped identity drifted during paired evaluation")
     primary_status = evaluation.get("primary", {}).get("status")
     constraints = evaluation.get("constraints", [])
     promoted = (
@@ -8329,6 +9435,7 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             primary_status=primary_status,
         )
 
+    evaluation_digest = _canonical_digest(evaluation)
     decision = {
         "schema_version": "cuda-workload-optimizer/decision-v1",
         "status": "promoted",
@@ -8337,8 +9444,8 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         "rolled_back": False,
         "change_set_digest": change_digest,
         "candidate_binding_digest": candidate_binding["digest"],
-        "after_identity_digest": after["digest"],
-        "evaluation_digest": _canonical_digest(evaluation),
+        "after_identity_digest": candidate_binding["after_identity_digest"],
+        "evaluation_digest": evaluation_digest,
         "elapsed_seconds": gate_result["elapsed_seconds"],
         "stop_reason": gate_result["stop_reason"],
         "skipped_expensive_stages": gate_result["skipped_expensive_stages"],
@@ -8382,6 +9489,13 @@ def _resume_run_unlocked(run_root: Path) -> dict:
         state = read_run_state(run_root)
     if state["next_action"] == "collect_evidence":
         return _collect_active_diagnosis_evidence_unlocked(control, run_root)
+    if state["next_action"] == "edit_then_evaluate" and (
+        state.get("candidate_stage_intent_sha256") is not None
+        or bool(state.get("candidate_stage_completions"))
+        or (run_root / "candidate_stage_intent.json").exists()
+        or (run_root / "candidate_stage_complete.json").exists()
+    ):
+        return _evaluate_change_unlocked(run_root)
     if state.get("stage") == "decision" and state["next_action"] == "review_required":
         _replay_review_required(run_root, state, control)
         return read_run_state(run_root)
@@ -8424,6 +9538,78 @@ def _resume_run_unlocked(run_root: Path) -> dict:
     return _start_run_unlocked(control, run_root)
 
 
+def _cmd_candidate_static_review(args: argparse.Namespace) -> None:
+    run_root = Path(args.run_dir).expanduser().resolve(strict=False)
+    output_path = Path(args.out).expanduser().resolve(strict=False)
+    expected_output = (
+        run_root / _CANDIDATE_STAGE_ARTIFACTS["static_review"]
+    ).resolve(strict=False)
+    if output_path != expected_output:
+        raise ValidationError(
+            "candidate static review output must be its stage artifact"
+        )
+    state = read_run_state(run_root)
+    control = _load_frozen_control(run_root, state)
+    change = _load_registered_change_set(run_root, state, control)
+    change_digest = _canonical_digest(change)
+    candidate_binding = _validate_candidate_binding(
+        _load_candidate_stage_marker(
+            run_root / "candidate_binding.json", "candidate binding"
+        ),
+        candidate=change["candidate"],
+        change_set_sha256=change_digest,
+    )
+    intent = _validate_candidate_stage_intent(
+        run_root,
+        _load_candidate_stage_marker(
+            run_root / "candidate_stage_intent.json",
+            "candidate stage intent",
+        ),
+        state=state,
+        candidate_binding=candidate_binding,
+    )
+    if intent["stage"] != "static_review":
+        raise ValidationError(
+            "candidate static review lacks a bound static stage intent"
+        )
+    before = _validated_identity_artifact(
+        load_json_object(
+            run_root / "rounds" / "round-1" / "before_identity.json"
+        ),
+        state["before_identity_digest"],
+    )
+    after = _validated_identity_artifact(
+        load_json_object(
+            run_root / "rounds" / "round-1" / "after_identity.json"
+        ),
+        candidate_binding["after_identity_digest"],
+    )
+    if (
+        _identity(control, change["scope"])["digest"]
+        != candidate_binding["after_identity_digest"]
+    ):
+        raise ValidationError(
+            "candidate identity drifted inside static review child"
+        )
+    changed = _changed_paths(before, after)
+    outside = [
+        path for path in changed if not _path_allowed(path, change["paths"])
+    ]
+    if not changed or outside:
+        raise ValidationError(
+            "candidate static review changed paths drifted"
+        )
+    artifact = _static_review_changed_files(
+        control,
+        scope=change["scope"],
+        changed=changed,
+        candidate_binding=candidate_binding,
+        change_set_digest=change_digest,
+        after_identity_digest=candidate_binding["after_identity_digest"],
+    )
+    _atomic_json(output_path, artifact)
+
+
 def _cmd_workload_once(args: argparse.Namespace) -> None:
     control = validate_control_manifest(
         load_json_object(args.control), args.control
@@ -8453,6 +9639,11 @@ def _build_parser() -> argparse.ArgumentParser:
     workload_once.add_argument("--control", required=True)
     workload_once.add_argument("--request", required=True)
     workload_once.add_argument("--out", required=True)
+    candidate_static_review = subparsers.add_parser(
+        "_candidate-static-review", help=argparse.SUPPRESS
+    )
+    candidate_static_review.add_argument("--run-dir", required=True)
+    candidate_static_review.add_argument("--out", required=True)
     validate = subparsers.add_parser("validate", help="validate controller JSON")
     validate.add_argument("--control", required=True)
     validate.add_argument("--change-set")
@@ -8522,6 +9713,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "_workload-once":
             _cmd_workload_once(args)
+            return 0
+        if args.command == "_candidate-static-review":
+            _cmd_candidate_static_review(args)
             return 0
         if args.command == "validate":
             control = validate_control_manifest(

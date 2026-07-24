@@ -342,16 +342,22 @@ class BranchExploreTests(unittest.TestCase):
     def test_short_screen_reports_both_bounds_from_paired_statistics(self) -> None:
         branch_explore = _load_branch_explore()
         captured = {}
+        real_gate = branch_explore.CandidateGate
 
-        class InspectingGate:
-            def __init__(self, *_args, **_kwargs):
-                pass
-
-            def run(self, actions):
-                actions["static_review"]()
-                actions["build_correctness"]()
-                captured.update(actions["short_paired"]())
-                return {"decision": "STOP"}
+        class InspectingGate(real_gate):
+            def decide(
+                self,
+                completed_results,
+                controlled_spend_seconds,
+                authorization,
+            ):
+                if "short_paired" in completed_results:
+                    captured.update(completed_results["short_paired"])
+                return super().decide(
+                    completed_results,
+                    controlled_spend_seconds,
+                    authorization,
+                )
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -430,16 +436,22 @@ class BranchExploreTests(unittest.TestCase):
         gate_runs = 0
 
         class ClockedGate(real_gate):
-            def __init__(self, contract, candidate, **kwargs):
-                kwargs["now"] = clock.now
-                super().__init__(contract, candidate, **kwargs)
-
-            def run(self, actions):
+            def decide(
+                self,
+                completed_results,
+                controlled_spend_seconds,
+                authorization,
+            ):
                 nonlocal gate_runs
-                result = super().run(actions)
-                gate_runs += 1
-                if gate_runs == 1:
-                    clock.advance(0.5)
+                result = super().decide(
+                    completed_results,
+                    controlled_spend_seconds,
+                    authorization,
+                )
+                if result["decision"] != "RUN_STAGE":
+                    gate_runs += 1
+                    if gate_runs == 1:
+                        clock.advance(0.5)
                 return result
 
         candidate_calls = []
@@ -506,22 +518,10 @@ class BranchExploreTests(unittest.TestCase):
         real_gate = branch_explore.CandidateGate
         declarations = []
 
-        class ClockedGate(real_gate):
-            def __init__(self, contract, candidate, **kwargs):
+        class InspectingGate(real_gate):
+            def __init__(self, contract, candidate):
                 declarations.append(copy.deepcopy(candidate))
-                kwargs["now"] = clock.now
-                super().__init__(contract, candidate, **kwargs)
-
-            def run(self, actions):
-                if "profiler" in actions:
-                    profiler = actions["profiler"]
-
-                    def charged_profiler():
-                        clock.advance(2.0)
-                        return profiler()
-
-                    actions = {**actions, "profiler": charged_profiler}
-                return super().run(actions)
+                super().__init__(contract, candidate)
 
         candidate_calls = []
 
@@ -550,7 +550,7 @@ class BranchExploreTests(unittest.TestCase):
             )
             state_path.write_text(json.dumps(payload), encoding="utf-8")
             with mock.patch.object(
-                branch_explore, "CandidateGate", ClockedGate
+                branch_explore, "CandidateGate", InspectingGate
             ), mock.patch.object(
                 branch_explore,
                 "time",

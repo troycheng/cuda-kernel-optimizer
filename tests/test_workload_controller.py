@@ -888,11 +888,22 @@ class WorkloadControllerContractTests(unittest.TestCase):
                 },
                 _candidate_declaration("candidate", "worktree"),
             )
-            result = gate.run(
+            result = gate.decide(
                 {
-                    "static_review": lambda: artifact,
-                    "build_correctness": lambda: {"status": "failed"},
-                }
+                    "static_review": artifact,
+                    "build_correctness": {"status": "failed"},
+                },
+                0.0,
+                {
+                    "max_controlled_seconds": 300,
+                    "max_stage": "formal_paired",
+                    "applicable_stages": [
+                        "static_review",
+                        "build_correctness",
+                        "short_paired",
+                        "formal_paired",
+                    ],
+                },
             )
             self.assertEqual(
                 result["completed_stages"],
@@ -1287,6 +1298,16 @@ class ReviewerControllerTests(unittest.TestCase):
             )
             self.assertIn("withheld", request["redacted_diff"])
             self.assertNotIn("do-not-send", json.dumps(request))
+            normalized_change = self.controller.validate_change_set(
+                _change_set(),
+                self.controller.validate_control_manifest(control),
+            )
+            self.assertEqual(request["change_set"], normalized_change)
+            self.assertEqual(
+                request["artifact_hashes"]["change_set.json"],
+                self.controller._canonical_digest(normalized_change),
+            )
+            self.assertFalse((run_dir / "change_set.json").exists())
 
     def test_multi_reviewer_diff_access_uses_least_privilege(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1460,6 +1481,31 @@ class WorkloadRoundTests(unittest.TestCase):
         change.update(overrides)
         return change
 
+    def _registered_candidate(
+        self,
+        root: Path,
+        *,
+        revision: str = "optimized",
+        diagnosis_updates: dict | None = None,
+    ) -> tuple[dict, Path, Path]:
+        control, run_dir, project = self._workspace(root)
+        self.controller.start_run(control, run_dir)
+        if diagnosis_updates:
+            diagnosis_path = run_dir / "diagnosis.json"
+            diagnosis = json.loads(diagnosis_path.read_text("utf-8"))
+            diagnosis.update(diagnosis_updates)
+            diagnosis_path.write_text(json.dumps(diagnosis), encoding="utf-8")
+        self.controller.register_change(
+            control,
+            run_dir,
+            self._change(revision=revision),
+        )
+        (project / "configs" / "value.json").write_text(
+            '{"workers": 8}\n',
+            encoding="utf-8",
+        )
+        return control, run_dir, project
+
     def _legacy_review_run(self, root: Path) -> tuple[dict, Path, dict]:
         control, run_dir, project = self._workspace(root)
         self.controller.start_run(control, run_dir)
@@ -1468,9 +1514,7 @@ class WorkloadRoundTests(unittest.TestCase):
             '{"workers": 8}\n', encoding="utf-8"
         )
         state = self.controller.read_run_state(run_dir)
-        started = state.get("optimization_started_at_epoch", state["started_at_epoch"])
-        state["deadline_epoch"] = started + 0.5
-        state["soft_target_epoch"] = started + 0.25
+        state["controlled_spend_seconds"] = 2580.1
         self.controller._write_state(run_dir, state)
         self.controller.evaluate_change(run_dir)
         legacy = json.loads((run_dir / "decision.json").read_text("utf-8"))
@@ -2238,6 +2282,83 @@ class WorkloadRoundTests(unittest.TestCase):
                     run_dir,
                     _run_grant("grant-symlinked-epoch"),
                 )
+
+    def test_stage_grant_revalidation_uses_candidate_identity_only_for_active_scope(
+        self,
+    ) -> None:
+        for scope in ("project", "isolated_environment"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                control, run_dir, project = self._workspace(root)
+                _enable_v2_readiness(control, root)
+                _enable_active_diagnosis(control, root)
+                self.controller.start_run(control, run_dir)
+                self.controller.authorize_run(
+                    control,
+                    run_dir,
+                    _run_grant(
+                        f"grant-active-{scope}",
+                        allowed_mutation_scopes=[
+                            "project",
+                            "isolated_environment",
+                        ],
+                    ),
+                )
+                state = self.controller.read_run_state(run_dir)
+                state["change_scope"] = scope
+                environment = Path(control["mutation"]["environment_root"])
+                if scope == "project":
+                    (project / "configs" / "value.json").write_text(
+                        '{"workers": 8}\n',
+                        encoding="utf-8",
+                    )
+                else:
+                    (environment / "candidate.txt").write_text(
+                        "candidate\n",
+                        encoding="utf-8",
+                    )
+                active_identity = self.controller._identity(
+                    control,
+                    scope,
+                )["digest"]
+
+                grant = self.controller._load_bound_authorization_grant(
+                    run_dir,
+                    state,
+                    control,
+                    active_scope_identity_digest=active_identity,
+                )
+
+                self.assertEqual(
+                    grant["baseline_identity_digest"],
+                    state["baseline_identity_digest"],
+                )
+                self.assertEqual(
+                    grant["baseline_environment_identity_digest"],
+                    state["baseline_environment_identity_digest"],
+                )
+                if scope == "project":
+                    (environment / "unexpected.txt").write_text(
+                        "drift\n",
+                        encoding="utf-8",
+                    )
+                    expected_error = "environment identity drifted"
+                else:
+                    (project / "configs" / "value.json").write_text(
+                        '{"workers": 99}\n',
+                        encoding="utf-8",
+                    )
+                    expected_error = "project identity drifted"
+                with self.assertRaisesRegex(
+                    self.controller.ValidationError,
+                    expected_error,
+                ):
+                    self.controller._load_bound_authorization_grant(
+                        run_dir,
+                        state,
+                        control,
+                        active_scope_identity_digest=active_identity,
+                    )
 
     def test_uncommitted_authorization_tail_blocks_foreign_proposal_append(
         self,
@@ -4829,9 +4950,14 @@ class WorkloadRoundTests(unittest.TestCase):
 
             with mock.patch.object(
                 self.controller, "_load_evaluate_module", return_value=evaluator
-            ):
+            ), mock.patch.object(
+                self.controller,
+                "_run_python_workload_once_bounded",
+                side_effect=AssertionError("GPU benchmark ran after static failure"),
+            ) as gpu_benchmark:
                 decision = self.controller.evaluate_change(run_dir)
 
+            gpu_benchmark.assert_not_called()
             evaluator.evaluate_pairs.assert_not_called()
             self.assertEqual(decision["stop_reason"], "static_falsified")
             artifact = json.loads(
@@ -4839,6 +4965,826 @@ class WorkloadRoundTests(unittest.TestCase):
             )
             self.assertEqual(artifact["status"], "failed")
             self.assertEqual(artifact["checks"][0]["kind"], "json_parse")
+
+    def test_correctness_failure_prevents_answerable_profiler_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control_value, run_dir, _project = self._registered_candidate(
+                root,
+                revision="invalid",
+                diagnosis_updates={
+                    "confidence": "inconclusive",
+                    "suggested_probes": ["timeline"],
+                },
+            )
+
+            with mock.patch.object(
+                self.controller,
+                "run_probe",
+                side_effect=AssertionError(
+                    "profiler ran after correctness failure"
+                ),
+            ) as profiler:
+                decision = self.controller.evaluate_change(run_dir)
+
+            profiler.assert_not_called()
+            self.assertEqual(decision["reason"], "correctness_failed")
+
+    def test_candidate_stage_complete_before_state_recovers_without_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control_value, run_dir, _project = self._registered_candidate(root)
+            before = self.controller.read_run_state(run_dir)
+            original_write_state = self.controller._write_state
+            interrupted = False
+
+            def interrupt_completion_commit(path, value):
+                nonlocal interrupted
+                if (
+                    not interrupted
+                    and (run_dir / "candidate_stage_complete.json").is_file()
+                    and value.get("controlled_spend_seconds", 0.0)
+                    > before["controlled_spend_seconds"]
+                ):
+                    interrupted = True
+                    raise OSError("candidate completion state commit interrupted")
+                return original_write_state(path, value)
+
+            with mock.patch.object(
+                self.controller,
+                "_write_state",
+                side_effect=interrupt_completion_commit,
+            ), mock.patch.object(
+                self.controller,
+                "_run_candidate_static_review_bounded",
+                wraps=self.controller._run_candidate_static_review_bounded,
+            ) as first_static:
+                with self.assertRaisesRegex(
+                    OSError,
+                    "candidate completion state commit interrupted",
+                ):
+                    self.controller.evaluate_change(run_dir)
+
+            self.assertEqual(first_static.call_count, 1)
+            complete_path = run_dir / "candidate_stage_complete.json"
+            intent_path = run_dir / "candidate_stage_intent.json"
+            completion = json.loads(complete_path.read_text("utf-8"))
+            self.assertEqual(completion["stage"], "static_review")
+            for field in (
+                "intent_sha256",
+                "authorization_sha256",
+                "change_set_sha256",
+                "candidate_identity_sha256",
+                "stage_artifact_sha256",
+                "duration_seconds",
+            ):
+                self.assertIn(field, completion)
+            self.assertEqual(
+                self.controller.read_run_state(run_dir)[
+                    "controlled_spend_seconds"
+                ],
+                before["controlled_spend_seconds"],
+            )
+
+            with mock.patch.object(
+                self.controller,
+                "_run_candidate_static_review_bounded",
+                side_effect=AssertionError("completed static stage reran"),
+            ) as repeated_static:
+                decision = self.controller.resume_run(run_dir)
+
+            repeated_static.assert_not_called()
+            recovered = self.controller.read_run_state(run_dir)
+            self.assertEqual(decision["status"], "promoted")
+            self.assertGreater(
+                recovered["controlled_spend_seconds"],
+                before["controlled_spend_seconds"],
+            )
+            self.assertIn(
+                "static_review",
+                recovered["candidate_stage_completions"],
+            )
+            spend = recovered["controlled_spend_seconds"]
+            self.controller.resume_run(run_dir)
+            self.assertEqual(
+                self.controller.read_run_state(run_dir)[
+                    "controlled_spend_seconds"
+                ],
+                spend,
+            )
+            self.assertFalse(complete_path.exists())
+            self.assertFalse(intent_path.exists())
+
+    def test_state_bound_candidate_intent_requires_manual_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control_value, run_dir, _project = self._registered_candidate(root)
+            interrupted_runner = mock.Mock(side_effect=KeyboardInterrupt())
+
+            with mock.patch.object(
+                self.controller,
+                "_run_candidate_static_review_bounded",
+                interrupted_runner,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.controller.evaluate_change(run_dir)
+
+            self.assertEqual(interrupted_runner.call_count, 1)
+            self.assertTrue((run_dir / "candidate_stage_intent.json").is_file())
+            self.assertFalse((run_dir / "candidate_stage_complete.json").exists())
+
+            with mock.patch.object(
+                self.controller,
+                "_run_candidate_static_review_bounded",
+                side_effect=AssertionError("interrupted stage reran"),
+            ) as repeated_runner:
+                recovered = self.controller.resume_run(run_dir)
+
+            repeated_runner.assert_not_called()
+            self.assertEqual(recovered["status"], "manual_recovery_required")
+            self.assertEqual(recovered["next_action"], "manual_recovery")
+
+    def test_consumed_candidate_completion_with_markers_only_cleans_on_resume(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            self.controller.start_run(control, run_dir)
+            self.controller.register_change(control, run_dir, self._change())
+            (project / "configs" / "value.json").write_text(
+                '{"workers":',
+                encoding="utf-8",
+            )
+            original_unlink = Path.unlink
+            interrupted = False
+
+            def interrupt_marker_cleanup(path, *args, **kwargs):
+                nonlocal interrupted
+                if (
+                    not interrupted
+                    and Path(path) == run_dir / "candidate_stage_complete.json"
+                ):
+                    interrupted = True
+                    raise OSError("candidate marker cleanup interrupted")
+                return original_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "unlink", interrupt_marker_cleanup):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "candidate marker cleanup interrupted",
+                ):
+                    self.controller.evaluate_change(run_dir)
+
+            committed = self.controller.read_run_state(run_dir)
+            spend = committed["controlled_spend_seconds"]
+            self.assertIn(
+                "static_review",
+                committed["candidate_stage_completions"],
+            )
+            self.assertTrue((run_dir / "candidate_stage_complete.json").is_file())
+            self.assertTrue((run_dir / "candidate_stage_intent.json").is_file())
+            (project / "configs" / "value.json").write_text(
+                '{"workers": 99}\n',
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                self.controller,
+                "_run_candidate_static_review_bounded",
+                side_effect=AssertionError("consumed static stage reran"),
+            ) as static_review:
+                decision = self.controller.resume_run(run_dir)
+
+            static_review.assert_not_called()
+            self.assertEqual(decision["status"], "manual_recovery_required")
+            self.assertEqual(decision["next_action"], "manual_recovery")
+            self.assertEqual(
+                decision["manual_recovery_reason"],
+                "candidate_identity_drift",
+            )
+            self.assertEqual(
+                json.loads(
+                    (project / "configs" / "value.json").read_text("utf-8")
+                )["workers"],
+                99,
+            )
+            self.assertEqual(
+                self.controller.read_run_state(run_dir)[
+                    "controlled_spend_seconds"
+                ],
+                spend,
+            )
+            self.assertFalse((run_dir / "candidate_stage_complete.json").exists())
+            self.assertFalse((run_dir / "candidate_stage_intent.json").exists())
+
+    def test_consumed_paired_workload_failure_resumes_with_same_reason_and_transition(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+
+            def failed_evaluator():
+                evaluator = mock.Mock()
+                evaluator.evaluate_pairs.return_value = {
+                    "schema_version": "cuda-workload-optimizer/evaluation-v1",
+                    "status": "workload_failed",
+                    "primary": {"status": "unavailable"},
+                    "constraints": [],
+                }
+                return evaluator
+
+            uninterrupted_root = root / "uninterrupted"
+            uninterrupted_root.mkdir()
+            _control, uninterrupted_run, _project = self._registered_candidate(
+                uninterrupted_root
+            )
+            uninterrupted_evaluator = failed_evaluator()
+            with mock.patch.object(
+                self.controller,
+                "_load_evaluate_module",
+                return_value=uninterrupted_evaluator,
+            ):
+                uninterrupted = self.controller.evaluate_change(
+                    uninterrupted_run
+                )
+            uninterrupted_state = self.controller.read_run_state(
+                uninterrupted_run
+            )
+            self.assertEqual(
+                uninterrupted_evaluator.evaluate_pairs.call_count,
+                1,
+            )
+
+            resumed_root = root / "resumed"
+            resumed_root.mkdir()
+            _control, resumed_run, _project = self._registered_candidate(
+                resumed_root
+            )
+            resumed_evaluator = failed_evaluator()
+            original_unlink = Path.unlink
+            interrupted = False
+
+            def interrupt_short_completion_cleanup(path, *args, **kwargs):
+                nonlocal interrupted
+                candidate = Path(path)
+                complete_path = resumed_run / "candidate_stage_complete.json"
+                if (
+                    not interrupted
+                    and candidate == complete_path
+                    and complete_path.is_file()
+                    and json.loads(complete_path.read_text("utf-8")).get("stage")
+                    == "short_paired"
+                ):
+                    interrupted = True
+                    raise OSError("short paired marker cleanup interrupted")
+                return original_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(
+                self.controller,
+                "_load_evaluate_module",
+                return_value=resumed_evaluator,
+            ), mock.patch.object(
+                Path,
+                "unlink",
+                interrupt_short_completion_cleanup,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "short paired marker cleanup interrupted",
+                ):
+                    self.controller.evaluate_change(resumed_run)
+
+            committed = self.controller.read_run_state(resumed_run)
+            self.assertIn(
+                "short_paired",
+                committed["candidate_stage_completions"],
+            )
+            self.assertEqual(
+                json.loads(
+                    (resumed_run / "short_paired_evaluation.json").read_text(
+                        "utf-8"
+                    )
+                )["status"],
+                "workload_failed",
+            )
+            resumed_evaluator.evaluate_pairs.reset_mock()
+            resumed_evaluator.evaluate_pairs.side_effect = AssertionError(
+                "consumed paired stage reran"
+            )
+            with mock.patch.object(
+                self.controller,
+                "_load_evaluate_module",
+                return_value=resumed_evaluator,
+            ):
+                resumed = self.controller.resume_run(resumed_run)
+
+            resumed_evaluator.evaluate_pairs.assert_not_called()
+            resumed_state = self.controller.read_run_state(resumed_run)
+            self.assertEqual(resumed["reason"], uninterrupted["reason"])
+            self.assertEqual(
+                (
+                    resumed_state["status"],
+                    resumed_state["stage"],
+                    resumed_state["next_action"],
+                ),
+                (
+                    uninterrupted_state["status"],
+                    uninterrupted_state["stage"],
+                    uninterrupted_state["next_action"],
+                ),
+            )
+
+    def test_candidate_identity_is_rechecked_before_intent_and_runner(self) -> None:
+        for boundary in ("before_intent", "before_runner"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                _control_value, run_dir, project = self._registered_candidate(root)
+                config = project / "configs" / "value.json"
+                drifted_value = 9 if boundary == "before_intent" else 10
+                runner = mock.Mock(
+                    side_effect=AssertionError(
+                        f"candidate reached runner after {boundary} drift"
+                    )
+                )
+                patches = [
+                    mock.patch.object(
+                        self.controller,
+                        "_run_candidate_static_review_bounded",
+                        runner,
+                    )
+                ]
+                if boundary == "before_intent":
+                    gate_class = self.controller._load_budget_module().CandidateGate
+                    original_decide = gate_class.decide
+                    changed = False
+
+                    def drift_after_decision(gate, *args, **kwargs):
+                        nonlocal changed
+                        decision = original_decide(gate, *args, **kwargs)
+                        if not changed and decision["decision"] == "RUN_STAGE":
+                            changed = True
+                            config.write_text(
+                                f'{{"workers": {drifted_value}}}\n',
+                                encoding="utf-8",
+                            )
+                        return decision
+
+                    patches.append(
+                        mock.patch.object(
+                            gate_class,
+                            "decide",
+                            autospec=True,
+                            side_effect=drift_after_decision,
+                        )
+                    )
+                else:
+                    original_write_state = self.controller._write_state
+                    changed = False
+
+                    def drift_after_intent_binding(path, value):
+                        nonlocal changed
+                        written = original_write_state(path, value)
+                        if (
+                            not changed
+                            and value.get("candidate_stage_intent_sha256")
+                            is not None
+                        ):
+                            changed = True
+                            config.write_text(
+                                f'{{"workers": {drifted_value}}}\n',
+                                encoding="utf-8",
+                            )
+                        return written
+
+                    patches.append(
+                        mock.patch.object(
+                            self.controller,
+                            "_write_state",
+                            side_effect=drift_after_intent_binding,
+                        )
+                    )
+
+                with contextlib.ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    decision = self.controller.evaluate_change(run_dir)
+
+                runner.assert_not_called()
+                self.assertEqual(
+                    (
+                        decision["status"],
+                        decision["next_action"],
+                        decision["manual_recovery_reason"],
+                    ),
+                    (
+                        "manual_recovery_required",
+                        "manual_recovery",
+                        "candidate_identity_drift",
+                    ),
+                )
+                self.assertEqual(
+                    json.loads(config.read_text("utf-8"))["workers"],
+                    drifted_value,
+                )
+                self.assertEqual(
+                    self.controller.read_run_state(run_dir),
+                    decision,
+                )
+
+    def test_candidate_identity_drift_after_stage_runner_requires_manual_recovery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control_value, run_dir, project = self._registered_candidate(root)
+            config = project / "configs" / "value.json"
+            starting_spend = self.controller.read_run_state(run_dir)[
+                "controlled_spend_seconds"
+            ]
+            original_static_review = (
+                self.controller._run_candidate_static_review_bounded
+            )
+
+            def drift_after_runner(*args, **kwargs):
+                result = original_static_review(*args, **kwargs)
+                config.write_text('{"workers": 11}\n', encoding="utf-8")
+                return result
+
+            with mock.patch.object(
+                self.controller,
+                "_run_candidate_static_review_bounded",
+                side_effect=drift_after_runner,
+            ):
+                decision = self.controller.evaluate_change(run_dir)
+
+            self.assertEqual(
+                (
+                    decision["status"],
+                    decision["next_action"],
+                    decision["manual_recovery_reason"],
+                ),
+                (
+                    "manual_recovery_required",
+                    "manual_recovery",
+                    "candidate_identity_drift",
+                ),
+            )
+            self.assertEqual(
+                json.loads(config.read_text("utf-8"))["workers"],
+                11,
+            )
+            self.assertEqual(self.controller.read_run_state(run_dir), decision)
+            completion = decision["candidate_stage_completions"][
+                "static_review"
+            ]
+            self.assertEqual(
+                (
+                    completion["result"]["status"],
+                    completion["result"]["reason"],
+                ),
+                (
+                    "manual_recovery_required",
+                    "candidate_identity_drift",
+                ),
+            )
+            self.assertGreater(completion["duration_seconds"], 0.0)
+            self.assertGreater(
+                decision["controlled_spend_seconds"],
+                starting_spend,
+            )
+
+    def test_candidate_stage_intent_binds_the_state_before_marker_write(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control_value, run_dir, _project = self._registered_candidate(root)
+            base_state = self.controller.read_run_state(run_dir)
+            original_atomic_json = self.controller._atomic_json
+
+            def interrupt_after_intent(path, value):
+                original_atomic_json(path, value)
+                if Path(path) == run_dir / "candidate_stage_intent.json":
+                    raise KeyboardInterrupt()
+
+            with mock.patch.object(
+                self.controller,
+                "_atomic_json",
+                side_effect=interrupt_after_intent,
+            ), self.assertRaises(KeyboardInterrupt):
+                self.controller.evaluate_change(run_dir)
+
+            intent = json.loads(
+                (run_dir / "candidate_stage_intent.json").read_text("utf-8")
+            )
+            self.assertEqual(
+                intent["base_state_sha256"],
+                self.controller._canonical_digest(base_state),
+            )
+
+    def test_candidate_stage_intent_rejects_an_unavailable_base_state(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control_value, run_dir, _project = self._registered_candidate(root)
+            original_atomic_json = self.controller._atomic_json
+
+            def interrupt_after_intent(path, value):
+                original_atomic_json(path, value)
+                if Path(path) == run_dir / "candidate_stage_intent.json":
+                    raise KeyboardInterrupt()
+
+            with mock.patch.object(
+                self.controller,
+                "_atomic_json",
+                side_effect=interrupt_after_intent,
+            ), self.assertRaises(KeyboardInterrupt):
+                self.controller.evaluate_change(run_dir)
+
+            intent_path = run_dir / "candidate_stage_intent.json"
+            intent = json.loads(intent_path.read_text("utf-8"))
+            intent["base_state_sha256"] = "0" * 64
+            intent_path.write_text(json.dumps(intent), encoding="utf-8")
+            with self.assertRaisesRegex(
+                self.controller.ValidationError,
+                "base state",
+            ):
+                self.controller.resume_run(run_dir)
+
+    def test_resume_reenters_gate_from_state_only_candidate_completion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control_value, run_dir, _project = self._registered_candidate(root)
+            gate_class = self.controller._load_budget_module().CandidateGate
+            original_decide = gate_class.decide
+            interrupted = False
+
+            def interrupt_after_first_completion(gate, completed, *args, **kwargs):
+                nonlocal interrupted
+                if not interrupted and "static_review" in completed:
+                    interrupted = True
+                    raise KeyboardInterrupt()
+                return original_decide(gate, completed, *args, **kwargs)
+
+            with mock.patch.object(
+                gate_class,
+                "decide",
+                autospec=True,
+                side_effect=interrupt_after_first_completion,
+            ), self.assertRaises(KeyboardInterrupt):
+                self.controller.evaluate_change(run_dir)
+
+            committed = self.controller.read_run_state(run_dir)
+            self.assertIn("static_review", committed["candidate_stage_completions"])
+            self.assertFalse((run_dir / "candidate_stage_intent.json").exists())
+            self.assertFalse((run_dir / "candidate_stage_complete.json").exists())
+
+            decision = self.controller.resume_run(run_dir)
+
+            self.assertEqual(decision["status"], "promoted")
+
+    def test_registered_root_mirror_drift_cannot_change_stages_or_reviewer(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control, run_dir, _project = self._registered_candidate(root)
+            live_path = run_dir / "change_set.json"
+            frozen_path = (
+                run_dir / "rounds" / "round-1" / "change_set.json"
+            )
+            frozen = json.loads(frozen_path.read_text("utf-8"))
+            mirror = json.loads(live_path.read_text("utf-8"))
+            mirror["candidate"]["revision"] = "slow"
+            mirror["hypothesis"] += " compatibility mirror drift"
+            live_path.write_text(json.dumps(mirror), encoding="utf-8")
+
+            decision = self.controller.evaluate_change(run_dir)
+
+            self.assertEqual(decision["status"], "promoted")
+            request = json.loads(
+                (run_dir / "review_request.json").read_text("utf-8")
+            )
+            self.assertEqual(request["change_set"], frozen)
+            self.assertEqual(
+                request["artifact_hashes"]["change_set.json"],
+                self.controller._canonical_digest(frozen),
+            )
+            self.assertEqual(
+                json.loads(live_path.read_text("utf-8")),
+                mirror,
+            )
+
+    def test_frozen_change_set_drift_before_next_stage_blocks_runner_and_reviewer(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control, run_dir, _project = self._registered_candidate(root)
+            frozen_path = (
+                run_dir / "rounds" / "round-1" / "change_set.json"
+            )
+            gate_class = self.controller._load_budget_module().CandidateGate
+            original_decide = gate_class.decide
+            drifted = False
+
+            def drift_before_next_stage(gate, *args, **kwargs):
+                nonlocal drifted
+                result = original_decide(gate, *args, **kwargs)
+                if (
+                    not drifted
+                    and result["decision"] == "RUN_STAGE"
+                    and result["next_stage"] == "build_correctness"
+                ):
+                    drifted = True
+                    changed = json.loads(frozen_path.read_text("utf-8"))
+                    changed["hypothesis"] += " drifted before next stage"
+                    frozen_path.write_text(
+                        json.dumps(changed),
+                        encoding="utf-8",
+                    )
+                return result
+
+            expensive_runner = mock.Mock(
+                side_effect=AssertionError(
+                    "next stage ran after frozen ChangeSet drift"
+                )
+            )
+            reviewer = mock.Mock(
+                side_effect=AssertionError(
+                    "reviewer ran after frozen ChangeSet drift"
+                )
+            )
+            with mock.patch.object(
+                gate_class,
+                "decide",
+                autospec=True,
+                side_effect=drift_before_next_stage,
+            ), mock.patch.object(
+                self.controller,
+                "_run_python_workload_once_bounded",
+                expensive_runner,
+            ), mock.patch.object(
+                self.controller,
+                "review_change",
+                reviewer,
+            ):
+                decision = self.controller.evaluate_change(run_dir)
+
+            self.assertTrue(drifted)
+            expensive_runner.assert_not_called()
+            reviewer.assert_not_called()
+            self.assertEqual(decision["status"], "rejected")
+            self.assertEqual(decision["reason"], "frozen_artifact_drift")
+
+    def test_frozen_change_set_drift_after_intent_blocks_stage_runner(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control, run_dir, _project = self._registered_candidate(root)
+            frozen_path = (
+                run_dir / "rounds" / "round-1" / "change_set.json"
+            )
+            original_write_state = self.controller._write_state
+            drifted = False
+
+            def drift_before_runner(path, value):
+                nonlocal drifted
+                written = original_write_state(path, value)
+                if (
+                    not drifted
+                    and value.get("candidate_stage_intent_stage")
+                    == "build_correctness"
+                ):
+                    drifted = True
+                    changed = json.loads(frozen_path.read_text("utf-8"))
+                    changed["hypothesis"] += " drifted before runner"
+                    frozen_path.write_text(
+                        json.dumps(changed),
+                        encoding="utf-8",
+                    )
+                return written
+
+            expensive_runner = mock.Mock(
+                side_effect=AssertionError(
+                    "stage runner ran after ChangeSet drift"
+                )
+            )
+            with mock.patch.object(
+                self.controller,
+                "_write_state",
+                side_effect=drift_before_runner,
+            ), mock.patch.object(
+                self.controller,
+                "_run_python_workload_once_bounded",
+                expensive_runner,
+            ):
+                decision = self.controller.evaluate_change(run_dir)
+
+            self.assertTrue(drifted)
+            expensive_runner.assert_not_called()
+            self.assertEqual(decision["status"], "rejected")
+            self.assertEqual(decision["reason"], "frozen_artifact_drift")
+            state = self.controller.read_run_state(run_dir)
+            self.assertNotIn("candidate_stage_intent_sha256", state)
+            self.assertNotIn("candidate_stage_intent_stage", state)
+            self.assertFalse(
+                (run_dir / "candidate_stage_intent.json").exists()
+            )
+
+    def test_frozen_change_set_drift_before_reviewer_blocks_reviewer(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control, run_dir, _project = self._registered_candidate(root)
+            frozen_path = (
+                run_dir / "rounds" / "round-1" / "change_set.json"
+            )
+            gate_class = self.controller._load_budget_module().CandidateGate
+            original_decide = gate_class.decide
+            drifted = False
+
+            def drift_before_review(gate, *args, **kwargs):
+                nonlocal drifted
+                result = original_decide(gate, *args, **kwargs)
+                if not drifted and result["decision"] == "PROMOTE":
+                    drifted = True
+                    changed = json.loads(frozen_path.read_text("utf-8"))
+                    changed["hypothesis"] += " drifted before review"
+                    frozen_path.write_text(
+                        json.dumps(changed),
+                        encoding="utf-8",
+                    )
+                return result
+
+            reviewer = mock.Mock(
+                side_effect=AssertionError(
+                    "reviewer ran after ChangeSet drift"
+                )
+            )
+            with mock.patch.object(
+                gate_class,
+                "decide",
+                autospec=True,
+                side_effect=drift_before_review,
+            ), mock.patch.object(
+                self.controller,
+                "review_change",
+                reviewer,
+            ):
+                decision = self.controller.evaluate_change(run_dir)
+
+            self.assertTrue(drifted)
+            reviewer.assert_not_called()
+            self.assertEqual(decision["status"], "rejected")
+            self.assertEqual(decision["reason"], "frozen_artifact_drift")
+
+    def test_each_candidate_stage_commits_checkpoint_and_visible_heartbeat(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control_value, run_dir, _project = self._registered_candidate(root)
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                decision = self.controller.evaluate_change(run_dir)
+
+            self.assertEqual(decision["status"], "promoted")
+            heartbeats = [
+                json.loads(line)
+                for line in stderr.getvalue().splitlines()
+                if '"event": "heartbeat"' in line
+                and '"checkpoint": "candidate_stage_committed"' in line
+            ]
+            self.assertEqual(
+                [item["stage"] for item in heartbeats],
+                [
+                    "static_review",
+                    "build_correctness",
+                    "short_paired",
+                    "formal_paired",
+                ],
+            )
+            state = self.controller.read_run_state(run_dir)
+            self.assertEqual(
+                sorted(state["candidate_stage_completions"]),
+                [
+                    "build_correctness",
+                    "formal_paired",
+                    "short_paired",
+                    "static_review",
+                ],
+            )
+            self.assertNotIn("candidate_stage_results", state)
+            self.assertNotIn("candidate_stage_complete_digests", state)
+            self.assertGreater(state["controlled_spend_seconds"], 0.0)
 
     def test_registration_rejects_candidate_below_workload_threshold_before_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4865,7 +5811,7 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertFalse((run_dir / "registration_pending.json").exists())
             self.assertFalse((run_dir / "snapshot").exists())
 
-    def test_live_uncertainty_without_a_profiler_action_stops_before_formal(self) -> None:
+    def test_unanswerable_profiler_uncertainty_is_not_an_applicable_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             control, run_dir, project = self._workspace(root)
@@ -4906,13 +5852,9 @@ class WorkloadRoundTests(unittest.TestCase):
             ):
                 decision = self.controller.evaluate_change(run_dir)
 
-            self.assertEqual(evaluator.evaluate_pairs.call_count, 1)
-            self.assertEqual(decision["stop_reason"], "profiler_failed")
-            artifact = json.loads(
-                (run_dir / "profiler_stage.json").read_text("utf-8")
-            )
-            self.assertEqual(artifact["status"], "failed")
-            self.assertIn("live_uncertainty", artifact["reason"])
+            self.assertEqual(evaluator.evaluate_pairs.call_count, 2)
+            self.assertEqual(decision["status"], "promoted")
+            self.assertFalse((run_dir / "profiler_stage.json").exists())
 
     def test_live_uncertainty_without_profiler_cost_pauses_before_all_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4944,8 +5886,8 @@ class WorkloadRoundTests(unittest.TestCase):
 
             with mock.patch.object(
                 self.controller,
-                "_static_review_changed_files",
-                wraps=self.controller._static_review_changed_files,
+                "_run_candidate_static_review_bounded",
+                wraps=self.controller._run_candidate_static_review_bounded,
             ) as static_review, mock.patch.object(
                 self.controller, "_load_evaluate_module", return_value=evaluator
             ), mock.patch.object(
@@ -5159,16 +6101,26 @@ class WorkloadRoundTests(unittest.TestCase):
                 '{"workers": 8}\n', encoding="utf-8"
             )
             evaluator = mock.Mock()
-            evaluator.evaluate_pairs.return_value = {
-                "status": "evaluated",
-                "primary": {
-                    "status": "inconclusive",
-                    "estimate_pct": 0.1,
-                    "ci_low_pct": -0.2,
-                    "ci_high_pct": 0.4,
-                },
-                "constraints": [],
-            }
+            formal_calls = 0
+
+            def low_upper_bound(*_args, **kwargs):
+                nonlocal formal_calls
+                if kwargs["blocks"] == self.controller._BUDGET_RUNTIME["quick"][
+                    "blocks"
+                ]:
+                    formal_calls += 1
+                return {
+                    "status": "evaluated",
+                    "primary": {
+                        "status": "inconclusive",
+                        "estimate_pct": 0.1,
+                        "ci_low_pct": -0.2,
+                        "ci_high_pct": 0.4,
+                    },
+                    "constraints": [],
+                }
+
+            evaluator.evaluate_pairs.side_effect = low_upper_bound
 
             with mock.patch.object(
                 self.controller, "_load_evaluate_module", return_value=evaluator
@@ -5176,18 +6128,18 @@ class WorkloadRoundTests(unittest.TestCase):
                 decision = self.controller.evaluate_change(run_dir)
 
             self.assertEqual(evaluator.evaluate_pairs.call_count, 1)
+            self.assertEqual(formal_calls, 0)
             self.assertEqual(evaluator.evaluate_pairs.call_args.kwargs["blocks"], 2)
             self.assertEqual(decision["stop_reason"], "effect_upper_bound_below_minimum")
             self.assertIn("formal_paired", decision["skipped_expensive_stages"])
 
-    def test_authorization_review_is_resumable_idempotent_and_not_a_rejection(self) -> None:
+    def test_wall_elapsed_does_not_consume_candidate_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             control, run_dir, project = self._workspace(root)
             self.controller.start_run(control, run_dir)
             self.controller.register_change(control, run_dir, self._change())
             config = project / "configs" / "value.json"
-            original = config.read_text("utf-8")
             config.write_text('{"workers": 8}\n', encoding="utf-8")
             state = self.controller.read_run_state(run_dir)
             state["started_at_epoch"] = time.time() - 50.0
@@ -5198,51 +6150,27 @@ class WorkloadRoundTests(unittest.TestCase):
             evaluator.evaluate_pairs.return_value = {
                 "status": "evaluated",
                 "primary": {
-                    "status": "inconclusive",
-                    "estimate_pct": 1.0,
-                    "ci_low_pct": 0.5,
-                    "ci_high_pct": 1.5,
+                    "status": "confirmed_win",
+                    "estimate_pct": 5.0,
+                    "ci_low_pct": 4.0,
+                    "ci_high_pct": 6.0,
                 },
                 "constraints": [],
             }
 
             with mock.patch.object(
                 self.controller, "_load_evaluate_module", return_value=evaluator
-            ), mock.patch.object(
-                self.controller,
-                "review_change",
-                side_effect=AssertionError("authorization block invoked reviewer"),
             ):
                 first = self.controller.evaluate_change(run_dir)
                 second = self.controller.evaluate_change(run_dir)
 
             self.assertEqual(first, second)
-            self.assertEqual(evaluator.evaluate_pairs.call_count, 1)
-            self.assertEqual(first["status"], "review_required")
-            self.assertEqual(
-                first["reason"], "authorization_insufficient_for_next_action"
-            )
-            self.assertEqual(first["blocked_action"]["action_id"], "formal_paired")
-            self.assertGreaterEqual(first["elapsed_seconds"], 50.0)
-            self.assertAlmostEqual(
-                first["projected_spend"]["p90_seconds"],
-                first["elapsed_seconds"] + 120.0,
-                places=6,
-            )
-            self.assertNotEqual(first.get("reason"), "budget_expired")
-            self.assertEqual(config.read_text("utf-8"), original)
-            self.assertTrue((run_dir / "candidate.diff").is_file())
-            self.assertTrue((run_dir / "time_gate.json").is_file())
-            resumed = self.controller.read_run_state(run_dir)
-            self.assertEqual(resumed["status"], "active")
-            self.assertEqual(resumed["next_action"], "review_required")
-            self.assertEqual(
-                resumed["terminal_reason"],
-                "authorization_insufficient_for_next_action",
-            )
-            self.assertEqual(
-                resumed["decision_digest"], self.controller._canonical_digest(first)
-            )
+            self.assertEqual(evaluator.evaluate_pairs.call_count, 2)
+            self.assertEqual(first["status"], "promoted")
+            self.assertLess(first["elapsed_seconds"], 50.0)
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 8}\n')
+            committed = self.controller.read_run_state(run_dir)
+            self.assertGreater(committed["controlled_spend_seconds"], 0.0)
 
     def test_static_stage_is_inside_cumulative_authorization_and_runs_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5254,16 +6182,15 @@ class WorkloadRoundTests(unittest.TestCase):
                 '{"workers": 8}\n', encoding="utf-8"
             )
             state = self.controller.read_run_state(run_dir)
-            started = state.get(
-                "optimization_started_at_epoch", state["started_at_epoch"]
+            state["controlled_spend_seconds"] = (
+                self.controller._BUDGET_RUNTIME["quick"]["hard_ceiling_seconds"]
+                - 0.5
             )
-            state["deadline_epoch"] = started + 0.5
-            state["soft_target_epoch"] = started + 0.25
             self.controller._write_state(run_dir, state)
 
             with mock.patch.object(
                 self.controller,
-                "_static_review_changed_files",
+                "_run_candidate_static_review_bounded",
                 side_effect=AssertionError("unauthorized static stage executed"),
             ) as static_review:
                 decision = self.controller.evaluate_change(run_dir)
@@ -5272,6 +6199,15 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(decision["status"], "review_required")
             self.assertEqual(decision["blocked_action"]["action_id"], "static_review")
             self.assertNotEqual(decision["reason"], "budget_expired")
+            committed = self.controller.read_run_state(run_dir)
+            self.assertNotIn("candidate_stage_intent_sha256", committed)
+            self.assertNotIn("candidate_stage_intent_stage", committed)
+            self.assertFalse(
+                (run_dir / "candidate_stage_intent.json").exists()
+            )
+            self.assertFalse(
+                (run_dir / "candidate_stage_complete.json").exists()
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -5284,13 +6220,118 @@ class WorkloadRoundTests(unittest.TestCase):
 
             with mock.patch.object(
                 self.controller,
-                "_static_review_changed_files",
-                wraps=self.controller._static_review_changed_files,
+                "_run_candidate_static_review_bounded",
+                wraps=self.controller._run_candidate_static_review_bounded,
             ) as static_review:
                 decision = self.controller.evaluate_change(run_dir)
 
             self.assertEqual(decision["status"], "promoted")
             self.assertEqual(static_review.call_count, 1)
+
+    def test_static_stage_timeout_is_killable_and_sealed_for_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            self.controller.start_run(control, run_dir)
+            change = self._change()
+            change["candidate"]["estimated_cost"]["static_review"][
+                "p90_seconds"
+            ] = 0.01
+            self.controller.register_change(control, run_dir, change)
+            (project / "configs" / "value.json").write_text(
+                '{"workers": 8}\n', encoding="utf-8"
+            )
+            remaining_authorization = 0.2
+            state = self.controller.read_run_state(run_dir)
+            state["controlled_spend_seconds"] = (
+                self.controller._BUDGET_RUNTIME["quick"][
+                    "hard_ceiling_seconds"
+                ]
+                - remaining_authorization
+            )
+            starting_spend = state["controlled_spend_seconds"]
+            self.controller._write_state(run_dir, state)
+
+            child_pid_path = root / "static-timeout-child.pid"
+            stage_script = root / "static-timeout-stage.py"
+            stage_script.write_text(
+                "import signal, subprocess, sys, time\n"
+                "from pathlib import Path\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])\n"
+                f"Path({str(child_pid_path)!r}).write_text(str(child.pid))\n"
+                "time.sleep(60)\n",
+                encoding="utf-8",
+            )
+            budget = self.controller._load_budget_module()
+            original_run = budget.run_budgeted_command
+            observed_timeouts = []
+
+            def run_slow_static(
+                _argv,
+                *,
+                timeout_seconds,
+                **_kwargs,
+            ):
+                observed_timeouts.append(float(timeout_seconds))
+                return original_run(
+                    [sys.executable, str(stage_script)],
+                    timeout_seconds=timeout_seconds,
+                    grace_seconds=0.05,
+                )
+
+            try:
+                with mock.patch.object(
+                    self.controller,
+                    "_load_budget_module",
+                    return_value=budget,
+                ), mock.patch.object(
+                    budget,
+                    "run_budgeted_command",
+                    side_effect=run_slow_static,
+                ):
+                    decision = self.controller.evaluate_change(run_dir)
+
+                committed = self.controller.read_run_state(run_dir)
+                completion = committed["candidate_stage_completions"][
+                    "static_review"
+                ]
+                self.assertEqual(decision["status"], "review_required")
+                self.assertEqual(decision["reason"], "candidate_stage_timeout")
+                self.assertEqual(
+                    completion["result"],
+                    {
+                        "status": "review_required",
+                        "reason": "candidate_stage_timeout",
+                        "timed_out": True,
+                    },
+                )
+                self.assertGreater(
+                    committed["controlled_spend_seconds"],
+                    starting_spend,
+                )
+                self.assertLessEqual(
+                    committed["controlled_spend_seconds"],
+                    self.controller._BUDGET_RUNTIME["quick"][
+                        "hard_ceiling_seconds"
+                    ],
+                )
+                self.assertEqual(len(observed_timeouts), 1)
+                self.assertGreater(observed_timeouts[0], 0.01)
+                self.assertLessEqual(
+                    observed_timeouts[0],
+                    remaining_authorization,
+                )
+                self.assertTrue(child_pid_path.is_file())
+                self.assertTrue(
+                    _wait_pid_gone(int(child_pid_path.read_text("utf-8")))
+                )
+            finally:
+                if child_pid_path.is_file():
+                    child_pid = int(child_pid_path.read_text("utf-8"))
+                    if _pid_exists(child_pid):
+                        os.kill(child_pid, signal.SIGKILL)
 
     def test_review_required_replay_revalidates_all_bound_artifacts_and_snapshot(self) -> None:
         for target in (
@@ -5310,7 +6351,7 @@ class WorkloadRoundTests(unittest.TestCase):
                 config = project / "configs" / "value.json"
                 config.write_text('{"workers": 8}\n', encoding="utf-8")
                 state = self.controller.read_run_state(run_dir)
-                state["deadline_epoch"] = time.time() + 100.0
+                state["controlled_spend_seconds"] = 2580.1
                 self.controller._write_state(run_dir, state)
                 evaluator = mock.Mock()
                 evaluator.evaluate_pairs.return_value = {
@@ -5373,11 +6414,7 @@ class WorkloadRoundTests(unittest.TestCase):
             config = project / "configs" / "value.json"
             config.write_text('{"workers": 8}\n', encoding="utf-8")
             state = self.controller.read_run_state(run_dir)
-            started = state.get(
-                "optimization_started_at_epoch", state["started_at_epoch"]
-            )
-            state["deadline_epoch"] = started + 0.5
-            state["soft_target_epoch"] = started + 0.25
+            state["controlled_spend_seconds"] = 2580.1
             self.controller._write_state(run_dir, state)
             self.controller.evaluate_change(run_dir)
 
@@ -5617,11 +6654,7 @@ class WorkloadRoundTests(unittest.TestCase):
                     '{"workers": 8}\n', encoding="utf-8"
                 )
                 state = self.controller.read_run_state(run_dir)
-                started = state.get(
-                    "optimization_started_at_epoch", state["started_at_epoch"]
-                )
-                state["deadline_epoch"] = started + 0.5
-                state["soft_target_epoch"] = started + 0.25
+                state["controlled_spend_seconds"] = 2580.1
                 self.controller._write_state(run_dir, state)
                 self.controller.evaluate_change(run_dir)
                 legacy = json.loads((run_dir / "decision.json").read_text("utf-8"))
@@ -6117,10 +7150,13 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(config.read_text("utf-8"), original)
             self.assertFalse((run_dir / "evaluation.json").exists())
 
-    def test_registered_change_set_and_before_identity_are_digest_bound(self) -> None:
+    def test_frozen_change_set_and_before_identity_are_digest_bound(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
-            for artifact in ("change_set.json", "rounds/round-1/before_identity.json"):
+            for artifact in (
+                "rounds/round-1/change_set.json",
+                "rounds/round-1/before_identity.json",
+            ):
                 with self.subTest(artifact=artifact):
                     case_root = root / artifact.replace("/", "-")
                     case_root.mkdir()
@@ -6132,7 +7168,7 @@ class WorkloadRoundTests(unittest.TestCase):
                     config.write_text('{"workers": 8}\n', encoding="utf-8")
                     target = run_dir / artifact
                     payload = json.loads(target.read_text("utf-8"))
-                    if artifact == "change_set.json":
+                    if artifact.endswith("change_set.json"):
                         payload["candidate"]["revision"] = "slow"
                     else:
                         payload["digest"] = "0" * 64
@@ -6233,7 +7269,7 @@ class WorkloadRoundTests(unittest.TestCase):
             ):
                 self.controller.resume_run(run_dir)
 
-    def test_expired_authorization_before_gate_blocks_static_for_review(self) -> None:
+    def test_committed_spend_before_gate_blocks_static_for_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             control, run_dir, project = self._workspace(root)
@@ -6243,7 +7279,9 @@ class WorkloadRoundTests(unittest.TestCase):
             original = config.read_text("utf-8")
             config.write_text('{"workers": 8}\n', encoding="utf-8")
             state = self.controller.read_run_state(run_dir)
-            state["deadline_epoch"] = time.time() - 1
+            state["controlled_spend_seconds"] = self.controller._BUDGET_RUNTIME[
+                "quick"
+            ]["hard_ceiling_seconds"]
             self.controller._write_state(run_dir, state)
 
             decision = self.controller.evaluate_change(run_dir)
@@ -6255,7 +7293,7 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(decision["blocked_action"]["action_id"], "static_review")
             self.assertEqual(config.read_text("utf-8"), original)
 
-    def test_deadline_expiring_during_evaluation_requires_authorization_review(self) -> None:
+    def test_committed_stage_spend_can_block_the_next_stage_for_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             control, run_dir, project = self._workspace(root)
@@ -6265,21 +7303,35 @@ class WorkloadRoundTests(unittest.TestCase):
             original = config.read_text("utf-8")
             config.write_text('{"workers": 8}\n', encoding="utf-8")
             state = self.controller.read_run_state(run_dir)
-            state["deadline_epoch"] = time.time() + 0.05
+            state["controlled_spend_seconds"] = 2580.1
             self.controller._write_state(run_dir, state)
-            evaluator = self.controller._load_evaluate_module()
-            original_evaluate = evaluator.evaluate_pairs
+            evaluator = mock.Mock()
+            evaluator.evaluate_pairs.return_value = {
+                "status": "evaluated",
+                "primary": {
+                    "status": "confirmed_win",
+                    "estimate_pct": 5.0,
+                    "ci_low_pct": 4.0,
+                    "ci_high_pct": 6.0,
+                },
+                "constraints": [],
+            }
 
-            def delayed_evaluate(*args, **kwargs):
-                time.sleep(0.1)
-                return original_evaluate(*args, **kwargs)
-
-            with mock.patch.object(evaluator, "evaluate_pairs", delayed_evaluate):
+            with mock.patch.object(
+                self.controller,
+                "_load_evaluate_module",
+                return_value=evaluator,
+            ):
                 decision = self.controller.evaluate_change(run_dir)
 
+            self.assertEqual(evaluator.evaluate_pairs.call_count, 1)
             self.assertEqual(decision["status"], "review_required")
             self.assertEqual(
                 decision["reason"], "authorization_insufficient_for_next_action"
+            )
+            self.assertEqual(
+                decision["blocked_action"]["action_id"],
+                "formal_paired",
             )
             self.assertNotEqual(decision["reason"], "budget_expired")
             self.assertEqual(config.read_text("utf-8"), original)

@@ -711,19 +711,39 @@ def run(state_path: str, iteration: int, benchmark_py: str = None,
                     "minimum useful kernel effect."
                 ),
             },
-            now=time.monotonic,
-            pre_gate_elapsed_seconds=max(
-                0.0, time.monotonic() - exploration_started
-            ),
         )
-        gate_result = gate.run(
-            {
-                "static_review": static_review,
-                "build_correctness": build_correctness,
-                "short_paired": short_paired,
-                "formal_paired": formal_paired,
-            }
-        )
+        actions = {
+            "static_review": static_review,
+            "build_correctness": build_correctness,
+            "short_paired": short_paired,
+            "formal_paired": formal_paired,
+        }
+        completed_results = {}
+        authorization = {
+            "max_controlled_seconds": hard_ceiling_seconds,
+            "max_stage": "formal_paired",
+            "applicable_stages": list(actions),
+        }
+        while True:
+            gate_result = gate.decide(
+                completed_results,
+                max(0.0, time.monotonic() - exploration_started),
+                authorization,
+            )
+            if gate_result["decision"] != "RUN_STAGE":
+                break
+            stage = gate_result["next_stage"]
+            try:
+                outcome = actions[stage]()
+                if not isinstance(outcome, Mapping):
+                    raise ValueError(f"{stage} result must be a mapping")
+                completed_results[stage] = copy.deepcopy(dict(outcome))
+            except Exception as error:
+                completed_results[stage] = {
+                    "status": "failed",
+                    "action_failed": True,
+                    "failure_type": type(error).__name__,
+                }
         gate_result["candidate_sha256"] = result.get("candidate_sha256")
         formal_evidence = result.get("paired_samples")
         if isinstance(formal_evidence, Mapping):
