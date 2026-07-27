@@ -992,6 +992,10 @@ class ProbeRunnerTests(unittest.TestCase):
         (project / "configs").mkdir()
         (project / "workload.json").write_text("{}", encoding="utf-8")
         run_dir = root / "run"
+        run_dir.mkdir()
+        self.controller._write_state(
+            run_dir, {"investment_control_version": "run-grant-v1"}
+        )
         control = _control(root)
         return control, run_dir
 
@@ -1256,6 +1260,9 @@ class ReviewerControllerTests(unittest.TestCase):
             change_path.write_text(json.dumps(_change_set()), encoding="utf-8")
             run_dir = root / "run"
             run_dir.mkdir()
+            self.controller._write_state(
+                run_dir, {"investment_control_version": "run-grant-v1"}
+            )
             (run_dir / "diagnosis.json").write_text(
                 json.dumps(
                     {
@@ -1297,20 +1304,23 @@ class ReviewerControllerTests(unittest.TestCase):
             request = json.loads(
                 (run_dir / "review_request.json").read_text("utf-8")
             )
-            self.assertIn("withheld", request["redacted_diff"])
+            self.assertTrue(request["review_summary"]["final"]["diff_present"])
+            self.assertEqual(
+                request["review_summary"]["final"]["candidate_diff_sha256"],
+                self.controller._sha256_path(run_dir / "candidate.diff"),
+            )
             self.assertNotIn("do-not-send", json.dumps(request))
             normalized_change = self.controller.validate_change_set(
                 _change_set(),
                 self.controller.validate_control_manifest(control),
             )
-            self.assertEqual(request["change_set"], normalized_change)
             self.assertEqual(
-                request["artifact_hashes"]["change_set.json"],
+                request["review_summary"]["artifact_hashes"]["change_set.json"],
                 self.controller._canonical_digest(normalized_change),
             )
             self.assertFalse((run_dir / "change_set.json").exists())
 
-    def test_multi_reviewer_diff_access_uses_least_privilege(self) -> None:
+    def test_standalone_review_request_never_exposes_diff_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             project = root / "project"
@@ -1334,6 +1344,9 @@ class ReviewerControllerTests(unittest.TestCase):
             ]
             run_dir = root / "run"
             run_dir.mkdir()
+            self.controller._write_state(
+                run_dir, {"investment_control_version": "run-grant-v1"}
+            )
             (run_dir / "diagnosis.json").write_text(
                 json.dumps({"primary_category": "cpu_data"}), encoding="utf-8"
             )
@@ -1356,8 +1369,8 @@ class ReviewerControllerTests(unittest.TestCase):
             ):
                 self.controller.review_change(control, run_dir, _change_set())
 
-            self.assertIn("withheld", captured["redacted_diff"])
-            self.assertNotIn(secret_diff.strip(), captured["redacted_diff"])
+            self.assertEqual(captured["redacted_diff"], "present")
+            self.assertNotIn(secret_diff.strip(), json.dumps(captured))
 
 
 class WorkloadRoundTests(unittest.TestCase):
@@ -5258,7 +5271,7 @@ class WorkloadRoundTests(unittest.TestCase):
 
             with mock.patch.object(
                 self.controller,
-                "run_probe",
+                "_run_probe_unchecked",
                 side_effect=AssertionError(
                     "profiler ran after correctness failure"
                 ),
@@ -5761,7 +5774,7 @@ class WorkloadRoundTests(unittest.TestCase):
                 self.controller._canonical_digest(base_state),
             )
 
-    def test_candidate_stage_intent_rejects_an_unavailable_base_state(
+    def test_unbound_candidate_stage_intent_is_discarded_before_reexecution(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5785,11 +5798,10 @@ class WorkloadRoundTests(unittest.TestCase):
             intent = json.loads(intent_path.read_text("utf-8"))
             intent["base_state_sha256"] = "0" * 64
             intent_path.write_text(json.dumps(intent), encoding="utf-8")
-            with self.assertRaisesRegex(
-                self.controller.ValidationError,
-                "base state",
-            ):
-                self.controller.resume_run(run_dir)
+            decision = self.controller.resume_run(run_dir)
+
+            self.assertEqual(decision["status"], "promoted")
+            self.assertFalse(intent_path.exists())
 
     def test_resume_reenters_gate_from_state_only_candidate_completion(
         self,
@@ -5847,9 +5859,8 @@ class WorkloadRoundTests(unittest.TestCase):
             request = json.loads(
                 (run_dir / "review_request.json").read_text("utf-8")
             )
-            self.assertEqual(request["change_set"], frozen)
             self.assertEqual(
-                request["artifact_hashes"]["change_set.json"],
+                request["review_summary"]["artifact_hashes"]["change_set.json"],
                 self.controller._canonical_digest(frozen),
             )
             self.assertEqual(
@@ -6222,7 +6233,7 @@ class WorkloadRoundTests(unittest.TestCase):
                 self.controller, "_load_evaluate_module", return_value=evaluator
             ), mock.patch.object(
                 self.controller,
-                "run_probe",
+                "_run_probe_unchecked",
                 side_effect=AssertionError("profiler executed before cost check"),
             ) as profiler:
                 try:
@@ -6292,7 +6303,9 @@ class WorkloadRoundTests(unittest.TestCase):
             with mock.patch.object(
                 self.controller, "_load_evaluate_module", return_value=evaluator
             ), mock.patch.object(
-                self.controller, "run_probe", wraps=self.controller.run_probe
+                self.controller,
+                "_run_probe_unchecked",
+                wraps=self.controller._run_probe_unchecked,
             ) as profiler:
                 decision = self.controller.evaluate_change(run_dir)
 
@@ -6345,7 +6358,7 @@ class WorkloadRoundTests(unittest.TestCase):
                 self.controller, "_load_evaluate_module", return_value=evaluator
             ), mock.patch.object(
                 self.controller,
-                "run_probe",
+                "_run_probe_unchecked",
                 side_effect=AssertionError("implicit kernel profiler executed"),
             ) as profiler:
                 decision = self.controller.evaluate_change(run_dir)
@@ -6406,8 +6419,13 @@ class WorkloadRoundTests(unittest.TestCase):
                 ],
             }
 
+            def final_review(_run_root, state, *_args):
+                return copy.deepcopy(dict(state)), external
+
             with mock.patch.object(
-                self.controller, "review_change", return_value=external
+                self.controller,
+                "_run_final_managed_review",
+                side_effect=final_review,
             ):
                 decision = self.controller.evaluate_change(run_dir)
 

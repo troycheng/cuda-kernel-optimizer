@@ -1375,7 +1375,7 @@ def _read_probe_output(path: Path) -> dict:
     return load_json_object(path)
 
 
-def run_probe(
+def _run_probe_unchecked(
     probe: Mapping[str, Any],
     control: Mapping[str, Any],
     run_dir: os.PathLike[str] | str,
@@ -1383,7 +1383,7 @@ def run_probe(
     log_limit_bytes: int = _DEFAULT_LOG_LIMIT,
     deadline_epoch: float | None = None,
 ) -> dict:
-    """Execute one argv-only probe and persist normalized evidence plus bounded logs."""
+    """Execute one probe after the owning Controller boundary admitted it."""
     if isinstance(log_limit_bytes, bool) or not isinstance(log_limit_bytes, int):
         raise ValidationError("log_limit_bytes must be a positive integer")
     if log_limit_bytes <= 0 or log_limit_bytes > _OUTPUT_LIMIT:
@@ -1394,7 +1394,6 @@ def run_probe(
         raise ValidationError("probe must exactly match one validated control probe")
     selected = matching[0]
     run_root = Path(run_dir).expanduser().resolve(strict=False)
-    _require_run_grant_investment_control(read_run_state(run_root))
     actual_timeout = float(selected["timeout_seconds"])
     if deadline_epoch is not None:
         remaining = float(deadline_epoch) - time.time()
@@ -1560,6 +1559,26 @@ def run_probe(
     return result
 
 
+def run_probe(
+    probe: Mapping[str, Any],
+    control: Mapping[str, Any],
+    run_dir: os.PathLike[str] | str,
+    *,
+    log_limit_bytes: int = _DEFAULT_LOG_LIMIT,
+    deadline_epoch: float | None = None,
+) -> dict:
+    """Admit and execute one public run-bound probe."""
+    run_root = Path(run_dir).expanduser().resolve(strict=False)
+    _require_run_grant_investment_control(read_run_state(run_root))
+    return _run_probe_unchecked(
+        probe,
+        control,
+        run_root,
+        log_limit_bytes=log_limit_bytes,
+        deadline_epoch=deadline_epoch,
+    )
+
+
 def run_probes(
     control: Mapping[str, Any],
     run_dir: os.PathLike[str] | str,
@@ -1570,7 +1589,7 @@ def run_probes(
     run_root = Path(run_dir).expanduser().resolve(strict=False)
     _require_run_grant_investment_control(read_run_state(run_root))
     return [
-        run_probe(
+        _run_probe_unchecked(
             probe,
             normalized,
             run_root,
@@ -8725,6 +8744,13 @@ def _recover_candidate_stage_checkpoint(
     pending_stage = state.get("candidate_stage_intent_stage")
     if pending_sha256 is None and pending_stage is not None:
         raise ValidationError("candidate stage intent state binding is incomplete")
+    if (
+        pending_sha256 is None
+        and (intent_path.exists() or intent_path.is_symlink())
+        and not (complete_path.exists() or complete_path.is_symlink())
+    ):
+        intent_path.unlink()
+        return copy.deepcopy(dict(state))
 
     raw_intent = None
     if intent_path.exists() or intent_path.is_symlink():
@@ -9574,7 +9600,7 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             _atomic_json(run_root / "profiler_stage.json", artifact)
             return artifact
         profile_root = run_root / "candidate_profile"
-        result = run_probe(
+        result = _run_probe_unchecked(
             selected_profiler,
             control,
             profile_root,

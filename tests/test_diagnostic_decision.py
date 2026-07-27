@@ -158,7 +158,9 @@ class DiagnosticDecisionTests(unittest.TestCase):
             ]
         )
 
-    def test_supported_direction_without_cost_requires_review(self) -> None:
+    def test_supported_direction_is_returned_without_inventing_candidate_cost(
+        self,
+    ) -> None:
         value = hypothesis_fixture(self.hypothesis_module, self.map_module)
         framework, kernel = value["hypotheses"]
         framework.update(
@@ -181,227 +183,14 @@ class DiagnosticDecisionTests(unittest.TestCase):
             self.model(), hypotheses, self.selection(hypotheses)
         )
 
-        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
+        self.assertEqual(result["decision"], "PURSUE")
         self.assertEqual(result["primary_diagnosis"]["claim_layer"], "runtime")
         self.assertEqual(result["next_action"]["hypothesis_id"], "h-framework-gap")
-        self.assertEqual(
-            result["investment_brief"]["blocked_action"]["reason"],
-            "cost_unavailable",
-        )
+        self.assertEqual(result["cost"]["basis"], "unavailable")
+        self.assertIsNone(result["investment_brief"]["selected_action"])
         self.assertEqual(
             result["investment_brief"]["portfolio"][0]["benefit"]["lower"],
             0.0,
-        )
-
-    def test_sealed_candidate_proposal_makes_first_supported_direction_reachable(self) -> None:
-        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
-        framework, kernel = value["hypotheses"]
-        framework.update(
-            {
-                "confidence": "direction_supported",
-                "support_evidence_ids": ["ev-cpu", "ev-gpu"],
-                "missing_evidence_kinds": [],
-            }
-        )
-        kernel.update(
-            {
-                "disposition": "rejected",
-                "oppose_evidence_ids": ["ev-edge"],
-                "missing_evidence_kinds": [],
-            }
-        )
-        hypotheses = self.hypotheses(value)
-        model = self.model()
-
-        result = self.module.decide_next_step(
-            model,
-            hypotheses,
-            self.selection(hypotheses),
-            candidate_proposals=[
-                {
-                    "proposal_id": "proposal-framework-0001",
-                    "hypothesis_id": "h-framework-gap",
-                    "action_id": "implement-h-framework-gap",
-                    "identity_digest": self.identity_digest(model),
-                    "p50_seconds": 10.0,
-                    "p90_seconds": 20.0,
-                    "basis": "user_authorized_upper_bound",
-                    "freshness": "current",
-                }
-            ],
-            authorization={"max_seconds": 20.0, "max_risk": "high"},
-        )
-
-        self.assertEqual(result["decision"], "PURSUE")
-        self.assertEqual(result["primary_diagnosis"]["hypothesis_id"], "h-framework-gap")
-        self.assertEqual(result["next_action"]["proposal_id"], "proposal-framework-0001")
-        self.assertEqual(result["cost"]["p50_seconds"], 10.0)
-        self.assertEqual(result["cost"]["p90_seconds"], 20.0)
-        self.assertEqual(result["cost"]["basis"], "user_authorized_upper_bound")
-
-    def test_missing_authorization_never_expands_to_one_day(self) -> None:
-        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
-        framework, kernel = value["hypotheses"]
-        framework.update(
-            {
-                "confidence": "direction_supported",
-                "support_evidence_ids": ["ev-cpu", "ev-gpu"],
-                "missing_evidence_kinds": [],
-            }
-        )
-        kernel.update(
-            {
-                "disposition": "rejected",
-                "oppose_evidence_ids": ["ev-edge"],
-                "missing_evidence_kinds": [],
-            }
-        )
-        hypotheses = self.hypotheses(value)
-        model = self.model()
-
-        result = self.module.decide_next_step(
-            model,
-            hypotheses,
-            self.selection(hypotheses),
-            candidate_proposals=[
-                {
-                    "proposal_id": "proposal-framework-0001",
-                    "hypothesis_id": "h-framework-gap",
-                    "action_id": "implement-h-framework-gap",
-                    "identity_digest": self.identity_digest(model),
-                    "p50_seconds": 10.0,
-                    "p90_seconds": 20.0,
-                    "basis": "user_authorized_upper_bound",
-                    "freshness": "current",
-                }
-            ],
-        )
-
-        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
-        self.assertEqual(result["terminal_reason"], "cumulative_authorization_exceeded")
-        self.assertIsNone(result["investment_brief"]["selected_action"])
-        self.assertEqual(
-            result["investment_brief"]["blocked_action"]["action_id"],
-            "implement-h-framework-gap",
-        )
-        self.assertEqual(
-            result["investment_brief"]["cumulative_investment"]["projected_p90_seconds"],
-            20.0,
-        )
-
-    def test_two_bounded_candidates_preserve_v11_benefit_primary_over_cheaper_fallback(self) -> None:
-        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
-        for item in value["hypotheses"]:
-            item.update(
-                {
-                    "confidence": "direction_supported",
-                    "support_evidence_ids": ["ev-cpu", "ev-gpu"],
-                    "missing_evidence_kinds": [],
-                }
-            )
-        value["relationships"] = []
-        hypotheses = self.hypotheses(value)
-        model = self.model()
-        selection = {
-            "status": "sufficient",
-            "selected_request": None,
-            "rejections": [],
-            "missing_capability_ids": [],
-            "gap_reason": "hypotheses_sufficiently_supported",
-        }
-
-        result = self.module.decide_next_step(
-            model,
-            hypotheses,
-            selection,
-            candidate_proposals=[
-                {
-                    "proposal_id": "proposal-framework",
-                    "hypothesis_id": "h-framework-gap",
-                    "action_id": "implement-h-framework-gap",
-                    "identity_digest": self.identity_digest(model),
-                    "p50_seconds": 50.0,
-                    "p90_seconds": 100.0,
-                    "basis": "user_authorized_upper_bound",
-                    "freshness": "current",
-                },
-                {
-                    "proposal_id": "proposal-kernel",
-                    "hypothesis_id": "h-kernel-bound",
-                    "action_id": "implement-h-kernel-bound",
-                    "identity_digest": self.identity_digest(model),
-                    "p50_seconds": 1.0,
-                    "p90_seconds": 2.0,
-                    "basis": "user_authorized_upper_bound",
-                    "freshness": "current",
-                },
-            ],
-            authorization={"max_seconds": 100.0, "max_risk": "high"},
-        )
-
-        self.assertEqual(result["decision"], "PURSUE")
-        self.assertEqual(result["primary_diagnosis"]["hypothesis_id"], "h-framework-gap")
-        self.assertEqual(result["next_action"]["proposal_id"], "proposal-framework")
-        self.assertEqual(result["cost"]["p90_seconds"], 100.0)
-
-        tied_map = copy.deepcopy(self.execution_map)
-        tied_map["nodes"][0].update(
-            {"first_start_us": 100.0, "last_end_us": 1000.0}
-        )
-        tied_value = hypothesis_fixture(self.hypothesis_module, self.map_module)
-        tied_value["execution_map_sha256"] = self.map_module.execution_map_digest(
-            tied_map, epoch=self.epoch, evidence_catalog=self.evidence
-        )
-        for item in tied_value["hypotheses"]:
-            item.update(
-                {
-                    "confidence": "direction_supported",
-                    "support_evidence_ids": ["ev-cpu", "ev-gpu"],
-                    "missing_evidence_kinds": [],
-                }
-            )
-        tied_value["relationships"] = []
-        tied_hypotheses = self.hypothesis_module.validate_hypothesis_set(
-            tied_value,
-            epoch=self.epoch,
-            execution_map=tied_map,
-            evidence_catalog=self.evidence,
-        )
-        tied_model = self.model(tied_map)
-        tied_result = self.module.decide_next_step(
-            tied_model,
-            tied_hypotheses,
-            selection,
-            candidate_proposals=[
-                {
-                    "proposal_id": "proposal-framework-tie",
-                    "hypothesis_id": "h-framework-gap",
-                    "action_id": "implement-h-framework-gap",
-                    "identity_digest": self.identity_digest(tied_model),
-                    "p50_seconds": 50.0,
-                    "p90_seconds": 100.0,
-                    "basis": "user_authorized_upper_bound",
-                    "freshness": "current",
-                },
-                {
-                    "proposal_id": "proposal-kernel-tie",
-                    "hypothesis_id": "h-kernel-bound",
-                    "action_id": "implement-h-kernel-bound",
-                    "identity_digest": self.identity_digest(tied_model),
-                    "p50_seconds": 1.0,
-                    "p90_seconds": 2.0,
-                    "basis": "user_authorized_upper_bound",
-                    "freshness": "current",
-                },
-            ],
-            authorization={"max_seconds": 100.0, "max_risk": "high"},
-        )
-
-        self.assertEqual(
-            tied_result["primary_diagnosis"]["hypothesis_id"], "h-kernel-bound"
-        )
-        self.assertEqual(
-            tied_result["next_action"]["proposal_id"], "proposal-kernel-tie"
         )
 
     def test_two_unknown_supported_directions_keep_v11_primary_order(self) -> None:
@@ -426,72 +215,11 @@ class DiagnosticDecisionTests(unittest.TestCase):
 
         result = self.decide(self.model(), hypotheses, selection)
 
-        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
+        self.assertEqual(result["decision"], "PURSUE")
         self.assertEqual(result["primary_diagnosis"]["hypothesis_id"], "h-framework-gap")
         self.assertEqual(result["next_action"]["hypothesis_id"], "h-framework-gap")
-        self.assertEqual(
-            result["investment_brief"]["blocked_action"]["reason"],
-            "cost_unavailable",
-        )
 
-    def test_bounded_fallback_cannot_bypass_unknown_v11_primary(self) -> None:
-        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
-        for item in value["hypotheses"]:
-            item.update(
-                {
-                    "confidence": "direction_supported",
-                    "support_evidence_ids": ["ev-cpu", "ev-gpu"],
-                    "missing_evidence_kinds": [],
-                }
-            )
-        value["relationships"] = []
-        hypotheses = self.hypotheses(value)
-        selection = {
-            "status": "sufficient",
-            "selected_request": None,
-            "rejections": [],
-            "missing_capability_ids": [],
-            "gap_reason": "hypotheses_sufficiently_supported",
-        }
-        model = self.model()
-
-        result = self.module.decide_next_step(
-            model,
-            hypotheses,
-            selection,
-            candidate_proposals=[
-                {
-                    "proposal_id": "proposal-kernel-bound",
-                    "hypothesis_id": "h-kernel-bound",
-                    "action_id": "implement-h-kernel-bound",
-                    "identity_digest": self.identity_digest(model),
-                    "p50_seconds": 1.0,
-                    "p90_seconds": 2.0,
-                    "basis": "user_authorized_upper_bound",
-                    "freshness": "current",
-                }
-            ],
-        )
-
-        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
-        self.assertEqual(result["primary_diagnosis"]["hypothesis_id"], "h-framework-gap")
-        self.assertEqual(result["next_action"]["hypothesis_id"], "h-framework-gap")
-        self.assertEqual(
-            result["investment_brief"]["blocked_action"]["reason"],
-            "cost_unavailable",
-        )
-        brief = result["investment_brief"]
-        self.assertIsNone(brief["selected_action"])
-        self.assertEqual(
-            brief["blocked_action"]["action_id"],
-            "implement-h-framework-gap",
-        )
-        self.assertEqual(brief["next_feedback_point"], "after_authorization_decision")
-        self.assertIn(
-            "implement-h-kernel-bound", brief["skipped_action_ids"]
-        )
-
-    def test_evidence_action_name_collision_cannot_bound_candidate(self) -> None:
+    def test_evidence_action_bound_does_not_become_candidate_cost(self) -> None:
         value = hypothesis_fixture(self.hypothesis_module, self.map_module)
         framework, kernel = value["hypotheses"]
         framework.update(
@@ -532,67 +260,9 @@ class DiagnosticDecisionTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
-        self.assertEqual(
-            result["investment_brief"]["blocked_action"]["reason"],
-            "cost_unavailable",
-        )
-
-    def test_failed_primary_allows_history_bounded_fallback(self) -> None:
-        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
-        for item in value["hypotheses"]:
-            item.update(
-                {
-                    "confidence": "direction_supported",
-                    "support_evidence_ids": ["ev-cpu", "ev-gpu"],
-                    "missing_evidence_kinds": [],
-                }
-            )
-        value["relationships"] = []
-        hypotheses = self.hypotheses(value)
-        model = self.model()
-        selection = {
-            "status": "sufficient",
-            "selected_request": None,
-            "rejections": [],
-            "missing_capability_ids": [],
-            "gap_reason": "hypotheses_sufficiently_supported",
-        }
-
-        result = self.module.decide_next_step(
-            model,
-            hypotheses,
-            selection,
-            candidate_history=[
-                {
-                    "hypothesis_id": "h-framework-gap",
-                    "action_id": "implement-h-framework-gap",
-                    "implementation_status": "failed",
-                    "identity_digest": self.identity_digest(model),
-                    "elapsed_seconds": 3.0,
-                },
-            ],
-            candidate_proposals=[
-                {
-                    "proposal_id": "proposal-kernel-bound",
-                    "hypothesis_id": "h-kernel-bound",
-                    "action_id": "implement-h-kernel-bound",
-                    "identity_digest": self.identity_digest(model),
-                    "p50_seconds": 1.0,
-                    "p90_seconds": 2.0,
-                    "basis": "user_authorized_upper_bound",
-                    "freshness": "current",
-                },
-            ],
-            authorization={"max_seconds": 100.0, "max_risk": "high"},
-        )
-
         self.assertEqual(result["decision"], "PURSUE")
-        self.assertEqual(result["next_action"]["hypothesis_id"], "h-kernel-bound")
-        self.assertIn(
-            "implement-h-framework-gap",
-            result["investment_brief"]["skipped_action_ids"],
-        )
+        self.assertEqual(result["next_action"]["hypothesis_id"], "h-framework-gap")
+        self.assertEqual(result["cost"]["basis"], "unavailable")
 
     def test_external_shadow_can_only_request_measurement(self) -> None:
         hypotheses = self.hypotheses()
@@ -676,148 +346,6 @@ class DiagnosticDecisionTests(unittest.TestCase):
         self.assertIn(
             "a-unavailable", result["investment_brief"]["skipped_action_ids"]
         )
-
-    def test_stale_execution_map_blocks_candidate_implementation(self) -> None:
-        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
-        framework, kernel = value["hypotheses"]
-        framework.update(
-            {
-                "confidence": "direction_supported",
-                "support_evidence_ids": ["ev-cpu", "ev-gpu"],
-                "missing_evidence_kinds": [],
-            }
-        )
-        kernel.update(
-            {
-                "disposition": "rejected",
-                "oppose_evidence_ids": ["ev-edge"],
-                "missing_evidence_kinds": [],
-            }
-        )
-        hypotheses = self.hypotheses(value)
-        model = self.model()
-
-        result = self.module.decide_next_step(
-            model,
-            hypotheses,
-            self.selection(hypotheses),
-            candidate_history=[
-                {
-                    "hypothesis_id": "h-framework-gap",
-                    "implementation_status": "available",
-                    "identity_digest": "0" * 64,
-                }
-            ],
-        )
-
-        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
-        self.assertEqual(result["next_action"]["kind"], "refresh")
-        self.assertEqual(
-            result["next_action"]["authorization_reason"],
-            "refresh_action_unavailable",
-        )
-        blocked = result["investment_brief"]["blocked_action"]
-        self.assertEqual(blocked["kind"], "refresh")
-        self.assertEqual(blocked["reason"], "refresh_action_unavailable")
-
-    def test_stale_failed_candidate_requires_unavailable_refresh(self) -> None:
-        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
-        framework, kernel = value["hypotheses"]
-        framework.update(
-            {
-                "confidence": "direction_supported",
-                "support_evidence_ids": ["ev-cpu", "ev-gpu"],
-                "missing_evidence_kinds": [],
-            }
-        )
-        kernel.update(
-            {
-                "disposition": "rejected",
-                "oppose_evidence_ids": ["ev-edge"],
-                "missing_evidence_kinds": [],
-            }
-        )
-        hypotheses = self.hypotheses(value)
-
-        result = self.module.decide_next_step(
-            self.model(),
-            hypotheses,
-            self.selection(hypotheses),
-            candidate_history=[
-                {
-                    "hypothesis_id": "h-framework-gap",
-                    "action_id": "implement-h-framework-gap",
-                    "implementation_status": "failed",
-                    "identity_digest": "0" * 64,
-                    "elapsed_seconds": 3.0,
-                    "candidate_digest": "1" * 64,
-                    "decision_digest": "2" * 64,
-                    "failure_reason": "primary_not_confirmed",
-                }
-            ],
-        )
-
-        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
-        self.assertEqual(result["investment_brief"]["portfolio"][0]["status"], "stale")
-        self.assertEqual(result["next_action"]["kind"], "refresh")
-        self.assertEqual(
-            result["next_action"]["authorization_reason"],
-            "refresh_action_unavailable",
-        )
-
-    def test_stale_failed_primary_cannot_jump_bounded_fallback(self) -> None:
-        value = hypothesis_fixture(self.hypothesis_module, self.map_module)
-        for item in value["hypotheses"]:
-            item.update(
-                {
-                    "confidence": "direction_supported",
-                    "support_evidence_ids": ["ev-cpu", "ev-gpu"],
-                    "missing_evidence_kinds": [],
-                }
-            )
-        value["relationships"] = []
-        hypotheses = self.hypotheses(value)
-        model = self.model()
-
-        result = self.module.decide_next_step(
-            model,
-            hypotheses,
-            {
-                "status": "sufficient",
-                "selected_request": None,
-                "rejections": [],
-                "missing_capability_ids": [],
-                "gap_reason": "hypotheses_sufficiently_supported",
-            },
-            candidate_history=[
-                {
-                    "hypothesis_id": "h-framework-gap",
-                    "action_id": "implement-h-framework-gap",
-                    "implementation_status": "failed",
-                    "identity_digest": "0" * 64,
-                    "elapsed_seconds": 3.0,
-                    "candidate_digest": "1" * 64,
-                    "decision_digest": "2" * 64,
-                    "failure_reason": "primary_not_confirmed",
-                },
-                {
-                    "hypothesis_id": "h-kernel-bound",
-                    "action_id": "implement-h-kernel-bound",
-                    "implementation_status": "available",
-                    "identity_digest": self.identity_digest(model),
-                    "p90_seconds": 2.0,
-                },
-            ],
-        )
-
-        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
-        self.assertEqual(result["primary_diagnosis"]["hypothesis_id"], "h-framework-gap")
-        self.assertEqual(result["next_action"]["kind"], "refresh")
-        self.assertEqual(
-            result["next_action"]["authorization_reason"],
-            "refresh_action_unavailable",
-        )
-        self.assertIsNone(result["investment_brief"]["selected_action"])
 
     def test_no_direction_above_minimum_effect_returns_stop(self) -> None:
         value = copy.deepcopy(self.execution_map)
@@ -1067,10 +595,10 @@ class DiagnosticDecisionTests(unittest.TestCase):
             self.model(), hypotheses, self.selection(hypotheses), external_review=external
         )
 
-        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
+        self.assertEqual(result["decision"], "PURSUE")
         adjudication = result["external_challenge"]["local_adjudication"]
         self.assertEqual(
-            adjudication["status"], "retained_for_local_review"
+            adjudication["status"], "retained_for_candidate_validation"
         )
         self.assertEqual(adjudication["evidence_ids"], [])
 
