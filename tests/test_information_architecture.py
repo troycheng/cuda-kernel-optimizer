@@ -23,8 +23,8 @@ class InformationArchitectureTests(unittest.TestCase):
             self.assertTrue((ROOT / "docs" / name).is_file(), name)
 
     def test_readmes_separate_validation_from_case_studies(self) -> None:
-        english = (ROOT / "README.md").read_text(encoding="utf-8")
-        chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        english = (ROOT / "README.en.md").read_text(encoding="utf-8")
+        chinese = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertNotIn("## Tested scope", english)
         self.assertNotIn("## 已测试范围", chinese)
         self.assertIn("## Validation status", english)

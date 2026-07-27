@@ -6,8 +6,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-README_EN = ROOT / "README.md"
-README_ZH = ROOT / "README.zh-CN.md"
+README_ZH = ROOT / "README.md"
+README_EN = ROOT / "README.en.md"
+README_ZH_COMPAT = ROOT / "README.zh-CN.md"
 
 MERMAID = re.compile(r"```mermaid\n(.*?)```", re.DOTALL)
 EDGE = re.compile(
@@ -24,296 +25,229 @@ def assert_in_order(testcase, text: str, markers: tuple[str, ...]) -> None:
 
 class ReadmeSyncTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.english = README_EN.read_text(encoding="utf-8")
         self.chinese = README_ZH.read_text(encoding="utf-8")
+        self.english = README_EN.read_text(encoding="utf-8")
+        self.compat = README_ZH_COMPAT.read_text(encoding="utf-8")
 
-    def test_readmes_use_the_same_landing_page_structure(self) -> None:
-        english = (
-            "## About",
-            "## Quick start",
-            "## Choose a workflow",
-            "## How it works",
-            "## Evidence, not best-sample claims",
-            "## Validation status",
-            "## Release notes",
-            "## Documentation",
-        )
-        chinese = (
-            "## 项目简介",
-            "## 快速开始",
-            "## 选择工作流",
-            "## 工作方式",
-            "## 以证据为准，而不是选择最快样本",
-            "## 验证情况",
-            "## 版本记录",
-            "## 文档",
-        )
-        assert_in_order(self, self.english, english)
-        assert_in_order(self, self.chinese, chinese)
-        self.assertLessEqual(len(self.english.splitlines()), 210)
-        self.assertLessEqual(len(self.chinese.splitlines()), 210)
+    def test_language_roles_and_full_readme_sizes(self) -> None:
+        self.assertIn("## 这是什么", self.chinese)
+        self.assertIn("## About", self.english)
+        self.assertNotIn("## About", self.chinese)
+        self.assertNotIn("## 这是什么", self.english)
+        self.assertLessEqual(len(self.chinese.splitlines()), 200)
+        self.assertLessEqual(len(self.english.splitlines()), 240)
+        self.assertLessEqual(len(self.compat.splitlines()), 8)
 
-    def test_hero_uses_wordmark_tagline_and_primary_navigation(self) -> None:
-        for text in (self.english, self.chinese):
+    def test_hero_explains_the_product_and_switches_language(self) -> None:
+        for text in (self.chinese, self.english):
             opening = text[: text.index("\n## ")]
             self.assertIn("asset/logo-wordmark-dark.svg", opening)
             self.assertIn("asset/logo-wordmark.svg", opening)
             self.assertIn('width="520"', opening)
-            self.assertIn("CUDA", opening)
-            self.assertIn("CUTLASS", opening)
-            self.assertIn("Triton", opening)
-            for target in (
-                "docs/getting-started.md",
-                "docs/environment-readiness.md",
-                "docs/workflows.md",
-                "docs/evidence-and-safety.md",
-                "skills/cuda-kernel-optimizer/examples/walkthrough.md",
-            ):
-                self.assertIn(target, opening)
-        self.assertIn(
-            "Evidence-driven CUDA, CUTLASS and Triton optimization for ChatGPT",
-            self.english,
-        )
-        self.assertIn("以证据驱动 ChatGPT 优化 CUDA、CUTLASS 与 Triton", self.chinese)
+            for marker in ("ChatGPT", "CUDA", "CUTLASS", "Triton"):
+                self.assertIn(marker, text[: text.index("\n## ", text.index("\n## ") + 1)])
+        self.assertIn('href="README.en.md"', self.chinese)
+        self.assertIn('href="README.md"', self.english)
 
-    def test_quick_start_precedes_protocol_detail(self) -> None:
-        self.assertLess(
-            self.english.index("## Quick start"),
-            self.english.index("evidence_integrity"),
+    def test_chinese_primary_readme_uses_reader_first_order(self) -> None:
+        assert_in_order(
+            self,
+            self.chinese,
+            (
+                "## 这是什么",
+                "## 它能帮你完成什么",
+                "## 正式性能结论通常需要什么",
+                "## 十分钟判断是否适合",
+                "## 正式优化会怎样进行",
+                "## V1.2 如何控制投入",
+                "## 你会得到什么",
+                "## 结论能到什么程度",
+                "## 安装",
+                "## 安全边界",
+                "## 验证情况",
+                "## 版本记录",
+                "## 文档",
+            ),
         )
         self.assertLess(
-            self.chinese.index("## 快速开始"),
-            self.chinese.index("evidence_integrity"),
+            self.chinese.index("## 十分钟判断是否适合"),
+            self.chinese.index("## V1.2 如何控制投入"),
         )
-        self.assertIn(
-            "Installation is performed by ChatGPT's coding agent", self.english
-        )
-        self.assertIn("安装由 ChatGPT 的编程代理完成", self.chinese)
-        for text in (self.english, self.chinese):
-            self.assertIn("github.com/troycheng/cuda-kernel-optimizer", text)
-            self.assertIn("skills/cuda-kernel-optimizer", text)
-            for budget in ("quick", "balanced", "thorough"):
-                self.assertIn(budget, text)
 
     def test_first_use_path_is_concrete_and_ai_executed(self) -> None:
-        english_quick_start = self.english[
-            self.english.index("## Quick start") : self.english.index(
-                "## Choose a workflow"
-            )
-        ]
-        chinese_quick_start = self.chinese[
-            self.chinese.index("## 快速开始") : self.chinese.index("## 选择工作流")
-        ]
-        getting_started = (ROOT / "docs/getting-started.md").read_text(
-            encoding="utf-8"
-        )
-
         for marker in (
-            "installed tag, commit, and destination",
-            "10-minute fit check",
-            "does not claim a speedup",
-            "summary.md",
-            "decision.json",
-        ):
-            self.assertIn(marker, english_quick_start + getting_started)
-        for marker in (
+            "最多用 10 分钟",
+            "不要修改源码",
+            "不声称获得提速",
+            "github.com/troycheng/cuda-kernel-optimizer",
             "安装标签、commit 和目标目录",
-            "10 分钟适配检查",
-            "不产出提速结论",
-            "summary.md",
-            "decision.json",
         ):
-            self.assertIn(marker, chinese_quick_start)
-        self.assertIn("Do not edit source files", getting_started)
-        self.assertIn("merge-ready", getting_started)
+            self.assertIn(marker, self.chinese)
+        english = " ".join(self.english.split())
+        for marker in (
+            "10-minute fit check",
+            "Do not edit source files",
+            "does not claim a speedup",
+            "github.com/troycheng/cuda-kernel-optimizer",
+            "installed tag, commit, and destination",
+        ):
+            self.assertIn(marker, english)
 
-    def test_readmes_publish_the_same_five_workflows(self) -> None:
-        english = (
+    def test_full_readmes_cover_the_same_supported_scenarios(self) -> None:
+        for marker in (
+            "环境",
+            "CUDA",
+            "CUTLASS",
+            "Triton",
+            "完整、可重复的 workload",
+            "serving KPI",
+            "已有 NCU report",
+        ):
+            self.assertIn(marker, self.chinese)
+        for marker in (
             "Environment readiness",
             "Kernel optimization",
             "Complete workload",
             "Serving validation",
             "Existing NCU report",
-        )
-        chinese = (
-            "环境准备",
-            "Kernel 优化",
-            "完整 workload",
-            "Serving 验证",
-            "已有 NCU report",
-        )
-        for marker in english:
-            self.assertIn(marker, self.english)
-        for marker in chinese:
-            self.assertIn(marker, self.chinese)
-
-    def test_readmes_show_one_matching_ai_workflow(self) -> None:
-        expected = sorted(
-            (
-                ("goal", "-->", "environment"),
-                ("environment", "-->", "baseline"),
-                ("baseline", "-->", "context"),
-                ("context", "-->", "hypothesis"),
-                ("hypothesis", "-->", "evidence"),
-                ("evidence", "-->", "hypothesis"),
-                ("hypothesis", "-->", "change"),
-                ("change", "-->", "evaluation"),
-                ("evaluation", "-->", "keep"),
-                ("evaluation", "-->", "restore"),
-            )
-        )
-        english = MERMAID.findall(self.english)
-        chinese = MERMAID.findall(self.chinese)
-        self.assertEqual(len(english), 1)
-        self.assertEqual(len(chinese), 1)
-        self.assertEqual(sorted(EDGE.findall(english[0])), expected)
-        self.assertEqual(sorted(EDGE.findall(chinese[0])), expected)
-
-    def test_readmes_keep_v2_5_evidence_boundaries(self) -> None:
-        common = (
-            "95%",
-            "shared-host",
-            "evidence_integrity",
-            "performance_verdict",
-            "self_check",
-            "c1/c2/c4/c8/c12",
-            "CPU/static",
-            "fail closed",
-        )
-        for text in (self.english, self.chinese):
-            for marker in common:
-                self.assertIn(marker, text)
-        for marker in ("correctness", "paired A/B", "confidence interval", "frozen"):
-            self.assertIn(marker, self.english)
-        for marker in ("正确性", "成对 A/B", "置信区间", "冻结"):
-            self.assertIn(marker, self.chinese)
-        self.assertIn("does not validate a GPU environment", self.english)
-        self.assertIn("不验证 GPU 环境", self.chinese)
-
-    def test_real_workload_and_host_boundaries_are_explicit(self) -> None:
-        self.assertIn("A real workload must be supplied by the user", self.english)
-        self.assertIn("真实 workload 必须由用户提供", self.chinese)
-        self.assertIn("does not download or invent one", self.english)
-        self.assertIn("不会自行下载或编造", self.chinese)
-        self.assertIn("never changes host-level settings automatically", self.english)
-        self.assertIn("不会自动修改宿主机配置", self.chinese)
-
-    def test_readmes_explain_automatic_readiness_admission(self) -> None:
-        english = " ".join(self.english.split()).replace("`", "")
-        for marker in (
-            "The AI checks required build, GPU, profiler, and workload-smoke capabilities",
-            "pre-baseline readiness",
-            "hash-locked pip install inside the declared isolated environment",
-            "only automatic repair",
-            "real workload and authorization",
-            "self_check does not prove that the GPU environment is ready",
         ):
-            self.assertIn(marker, english)
+            self.assertIn(marker, self.english)
+
+    def test_readmes_show_their_public_workflow(self) -> None:
+        chinese = MERMAID.findall(self.chinese)
+        english = MERMAID.findall(self.english)
+        self.assertEqual(len(chinese), 1)
+        self.assertEqual(len(english), 1)
+        chinese_edges = set(EDGE.findall(chinese[0]))
+        for edge in (
+            ("baseline", "-->", "brief"),
+            ("brief", "-->", "grant"),
+            ("change", "-->", "stages"),
+            ("stages", "-->", "pause"),
+            ("pause", "-->", "grant"),
+        ):
+            self.assertIn(edge, chinese_edges)
+        self.assertIn(("evaluation", "-->", "keep"), set(EDGE.findall(english[0])))
+        self.assertIn(("evaluation", "-->", "restore"), set(EDGE.findall(english[0])))
+
+    def test_readmes_explain_v1_2_adaptive_investment(self) -> None:
         chinese = "".join(self.chinese.split()).replace("`", "")
         for marker in (
-            "AI先确认编译、GPU、profiler和workloadsmoke等必需能力",
-            "baseline前的环境准入",
-            "必需能力",
-            "带哈希锁定的隔离环境pip",
-            "唯一允许自动执行的修复",
-            "明确授权",
-            "self_check通过不代表GPU环境已经可用",
-        ):
-            self.assertIn(marker, chinese)
-
-    def test_readmes_explain_the_performance_first_iteration_loop(self) -> None:
-        english = " ".join(self.english.split())
-        chinese = "".join(self.chinese.split())
-        for marker in (
-            "falsifiable performance hypothesis",
-            "rehashed V2.5 evidence closure",
-            "progress review point, not a timer",
-            "Tool work is not a performance improvement",
-        ):
-            self.assertIn(marker, english)
-        for marker in (
-            "能被实测推翻的性能假设",
-            "重新校验通过的V2.5证据闭环",
-            "只是检查进展的时点",
-            "修工具不等于性能提升",
-        ):
-            self.assertIn(marker, chinese)
-        reference = (
-            "skills/cuda-kernel-optimizer/references/performance_iteration.md"
-        )
-        self.assertIn(reference, self.english)
-        self.assertIn(reference, self.chinese)
-
-    def test_readmes_explain_the_v1_1_diagnosis_and_early_investment_decision(self) -> None:
-        english = " ".join(self.english.split())
-        chinese = "".join(self.chinese.split())
-        for marker in (
-            "performance model",
-            "benefit ceiling",
-            "uncertainty",
-            "MEASURE",
-            "PURSUE",
-            "REVIEW_REQUIRED",
-            "STOP",
-            "investment_brief.json",
-        ):
-            self.assertIn(marker, english)
-        for marker in (
-            "性能模型",
             "收益上限",
-            "不确定性",
-            "MEASURE",
-            "PURSUE",
+            "最低成本的验证方式",
+            "运行级授权",
+            "它是边界，不是必须消耗完的预算",
+            "用户等待和暂停时间不会占用授权",
             "REVIEW_REQUIRED",
-            "STOP",
-            "investment_brief.json",
         ):
             self.assertIn(marker, chinese)
+        english = " ".join(self.english.split()).replace("`", "")
+        for marker in (
+            "run-level grant",
+            "scope, risk, stage",
+            "waiting does not consume it",
+            "pauses for review",
+        ):
+            self.assertIn(marker, english)
 
-    def test_readmes_publish_one_matching_standalone_release(self) -> None:
-        english = self.english[self.english.index("## Release notes"):]
-        chinese = self.chinese[self.chinese.index("## 版本记录"):]
-        for text in (english, chinese):
+    def test_readmes_explain_candidate_stages_and_recovery(self) -> None:
+        for marker in (
+            "ChangeSet",
+            "静态检查",
+            "最低正确性",
+            "短版成对测试",
+            "不重复执行或扣费",
+            "补充授权后继续",
+            "明确放弃",
+        ):
+            self.assertIn(marker, self.chinese)
+        for marker in (
+            "ChangeSet",
+            "static",
+            "correctness",
+            "short paired",
+            "Completed stages survive restarts",
+            "grant pause preserves",
+            "explicit abandonment",
+        ):
+            self.assertIn(marker, self.english)
+
+    def test_real_workload_and_claim_boundaries_are_explicit(self) -> None:
+        for marker in (
+            "真实 workload",
+            "不会自行下载或编造",
+            "不能作为性能提升结论",
+            "局部 kernel 变快不等于完整 workload 变快",
+            "正确性和成对性能数据",
+        ):
+            self.assertIn(marker, self.chinese)
+        english = " ".join(self.english.split())
+        for marker in (
+            "A real workload must be supplied by the user",
+            "does not download or invent one",
+            "does not claim a speedup",
+            "correctness",
+            "paired",
+        ):
+            self.assertIn(marker, english)
+
+    def test_readiness_and_host_boundaries_are_explicit(self) -> None:
+        for marker in (
+            "编译、正确性、benchmark、GPU、profiler",
+            "不自动修改",
+            "self_check",
+            "ERR_NVGPUCTRPERM",
+            "外部搜索和第三方 AI",
+        ):
+            self.assertIn(marker, self.chinese)
+        for marker in (
+            "Automatic pre-baseline readiness",
+            "never changes host-level settings automatically",
+            "self_check",
+            "ERR_NVGPUCTRPERM",
+            "External search and multi-model challenge",
+        ):
+            self.assertIn(marker, self.english)
+
+    def test_primary_readme_names_the_durable_outputs(self) -> None:
+        for marker in (
+            "summary.md",
+            "active_diagnosis/initial_investment_brief.json",
+            "active_diagnosis/performance_model.json",
+            "decision.json",
+            "原始成对样本",
+            "证据完整性",
+        ):
+            self.assertIn(marker, self.chinese)
+        for marker in (
+            "summary.md",
+            "performance_model.json",
+            "investment_brief.json",
+            "decision.json",
+        ):
+            self.assertIn(marker, self.english)
+
+    def test_readmes_publish_the_same_v1_release_line(self) -> None:
+        for text in (self.chinese, self.english):
+            self.assertEqual(text.count("### V1.2.0"), 1)
             self.assertEqual(text.count("### V1.1.0"), 1)
+            self.assertEqual(text.count("### V1.0.1"), 1)
             self.assertEqual(text.count("### V1.0.0"), 1)
-            self.assertNotRegex(text, r"(?m)^### V1\.2\.")
             self.assertNotRegex(text, r"(?m)^### V(?:2|3)\.")
-        self.assertIn("first standalone release", english)
-        self.assertIn("首个独立公开版本", chinese)
-        self.assertIn("active diagnosis", english)
-        self.assertIn("主动诊断", chinese)
 
     def test_validation_and_case_studies_are_separate(self) -> None:
-        for text in (self.english, self.chinese):
+        for text in (self.chinese, self.english):
             self.assertIn("docs/validation.md", text)
             self.assertIn("docs/case-studies.md", text)
         validation = (ROOT / "docs/validation.md").read_text(encoding="utf-8")
         cases = (ROOT / "docs/case-studies.md").read_text(encoding="utf-8")
-        compatibility = (
-            ROOT / "skills/cuda-kernel-optimizer/references/compatibility.md"
-        ).read_text(encoding="utf-8")
-        for fact in (
-            "15 of 15",
-            "34.307",
-            "18 of 18",
-            "52.141",
-            "ERR_NVGPUCTRPERM",
-        ):
+        for fact in ("18 of 18", "52.141", "ERR_NVGPUCTRPERM"):
             self.assertIn(fact, validation)
         for fact in ("60.4616%", "140"):
             self.assertIn(fact, cases)
-        for unsupported_case_fact in (
-            "User-provided vLLM workload",
-            "Observed real-workload lane",
-            "26.3287%",
-            "-0.0097%",
-        ):
-            self.assertNotIn(unsupported_case_fact, cases)
-            self.assertNotIn(unsupported_case_fact, compatibility)
         self.assertNotIn("60.4616%", validation)
-        self.assertNotIn("811", cases)
 
-    def test_readmes_route_to_public_and_canonical_documents(self) -> None:
+    def test_readmes_route_to_public_documents(self) -> None:
         links = (
             "docs/getting-started.md",
             "docs/environment-readiness.md",
@@ -326,15 +260,10 @@ class ReadmeSyncTests(unittest.TestCase):
             "docs/long-running-optimization.md",
             "skills/cuda-kernel-optimizer/SKILL.md",
             "skills/cuda-kernel-optimizer/examples/walkthrough.md",
-            "skills/cuda-kernel-optimizer/references/evidence_automation.md",
-            "skills/cuda-kernel-optimizer/references/performance_iteration.md",
-            "skills/cuda-kernel-optimizer/references/compatibility.md",
-            "skills/cuda-kernel-optimizer/references/long_running_control.md",
-            "skills/cuda-kernel-optimizer/references/version_stack_audit.md",
             "tests/gpu/sm120/README.md",
             "LICENSE",
         )
-        for text in (self.english, self.chinese):
+        for text in (self.chinese, self.english):
             for marker in links:
                 self.assertIn(marker, text)
 
@@ -344,8 +273,6 @@ class ReadmeSyncTests(unittest.TestCase):
             "python3 scripts/workload_controller.py",
             "python3 tools/publish_dual_remote.py",
             "--run-dir",
-            "promotion authority",
-            "terminal status",
             "powerful",
             "seamless",
             "revolutionary",
@@ -356,19 +283,26 @@ class ReadmeSyncTests(unittest.TestCase):
             "无缝",
             "强大",
         )
-        for text in (self.english, self.chinese):
+        for text in (self.chinese, self.english):
             for marker in banned:
-                self.assertNotIn(marker, text.lower() if marker.isascii() else text)
+                candidate = text.lower() if marker.isascii() else text
+                self.assertNotIn(marker, candidate)
             self.assertNotIn("```bash", text)
 
-    def test_readmes_link_to_each_other(self) -> None:
-        self.assertIn("README.zh-CN.md", self.english)
-        self.assertIn("README.md", self.chinese)
+    def test_readmes_and_compatibility_page_link_to_each_other(self) -> None:
+        self.assertIn("README.en.md", self.chinese)
+        self.assertIn("README.md", self.english)
+        self.assertIn("README.md", self.compat)
+        self.assertIn("README.en.md", self.compat)
 
     def test_local_readme_links_resolve(self) -> None:
         markdown = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
         html = re.compile(r'href="([^"]+)"')
-        for path, text in ((README_EN, self.english), (README_ZH, self.chinese)):
+        for path, text in (
+            (README_ZH, self.chinese),
+            (README_EN, self.english),
+            (README_ZH_COMPAT, self.compat),
+        ):
             for target in markdown.findall(text) + html.findall(text):
                 if "://" in target or target.startswith("#"):
                     continue

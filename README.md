@@ -5,205 +5,186 @@
   </picture>
 </p>
 
-<p align="center"><strong>Evidence-driven CUDA, CUTLASS and Triton optimization for ChatGPT</strong></p>
+<p align="center"><strong>让 ChatGPT 在真实 workload 上定位 GPU 性能瓶颈，并用可复核的结果决定是否保留修改</strong></p>
 
 <p align="center">
-  <a href="docs/getting-started.md">Get Started</a> ·
-  <a href="docs/environment-readiness.md">Prepare a Workload</a> ·
-  <a href="docs/workflows.md">Workflows</a> ·
-  <a href="docs/evidence-and-safety.md">Evidence &amp; Safety</a> ·
-  <a href="skills/cuda-kernel-optimizer/examples/walkthrough.md">Examples</a> ·
-  <a href="README.zh-CN.md">简体中文</a>
+  简体中文 ·
+  <a href="README.en.md">English</a>
 </p>
 
-## About
+## 这是什么
 
-`cuda-kernel-optimizer` is a GPU performance optimization skill for ChatGPT's
-coding agent. It can improve CUDA, CUTLASS, Triton, and the GPU workloads around
-them; find a bottleneck across a complete workload; validate a change against a
-serving objective; or analyze an existing Nsight Compute report without
-rerunning its program.
+`cuda-kernel-optimizer` 是一个供 ChatGPT 编程代理使用的 GPU 性能优化 skill。
+你提供真实 workload、正确性 reference、目标环境和允许修改的范围；ChatGPT 负责检查
+环境、运行原始 baseline、分析瓶颈、修改限定路径，并用正确性和成对性能数据验证结果。
 
-The skill profiles the real target, makes bounded project changes, checks
-correctness, and compares paired measurements. It also checks framework
-scheduling, CPU and data work, transfers, communication, I/O, allocator behavior,
-and runtime state when the evidence points outside a kernel.
+它不假设问题一定在 kernel 内。分析范围可以覆盖 CUDA、CUTLASS、Triton、PyTorch、
+vLLM、TensorRT-LLM，以及框架调度、CPU 与数据处理、传输、通信、I/O、allocator 和
+运行时状态。
 
-Its deterministic Controller freezes the objective, environment, budget, measurement
-policy, and allowed scope before optimization begins. A resumable active-diagnosis loop
-checks the required capabilities, compares competing explanations, and runs only the
-evidence actions needed to decide what should happen next. Signed evidence and an
-append-only ledger keep interrupted, noisy, or drifted runs from silently changing the
-experiment or spending the same budget twice.
+最终交付不是一组泛泛的优化建议，而是一份有边界的结论：哪些方向经过验证、哪些修改
+可以保留、哪些方向已被否决、还缺什么证据，以及下一步是否值得继续投入。没有足够的
+真实 workload 和测量证据时，skill 不会声称获得了提速。
 
-After the first global scan, the diagnosis engine reports the critical path,
-benefit ceiling, uncertainty, next action, and expected cost. A run-level grant
-bounds later work by scope, risk, stage, and completed execution time; waiting
-does not consume it, and work outside the grant pauses for review.
-Automatic pre-baseline readiness: The AI checks required build, GPU, profiler,
-and workload-smoke capabilities before performance work begins.
-The user still supplies the real workload and authorization. The only automatic repair
-is a hash-locked pip install inside the declared isolated environment.
-The skill never changes host-level settings automatically; `self_check` does not prove that the GPU environment is ready.
+## 它能帮你完成什么
 
-## Quick start
+- 在正式优化前检查编译、正确性、benchmark、GPU、profiler 和依赖是否可用；
+- 从完整 workload 的关键路径出发判断瓶颈在哪一层，而不是直接改 kernel；
+- 优化 CUDA、CUTLASS、Triton kernel 及其周边执行路径；
+- 在昂贵实验前判断收益空间和主要不确定性，并在依据充分时估算下一阶段成本；
+- 按从低成本到高成本的顺序验证候选，前一阶段失败就不启动后续阶段；
+- 保存长任务状态，中断后继续时不重复已经完成的昂贵阶段；
+- 只读分析已有 `.ncu-rep`，无法访问原 workload 时准确说明结论上限。
 
-Installation is performed by ChatGPT's coding agent; the reader does not run
-the project scripts by hand. In a ChatGPT coding session, send:
+## 正式性能结论通常需要什么
 
-> Install `skills/cuda-kernel-optimizer` from the latest published release of [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer). Install only that skill into the active skills directory, run its CPU/static `self_check`, and report the installed tag, commit, and destination. Do not use `main` unless I ask.
+| 输入 | 作用 |
+|---|---|
+| 可运行的真实 workload | 决定最终要优化的对象，skill 不会自行下载或编造 |
+| 正确性 reference | 判断修改有没有改变结果 |
+| 稳定的 benchmark 或服务指标 | 判断修改是否真的改善目标 |
+| 目标 GPU 与运行环境 | 绑定编译产物、工具能力和性能证据 |
+| 允许修改的路径与约束 | 限制代码、依赖和运行状态的变更范围 |
 
-Start a new session after installation so the instructions are reloaded.
+只有源码、没有可运行环境时，也可以进行静态分析，但结果只能是候选方向和环境准备方案，
+不能作为性能提升结论。
 
-Before committing to the 45-minute `quick` budget, run a **10-minute fit check**:
+## 十分钟判断是否适合
 
-> Use cuda-kernel-optimizer for a read-only fit check of this project. Spend at most 10 minutes. Do not edit source files, install packages, or change host settings. Confirm the runnable target, correctness reference, benchmark, target GPU, and profiler access. Report the supported claim layer, blockers, missing evidence, and the first lowest-cost action. Do not claim a speedup.
+安装后可以先让 ChatGPT 做一次只读适配检查：
 
-This check only decides whether the project is ready; it does not claim a
-speedup. A real workload must be supplied by the user. The skill does not download or invent one.
-If the foundations are sufficient, provide the real workload, performance goal,
-constraints, and allowed modification scope, then choose `quick`, `balanced`,
-or `thorough` for the formal run.
+> 使用 cuda-kernel-optimizer 检查这个项目是否具备优化条件，最多用 10 分钟。不要修改源码、安装依赖或调整宿主机。确认真实 workload、正确性 reference、benchmark、目标 GPU 和 profiler 权限，报告阻塞项、当前能支持的结论，以及最低成本的下一步，不声称获得提速。
 
-The AI then freezes the task, runs the original baseline, evaluates candidates
-from cheap checks to expensive tests, and restores rejected changes. At the end,
-it reports the exact run directory. Read `summary.md` first and use
-`itervN/decision.json` for the machine-readable decision. A change is ready to
-merge only when the declared workload objective, correctness, constraints, and
-evidence integrity all pass.
+这一步不会进入代码修改，只回答三个问题：现在能不能测、最可能缺什么、是否值得开始。
 
-Choose `quick` for a 45-minute ceiling, `balanced` for the default three hours,
-or `thorough` for up to ten hours. The run may stop earlier when the evidence is
-conclusive or no useful direction remains.
-
-See [Getting Started](docs/getting-started.md) for the complete first-run path.
-
-## Choose a workflow
-
-| Workflow | Use it when | Result boundary |
-|---|---|---|
-| **Environment readiness** | The workload, reference, benchmark, profiler, or target environment is incomplete | A gap report, claim ceiling, and project-local preparation plan |
-| **Kernel optimization** | A CUDA, CUTLASS, or Triton implementation has a comparable reference | A kernel-level result with correctness and paired measurement evidence |
-| **Complete workload** | The bottleneck may span GPU, framework, CPU, transfers, communication, I/O, or runtime state | A bounded diagnosis and end-to-end evaluation on the supplied workload |
-| **Serving validation** | A local change must be checked against a product KPI | Frozen c1/c2/c4/c8/c12 strata, constraints, runtime identity, and separate performance and integrity decisions |
-| **Existing NCU report** | A `.ncu-rep` exists and the original workload must not run | Read-only analysis with exact degradation when the report cannot be interpreted |
-
-[Workflows](docs/workflows.md) explains the required inputs and supported claim
-for each path. [Long-running Optimization](docs/long-running-optimization.md)
-explains the Controller, capability registry, calibration, audit cadence, and
-recovery behavior.
-
-## How it works
+## 正式优化会怎样进行
 
 ```mermaid
 flowchart LR
-    goal["Goal, code, and constraints"] --> environment["Check the test environment"]
-    environment --> baseline["Freeze and calibrate the baseline"]
-    baseline --> context["Build the execution map and evidence catalog"]
-    context --> hypothesis["State falsifiable competing explanations"]
-    hypothesis --> evidence["Run the most discriminating evidence action"]
-    evidence --> hypothesis
-    hypothesis --> change["Evidence is sufficient: create a bounded change"]
-    change --> evaluation["Check correctness and paired performance"]
-    evaluation --> keep["Evidence is sufficient: keep the change"]
-    evaluation --> restore["Evidence is insufficient: restore the original"]
+    input["真实 workload、目标和约束"] --> ready["检查环境与测量条件"]
+    ready --> baseline["运行原始 baseline 与全局分析"]
+    baseline --> brief["给出瓶颈判断和投入建议"]
+    brief --> grant["确认本轮授权范围"]
+    grant --> evidence["验证最关键的不确定性"]
+    evidence --> change["创建限定范围的 ChangeSet"]
+    change --> stages["静态检查 → 正确性 → 短测 → 可选 profiler → 正式成对测试"]
+    stages --> keep["证据支持：保留修改"]
+    stages --> restore["证据不足：恢复原实现"]
+    stages --> pause["超出授权：保留现场并暂停"]
+    pause --> grant
 ```
 
-Before timed work, the Controller freezes the objective and authorized scope,
-then estimates measurement noise and the minimum detectable effect. `green`
-permits a candidate, `yellow` pauses for better measurement or baseline replay,
-and `red` stops the run. The contract also limits how many candidates may run
-between baseline audits.
+ChatGPT 会先运行项目原始 baseline，再决定是否需要更细的 profiler。候选修改必须依次通过
+静态检查、最低正确性、短版成对测试和正式成对测试；profiler 只有在能回答一个明确问题时
+才会启动。任何前置阶段失败，后续昂贵阶段都不会运行。
 
-The AI may propose at most three competing mechanism hypotheses. The Controller
-computes the timing facts and returns exactly one decision: `MEASURE`, `PURSUE`,
-`REVIEW_REQUIRED`, or `STOP`. Only the action named by that decision may run.
-The current benefit ceiling, uncertainty, cost class, and next checkpoint are
-written to `active_diagnosis/investment_brief.json`; numeric time estimates are
-included only when the same action has identity-matched timing history.
+## V1.2 如何控制投入
 
-For a code change, the Controller freezes one ChangeSet and advances from static
-review to correctness, a short paired screen, optional targeted profiling, and
-formal paired measurement. Completed stages survive restarts; rejection restores
-the change, a grant pause preserves it, and explicit abandonment restores it.
+第一次全局分析完成后，skill 会先报告：
 
-Verified observations query only a few matching capability cards; cards supply methods, counterexamples, and checks, but do not decide results. Every admitted round starts with a falsifiable performance hypothesis.
-Only a rehashed V2.5 evidence closure counts as an evaluated candidate. Environment readiness finishes before optimization timing starts; three minutes or 10% of the total budget is a progress review point, not a timer that kills an install or repair.
-The Controller terminates the process group only when the command timeout or readiness hard deadline is reached. Tool work is not a performance improvement.
+- 当前主要瓶颈和判断置信度；
+- 能被现有证据支持的收益上限；
+- 最大的不确定性和最低成本的验证方式；
+- 下一步是否已有可信的成本依据；没有同环境、源码和 workload 的匹配历史时明确标为未知；
+- 动作或候选已经形成时，说明所需 GPU 资源、修改范围、风险和最远验证阶段；
+- 当前建议是继续、先做便宜检查、等待确认，还是停止。
 
-Direction headroom and stop/reopen rules remain in the
-[direction-admission contract](skills/cuda-kernel-optimizer/references/direction_admission.md).
-The detailed iteration rules are in the
-[performance-first contract](skills/cuda-kernel-optimizer/references/performance_iteration.md).
+随后由一次运行级授权约束受控工作。授权包含可用时间、允许修改的范围、最高风险和
+最远验证阶段；它是边界，不是必须消耗完的预算。只有已经完成的受控动作和外部审查的
+实际等待时间计入投入，用户等待和暂停时间不会占用授权。
 
-## Evidence, not best-sample claims
+每个昂贵阶段开始前都会重新判断是否值得继续。方向仍可能有价值、但超出授权时，任务会
+保留候选并返回 `REVIEW_REQUIRED`；获得覆盖当前候选的新授权后，可以从保存的阶段继续。
+只有候选被证伪或用户明确放弃时，Controller 才恢复原实现。
 
-A performance claim is accepted only when:
+命令自身仍有独立超时，用来防止构建、测试或 profiler 卡死。收益判断不会放宽这条安全边界。
 
-- correctness and every declared constraint pass;
-- paired A/B samples follow the frozen schedule and aggregation rule;
-- the default 95% confidence interval supports the required effect with enough valid pairs;
-- the continuous shared-host guard covers timed work without missing, stale, or contaminated samples;
-- formal serving evidence covers c1/c2/c4/c8/c12 and binds the measured binary to its execution path.
+## 你会得到什么
 
-Missing, contradictory, contaminated, stale, or identity-invalid evidence must
-fail closed. `performance_verdict` and `evidence_integrity` remain separate: a
-fast number cannot repair an invalid experiment. The installed `self_check` is
-CPU/static only and does not validate a GPU environment.
+任务结束时，ChatGPT 必须报告准确的运行目录，并给出：
 
-See [Evidence & Safety](docs/evidence-and-safety.md), the
-[pre-V1 protocol 2.5 reference](skills/cuda-kernel-optimizer/references/evidence_automation.md),
-and the [long-run control reference](skills/cuda-kernel-optimizer/references/long_running_control.md).
+| 产物 | 用途 |
+|---|---|
+| `summary.md` | 面向人的结论、保留修改、被否决方向和阻塞项 |
+| `active_diagnosis/initial_investment_brief.json` | 首次全局分析后的投入建议 |
+| `active_diagnosis/performance_model.json` | 关键路径、收益空间和证据缺口 |
+| `decision.json` | 机器可读的最终决定与终止原因 |
+| 原始成对样本和环境身份 | 复核性能结果是否可比较 |
+| 正确性与证据完整性记录 | 判断修改是否适合合入 |
 
-## Validation status
+只有真实 workload 目标、正确性、约束和证据完整性全部通过，修改才适合合入。
 
-[Validation status](docs/validation.md) records automated checks, the physical
-RTX 5090 lane, tool permissions, and the real-pair stability result.
-[Case studies](docs/case-studies.md) keeps workload-specific historical results
-separate. Neither page predicts the speedup of a new project.
+## 结论能到什么程度
 
-## Release notes
+| 当前条件 | 能支持的最高结论 |
+|---|---|
+| 只有源码 | 静态瓶颈假设和环境准备建议 |
+| 有 kernel reference 与稳定 benchmark | kernel 级正确性和性能结论 |
+| 有完整、可重复的 workload | 端到端 workload 结论 |
+| 有正式服务指标与受控验证环境 | serving KPI 结论 |
+| 只有已有 NCU report | report 所能支持的只读分析结论 |
+
+局部 kernel 变快不等于完整 workload 变快。最终结论始终以用户提供的真实目标为准。
+
+## 安装
+
+安装由 ChatGPT 的编程代理完成，不需要读者手工执行项目脚本。在 ChatGPT 编程会话中发送：
+
+> 从 [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer) 的最新发布版本安装 `skills/cuda-kernel-optimizer`。只安装到当前 skills 目录，执行 CPU/static `self_check`，并报告安装标签、commit 和目标目录。除非我明确要求，否则不要使用 `main`。
+
+安装完成后开启新会话，让 skill 指令重新加载。
+
+## 安全边界
+
+- Skill 只修改授权范围内的项目文件或隔离环境；
+- 驱动、GPU counter 权限、频率、功耗、服务和系统配置只给建议，不自动修改；
+- `self_check` 只验证安装包的 CPU/static 路径，不代表 GPU 环境已经可用；
+- NCU 返回 `ERR_NVGPUCTRPERM` 时记录权限边界，不擅自提升权限；
+- 外部搜索和第三方 AI 只用于方向挑战或最终审查，外发内容经过限制，结果不能代替本地证据；
+- 正确性失败、证据污染、环境漂移或身份不一致时必须停止相应结论。
+
+## 验证情况
+
+[验证情况](docs/validation.md)记录自动化检查、物理 RTX 5090 路径、工具权限和实际
+GPU 测试边界。[案例](docs/case-studies.md)单独记录历史 workload 结果。两者都不预测
+新项目能获得多少提速。
+
+## 版本记录
+
+### V1.2.0
+
+- 增加运行级投入授权，以实际完成时间、修改范围、风险和验证阶段限制后续工作；
+- 将候选冻结为唯一 ChangeSet，并逐阶段提交和恢复，重启后不重复执行或扣费；
+- 授权不足时保留候选，补充授权后继续；只有否决或明确放弃才恢复原实现；
+- 方向与最终外部审查采用受限摘要和可恢复提交，结果只作为挑战意见。
 
 ### V1.1.0
 
-- Add a deterministic performance model for critical-path accounting, per-layer
-  headroom, missing evidence, and identity-matched action timing.
-- Limit active diagnosis to three competing mechanisms and one admitted next
-  action, with explicit `MEASURE`, `PURSUE`, `REVIEW_REQUIRED`, and `STOP`
-  outcomes.
-- Produce an early investment brief before expensive profiling and stop when no
-  admissible direction clears the project effect threshold.
-- Refresh the performance model from admitted node measurements, retain live
-  hypothesis identities, and allow evidence-closed mechanisms to be replaced
-  without letting renamed variants reopen them.
-- Preserve complete external challenges and record their local evidence
-  status without claiming that unrelated workload evidence answered them; add
-  four end-to-end RTX 5090 Controller evidence-admission checks and a separate,
-  explicitly authorized disposable NCU smoke path.
+- 增加性能模型、竞争机制分析和首次投入建议；
+- 每轮只执行一个经过裁决的证据动作，明确返回 `MEASURE`、`PURSUE`、
+  `REVIEW_REQUIRED` 或 `STOP`；
+- 增加 RTX 5090 Controller 证据准入和独立 NCU smoke 路径。
 
 ### V1.0.1
 
-- Include `LICENSE` and `NOTICE` in the installable skill artifact.
-- Make the physical GPU lane configurable instead of binding it to maintainer paths.
-- Apply the hard deadline and durable elapsed-time accounting to `open-iter`.
-- Separate standalone release numbers from retained pre-V1 protocol identities.
+- 补齐安装包许可证与来源说明，并将物理 GPU 验收路径改为可配置。
 
 ### V1.0.0
 
-The first standalone release combines environment readiness, active diagnosis,
-bounded code changes, staged correctness and performance checks, evidence sealing,
-and deterministic long-run recovery. Expensive stages run only after cheaper checks
-pass, and a result is retained only when the declared workload objective supports it.
-Physical GPU coverage validates the mechanisms and target-machine path; it does not
-predict the speedup of a new workload.
+- 首个独立公开版本，提供环境准备、主动诊断、限定修改、分阶段验证和长任务恢复。
 
-## Documentation
+## 文档
 
-- Start with [Getting Started](docs/getting-started.md), [Preparing a workload](docs/environment-readiness.md), and [Workflow selection](docs/workflows.md).
-- Read [Long-running optimization](docs/long-running-optimization.md), [Evidence and safety](docs/evidence-and-safety.md), [Compatibility](docs/compatibility.md), and [Knowledge and research](docs/knowledge-and-research.md) for operating details.
-- Project evidence is in [Validation status](docs/validation.md), [case studies](docs/case-studies.md), and the [RTX 5090 opt-in guide](tests/gpu/sm120/README.md).
-- The AI protocol is [SKILL.md](skills/cuda-kernel-optimizer/SKILL.md); detailed contracts cover [performance iteration](skills/cuda-kernel-optimizer/references/performance_iteration.md), [direction admission](skills/cuda-kernel-optimizer/references/direction_admission.md), [long-run control](skills/cuda-kernel-optimizer/references/long_running_control.md), [software-stack comparison](skills/cuda-kernel-optimizer/references/version_stack_audit.md), [formal evidence](skills/cuda-kernel-optimizer/references/evidence_automation.md), and [canonical compatibility](skills/cuda-kernel-optimizer/references/compatibility.md).
-- [Walkthrough](skills/cuda-kernel-optimizer/examples/walkthrough.md) · [MIT License](LICENSE)
+- [快速开始](docs/getting-started.md)
+- [准备 workload](docs/environment-readiness.md)
+- [工作流选择](docs/workflows.md)
+- [长任务优化](docs/long-running-optimization.md)
+- [证据与安全](docs/evidence-and-safety.md)
+- [兼容性](docs/compatibility.md)
+- [知识、搜索与独立质证](docs/knowledge-and-research.md)
+- [AI 执行协议](skills/cuda-kernel-optimizer/SKILL.md)
+- [完整示例](skills/cuda-kernel-optimizer/examples/walkthrough.md)
+- [RTX 5090 opt-in 测试说明](tests/gpu/sm120/README.md)
+- [MIT License](LICENSE)
 
-This project is independent of CUDA, CUTLASS, Triton, and Nsight Compute. Use
-those dependencies under their respective licenses.
+本项目独立于 CUDA、CUTLASS、Triton 和 Nsight Compute。相关依赖遵循各自许可证。
