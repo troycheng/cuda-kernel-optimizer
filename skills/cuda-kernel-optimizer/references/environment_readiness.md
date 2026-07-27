@@ -1,7 +1,7 @@
 # Environment readiness and claim ceiling
 
 Use this workflow before optimization when the user has not supplied a runnable
-target, correctness reference, stable measurement path, or representative
+target, correctness checks, stable measurement path, or representative test
 workload. Do not invent any of them.
 
 Run capability readiness before baseline. Do not ask the user to run these
@@ -13,7 +13,7 @@ report interpretation, and safe resume.
 | Available foundation | Strongest permitted result |
 |---|---|
 | Source only | Static hypotheses; no speed claim |
-| Source, reference, reproducible build | Correctness and compiler evidence |
+| Source, correctness checks, reproducible build | Correctness and compiler evidence |
 | Stable kernel benchmark | Kernel performance claim |
 | Representative workload | End-to-end workload claim |
 | Frozen serving experiment | Serving KPI claim |
@@ -34,7 +34,8 @@ when a lower valid evidence layer remains.
 
 When the foundation is incomplete, help the user create project-local pieces:
 
-- a reference or validator with representative cases and tolerances;
+- correctness checks with representative cases, expected outputs, tolerances,
+  accuracy criteria, or a validator;
 - a reproducible build/import command in an isolated environment;
 - warmup, paired timing, raw samples, and a frozen aggregation rule;
 - a shape and request inventory approved by the user;

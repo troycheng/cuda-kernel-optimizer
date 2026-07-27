@@ -5,7 +5,7 @@ predict the speedup of a new workload.
 
 ## Automated checks
 
-Release validation on 2026-07-27 covered 1,298 tests: 1,288 passed and
+Release validation on 2026-07-27 covered 1,299 tests: 1,289 passed and
 10 physical RTX 5090 opt-in tests were skipped. The complete discovery run passed
 all code checks and found one stale documentation-count gate; after this page
 was corrected, that gate passed separately. The suite covers input validation, state recovery,

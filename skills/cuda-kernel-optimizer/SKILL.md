@@ -1,14 +1,14 @@
 ---
 name: cuda-kernel-optimizer
-description: "Use when optimizing, tuning, diagnosing, or profiling CUDA, CUTLASS, Triton, PyTorch, vLLM, TensorRT-LLM, or another GPU workload; when assessing an existing NCU report; or when the workload, correctness reference, benchmark, profiler, or target environment is incomplete."
+description: "Use when optimizing, tuning, diagnosing, or profiling CUDA, CUTLASS, Triton, PyTorch, vLLM, TensorRT-LLM, or another GPU workload; when assessing an existing NCU report; or when the test workload, correctness checks, benchmark, profiler, or target environment is incomplete."
 ---
 
 # CUDA Kernel and Workload Optimizer
 
-Optimize a user-provided GPU workload against its correctness reference. A
+Optimize a user-provided GPU workload using explicit correctness checks. A
 kernel result supports a kernel claim; an end-to-end claim requires a
-user-approved real workload. Never download, invent, or silently substitute a
-workload.
+user-approved test workload that represents the real target. Never download,
+invent, or silently substitute a workload.
 
 Do not assume the bottleneck is inside a kernel. Check `kernel`, `framework`,
 `cpu_data`, `transfer`, `communication`, `io`, `environment`, and `mixed`
@@ -20,7 +20,7 @@ Read only the row that matches the task. Do not load the whole catalog.
 
 | Situation | Route |
 |---|---|
-| Missing correctness reference, stable kernel benchmark, workload, or environment | Run `python3 <skill>/scripts/readiness.py --help`; read `references/environment_readiness.md` |
+| Missing correctness checks, stable kernel benchmark, test workload, or environment | Run `python3 <skill>/scripts/readiness.py --help`; read `references/environment_readiness.md` |
 | CUDA, CUTLASS, or Triton kernel | Read `references/performance_iteration.md` |
 | Bottleneck unknown in a full workload | Use `examples/workload-controller.md` |
 | Serving KPI or changing serving state | Read `references/serving_evidence_protocol.md` and `references/nonstationary_serving_evidence.md` |

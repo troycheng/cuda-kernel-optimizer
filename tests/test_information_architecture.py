@@ -22,13 +22,14 @@ class InformationArchitectureTests(unittest.TestCase):
         ):
             self.assertTrue((ROOT / "docs" / name).is_file(), name)
 
-    def test_readmes_separate_validation_from_case_studies(self) -> None:
+    def test_readmes_route_validation_and_case_studies_separately(self) -> None:
         english = (ROOT / "README.en.md").read_text(encoding="utf-8")
         chinese = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertNotIn("## Tested scope", english)
         self.assertNotIn("## 已测试范围", chinese)
         self.assertIn("## Validation status", english)
-        self.assertIn("## 验证情况", chinese)
+        self.assertIn("## 结果与验收", chinese)
+        self.assertNotIn("## 验证情况", chinese)
         for text in (english, chinese):
             self.assertIn("docs/validation.md", text)
             self.assertIn("docs/case-studies.md", text)
@@ -46,6 +47,33 @@ class InformationArchitectureTests(unittest.TestCase):
             "references/long_running_control.md",
         ):
             self.assertIn(marker, text)
+
+    def test_user_inputs_use_plain_consistent_terms(self) -> None:
+        paths = (
+            ROOT / "README.en.md",
+            ROOT / "docs" / "getting-started.md",
+            ROOT / "docs" / "environment-readiness.md",
+            ROOT / "docs" / "workflows.md",
+            ROOT / "docs" / "long-running-optimization.md",
+            SKILL / "SKILL.md",
+            SKILL / "references" / "environment_readiness.md",
+        )
+        texts = {
+            path: " ".join(path.read_text(encoding="utf-8").split())
+            for path in paths
+        }
+        for path, text in texts.items():
+            self.assertNotIn("correctness reference", text.lower(), path)
+
+        readme = texts[ROOT / "README.en.md"]
+        self.assertIn(
+            "test workload (dataset, representative requests, or replay)",
+            readme,
+        )
+        self.assertIn(
+            "correctness checks (expected outputs, tolerances, or accuracy criteria)",
+            readme,
+        )
 
     def test_offline_knowledge_has_freshness_and_primary_sources(self) -> None:
         manifest = json.loads(

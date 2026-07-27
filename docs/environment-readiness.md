@@ -16,7 +16,7 @@ does not ask for a serving benchmark.
 | What is available | What the skill can establish |
 |---|---|
 | Source only | Static hypotheses and a preparation plan |
-| Source, correctness reference, reproducible build | Correctness and compiler evidence |
+| Source, correctness checks, reproducible build | Correctness and compiler evidence |
 | Stable kernel benchmark | Kernel-level performance |
 | Representative workload | End-to-end workload performance |
 | Frozen serving experiment | Serving KPI performance |
@@ -26,12 +26,14 @@ does not ask for a serving benchmark.
 Provide or approve:
 
 1. the source or profiler artifact to inspect;
-2. a reference implementation, validator, or trusted output set;
+2. correctness checks: expected outputs, tolerances, accuracy criteria, tests,
+   or a validator;
 3. representative shapes, dtypes, inputs, and tolerances;
 4. a reproducible build or import command in an isolated environment;
 5. warmup, paired timing, raw samples, and the performance objective;
 6. the project paths that may change;
-7. the real workload or replay when an end-to-end claim is required.
+7. the test workload: a dataset, representative requests, or a replay when an
+   end-to-end claim is required.
 
 The skill will not invent a workload or silently replace it with a synthetic
 microbenchmark. It can generate a project-local adapter, benchmark scaffold,

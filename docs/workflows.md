@@ -5,7 +5,7 @@ kernel does not automatically establish a faster product workload.
 
 ## Environment readiness
 
-Use this path when the workload, correctness reference, reproducible build,
+Use this path when the test workload, correctness checks, reproducible build,
 stable benchmark, or target access is incomplete. The skill reports the current
 claim ceiling and prepares project-local scaffolding rather than inventing
 missing inputs. See [Preparing a workload and test environment](environment-readiness.md).
@@ -40,12 +40,13 @@ periodic champion replay, and deterministic recovery. See
 
 ## Kernel optimization
 
-Use this path for a CUDA, CUTLASS, or Triton implementation with a runnable
-correctness reference. The skill can profile, inspect compiler and SASS evidence,
+Use this path for a CUDA, CUTLASS, or Triton implementation with runnable
+correctness checks. The skill can profile, inspect compiler and SASS evidence,
 change authorized kernel code, and run paired measurements.
 
 The result supports a **kernel-level claim** only. It does not establish serving
-latency, throughput, or cost without a real workload.
+latency, throughput, or cost without a test workload that represents the real
+target.
 
 ## Complete workload
 

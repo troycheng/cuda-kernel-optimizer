@@ -78,9 +78,9 @@ class SkillMetadataTests(unittest.TestCase):
     def test_claim_ceiling_requires_user_owned_workload_and_measurement(self) -> None:
         prose = " ".join(self.text.split())
         for marker in (
-            "correctness reference",
+            "correctness checks",
             "stable kernel benchmark",
-            "user-approved real workload",
+            "user-approved test workload that represents the real target",
             "static hypotheses",
             "kernel claim",
             "end-to-end claim",

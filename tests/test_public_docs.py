@@ -66,7 +66,8 @@ class PublicDocsTests(unittest.TestCase):
             "ChatGPT",
             "skills/cuda-kernel-optimizer",
             "runnable target",
-            "correctness reference",
+            "test workload",
+            "correctness checks",
             "performance goal",
             "allowed modification scope",
             "quick",
@@ -240,13 +241,13 @@ class PublicDocsTests(unittest.TestCase):
         ).read_text("utf-8").split())
 
         for marker in (
-            "Cumulative authorization is the start boundary for the next action, not a goal to consume.",
-            "The benefit upper bound is an upper bound on removable time, not an expected benefit.",
+            "A run grant is the boundary for the next action, not a target to consume:",
             "Bundled knowledge, search, and external AI may only propose a locally falsifiable shadow direction.",
             "GitHub Copilot is for code and repository-specific review.",
         ):
             self.assertIn(marker, skill)
         for marker in (
+            "The benefit upper bound is removable-time headroom, not an expected gain.",
             "In normal mode, ask at most once for aggregated authorization.",
             "In unattended mode, ask zero questions.",
         ):

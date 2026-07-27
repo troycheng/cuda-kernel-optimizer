@@ -14,7 +14,7 @@ Start a new session after installation so the agent reloads the skill.
 
 Use this read-only check before selecting a formal optimization budget:
 
-> Use cuda-kernel-optimizer for a read-only fit check of this project. Spend at most 10 minutes. Do not edit source files, install packages, or change host settings. Confirm the runnable target, correctness reference, benchmark, target GPU, and profiler access. Report the supported claim layer, blockers, missing evidence, and the first lowest-cost action. Do not claim a speedup.
+> Use cuda-kernel-optimizer for a read-only fit check of this project. Spend at most 10 minutes. Do not edit source files, install packages, or change host settings. Confirm the test workload, correctness checks, benchmark, target GPU, and profiler access. Report the supported claim layer, blockers, missing evidence, and the first lowest-cost action. Do not claim a speedup.
 
 The check does not claim a speedup. It answers whether optimization can start,
 what result the current setup could support, and what must be prepared first.
@@ -24,24 +24,25 @@ what result the current setup could support, and what must be prepared first.
 Provide as much of the following as currently exists. The skill first reports a
 claim ceiling and helps prepare missing foundations before formal optimization:
 
-1. A **runnable target**: kernel code, a complete workload, or an existing
-   `.ncu-rep`.
-2. A **correctness reference**: reference implementation, tests, validator, or
-   comparable expected output.
-3. The **test environment**: target GPU, driver, toolchain, dependencies, and
+1. A **runnable target**: kernel or application code, or an existing `.ncu-rep`.
+2. A **test workload**: a dataset, representative requests, or a replay that
+   reflects the performance target.
+3. **Correctness checks**: expected outputs, tolerances, accuracy criteria,
+   tests, or a validator.
+4. The **test environment**: target GPU, driver, toolchain, dependencies, and
    access boundaries.
-4. A **performance goal**: latency, throughput, memory, cost, or another primary
+5. A **performance goal**: latency, throughput, memory, cost, or another primary
    KPI, including its direction and threshold.
-5. **Constraints**: accuracy, checksums, output quality, memory limits, and any
+6. **Constraints**: accuracy, checksums, output quality, memory limits, and any
    per-case requirements.
-6. The **allowed modification scope**: project paths and isolated environment
+7. The **allowed modification scope**: project paths and isolated environment
    locations that may change.
 
-A real workload must be supplied by the user. The skill does not download,
-invent, or replace it with a microbenchmark. Without one, the strongest possible
-result is a kernel-level claim.
+The test workload must be supplied by the user and represent the real target.
+The skill does not download, invent, or replace it with a microbenchmark.
+Without one, the strongest possible result is a kernel-level claim.
 
-If the runnable target, correctness reference, or stable benchmark is missing,
+If the runnable target, correctness checks, or stable benchmark is missing,
 start with [Environment readiness](environment-readiness.md). Source-only work
 may produce useful hypotheses, but not a performance result.
 
@@ -77,7 +78,7 @@ before the contract is frozen.
 
 ## First request
 
-> Use cuda-kernel-optimizer to optimize the Triton kernel in this directory. Confirm the runnable reference, inputs, performance goal, constraints, allowed files, and target environment before profiling. Use the balanced budget and keep a change only when correctness and paired performance both pass.
+> Use cuda-kernel-optimizer to optimize the Triton kernel in this directory. Confirm the test workload, correctness checks, performance goal, constraints, allowed files, and target environment before profiling. Use the balanced budget and keep a change only when correctness and paired performance both pass.
 
 Next, select the matching [workflow](workflows.md) and review the
 [evidence and safety boundaries](evidence-and-safety.md). For work that may run
@@ -98,5 +99,5 @@ ceiling, uncertainty, cost class, and the one admitted next action. The adjacent
 `performance_model.json` contains the deterministic timing accounting behind it.
 
 A change is **merge-ready** only when the declared workload objective,
-correctness reference, constraints, and evidence integrity all pass. A
+correctness checks, constraints, and evidence integrity all pass. A
 kernel-only improvement is not merge-ready for an end-to-end workload claim.

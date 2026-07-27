@@ -30,10 +30,10 @@ class ReadmeSyncTests(unittest.TestCase):
         self.compat = README_ZH_COMPAT.read_text(encoding="utf-8")
 
     def test_language_roles_and_full_readme_sizes(self) -> None:
-        self.assertIn("## 这是什么", self.chinese)
+        self.assertIn("## 项目概述", self.chinese)
         self.assertIn("## About", self.english)
         self.assertNotIn("## About", self.chinese)
-        self.assertNotIn("## 这是什么", self.english)
+        self.assertNotIn("## 项目概述", self.english)
         self.assertLessEqual(len(self.chinese.splitlines()), 200)
         self.assertLessEqual(len(self.english.splitlines()), 240)
         self.assertLessEqual(len(self.compat.splitlines()), 8)
@@ -50,28 +50,21 @@ class ReadmeSyncTests(unittest.TestCase):
         self.assertIn('href="README.md"', self.english)
 
     def test_chinese_primary_readme_uses_reader_first_order(self) -> None:
-        assert_in_order(
-            self,
-            self.chinese,
-            (
-                "## 这是什么",
-                "## 它能帮你完成什么",
-                "## 正式性能结论通常需要什么",
-                "## 十分钟判断是否适合",
-                "## 正式优化会怎样进行",
-                "## V1.2 如何控制投入",
-                "## 你会得到什么",
-                "## 结论能到什么程度",
-                "## 安装",
-                "## 安全边界",
-                "## 验证情况",
-                "## 版本记录",
-                "## 文档",
-            ),
+        self.assertEqual(
+            re.findall(r"^## .+$", self.chinese, re.MULTILINE),
+            [
+                "## 项目概述",
+                "## 核心能力",
+                "## 快速开始",
+                "## 工作流程",
+                "## 结果与验收",
+                "## 版本说明",
+                "## 相关文档",
+            ],
         )
         self.assertLess(
-            self.chinese.index("## 十分钟判断是否适合"),
-            self.chinese.index("## V1.2 如何控制投入"),
+            self.chinese.index("## 快速开始"),
+            self.chinese.index("## 工作流程"),
         )
 
     def test_first_use_path_is_concrete_and_ai_executed(self) -> None:
@@ -116,17 +109,29 @@ class ReadmeSyncTests(unittest.TestCase):
     def test_readmes_show_their_public_workflow(self) -> None:
         chinese = MERMAID.findall(self.chinese)
         english = MERMAID.findall(self.english)
-        self.assertEqual(len(chinese), 1)
+        self.assertEqual(len(chinese), 2)
         self.assertEqual(len(english), 1)
-        chinese_edges = set(EDGE.findall(chinese[0]))
+        diagnosis_edges = set(EDGE.findall(chinese[0]))
         for edge in (
-            ("baseline", "-->", "brief"),
-            ("brief", "-->", "grant"),
-            ("change", "-->", "stages"),
-            ("stages", "-->", "pause"),
-            ("pause", "-->", "grant"),
+            ("baseline", "-->", "execution"),
+            ("profile", "-->", "execution"),
+            ("execution", "-->", "accounting"),
+            ("accounting", "-->", "hypotheses"),
+            ("hypotheses", "-->", "falsifier"),
+            ("falsifier", "-->", "evidence"),
+            ("evidence", "-->", "execution"),
         ):
-            self.assertIn(edge, chinese_edges)
+            self.assertIn(edge, diagnosis_edges)
+        candidate_edges = set(EDGE.findall(chinese[1]))
+        for edge in (
+            ("direction", "-->", "candidate"),
+            ("candidate", "-->", "gate"),
+            ("pause", "-->", "gate"),
+            ("stage", "-->", "result"),
+            ("reject", "-->", "analysis"),
+            ("keep", "-->", "finish"),
+        ):
+            self.assertIn(edge, candidate_edges)
         self.assertIn(("evaluation", "-->", "keep"), set(EDGE.findall(english[0])))
         self.assertIn(("evaluation", "-->", "restore"), set(EDGE.findall(english[0])))
 
@@ -134,11 +139,11 @@ class ReadmeSyncTests(unittest.TestCase):
         chinese = "".join(self.chinese.split()).replace("`", "")
         for marker in (
             "收益上限",
-            "最低成本的验证方式",
+            "最低成本",
             "运行级授权",
-            "它是边界，不是必须消耗完的预算",
-            "用户等待和暂停时间不会占用授权",
-            "REVIEW_REQUIRED",
+            "不会为了用完授权时间而继续实验",
+            "等待和暂停不计入",
+            "保存现场并暂停",
         ):
             self.assertIn(marker, chinese)
         english = " ".join(self.english.split()).replace("`", "")
@@ -152,11 +157,10 @@ class ReadmeSyncTests(unittest.TestCase):
 
     def test_readmes_explain_candidate_stages_and_recovery(self) -> None:
         for marker in (
-            "ChangeSet",
             "静态检查",
             "最低正确性",
             "短版成对测试",
-            "不重复执行或扣费",
+            "不会重复运行已经完成的昂贵阶段",
             "补充授权后继续",
             "明确放弃",
         ):
@@ -175,21 +179,26 @@ class ReadmeSyncTests(unittest.TestCase):
     def test_real_workload_and_claim_boundaries_are_explicit(self) -> None:
         for marker in (
             "真实 workload",
+            "测试 workload（测试集或代表性请求）",
+            "正确性校验标准",
             "不会自行下载或编造",
             "不能作为性能提升结论",
             "局部 kernel 变快不等于完整 workload 变快",
             "正确性和成对性能数据",
         ):
             self.assertIn(marker, self.chinese)
+        self.assertNotIn("正确性 reference", self.chinese)
         english = " ".join(self.english.split())
         for marker in (
-            "A real workload must be supplied by the user",
+            "test workload (dataset, representative requests, or replay)",
+            "correctness checks (expected outputs, tolerances, or accuracy criteria)",
             "does not download or invent one",
             "does not claim a speedup",
             "correctness",
             "paired",
         ):
             self.assertIn(marker, english)
+        self.assertNotIn("correctness reference", english.lower())
 
     def test_readiness_and_host_boundaries_are_explicit(self) -> None:
         for marker in (
@@ -282,6 +291,10 @@ class ReadmeSyncTests(unittest.TestCase):
             "赋能",
             "无缝",
             "强大",
+            "## 正式性能结论通常需要什么",
+            "## V1.2 如何控制投入",
+            "## 结论能到什么程度",
+            "## 安全边界",
         )
         for text in (self.chinese, self.english):
             for marker in banned:

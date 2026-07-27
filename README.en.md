@@ -24,10 +24,15 @@ them; find a bottleneck across a complete workload; validate a change against a
 serving objective; or analyze an existing Nsight Compute report without
 rerunning its program.
 
-The skill profiles the real target, makes bounded project changes, checks
-correctness, and compares paired measurements. It also checks framework
-scheduling, CPU and data work, transfers, communication, I/O, allocator behavior,
-and runtime state when the evidence points outside a kernel.
+The user supplies a test workload (dataset, representative requests, or replay),
+correctness checks (expected outputs, tolerances, or accuracy criteria), the
+target environment, and the allowed modification scope. The agent then profiles
+the target, makes bounded project changes, checks correctness, and compares
+paired measurements.
+
+The analysis also covers framework scheduling, CPU and data work, transfers,
+communication, I/O, allocator behavior, and runtime state when the evidence
+points outside a kernel.
 
 Its deterministic Controller freezes the objective, environment, budget, measurement
 policy, and allowed scope before optimization begins. A resumable active-diagnosis loop
@@ -43,7 +48,7 @@ bounds later work by scope, risk, stage, and completed execution time; waiting
 does not consume it, and work outside the grant pauses for review.
 Automatic pre-baseline readiness: The AI checks required build, GPU, profiler,
 and workload-smoke capabilities before performance work begins.
-The user still supplies the real workload and authorization. The only automatic repair
+The user still supplies the test workload and authorization. The only automatic repair
 is a hash-locked pip install inside the declared isolated environment.
 The skill never changes host-level settings automatically; `self_check` does not prove that the GPU environment is ready.
 If NCU returns `ERR_NVGPUCTRPERM`, the skill records the permission boundary
@@ -61,11 +66,12 @@ Start a new session after installation so the instructions are reloaded.
 
 Before committing to the 45-minute `quick` budget, run a **10-minute fit check**:
 
-> Use cuda-kernel-optimizer for a read-only fit check of this project. Spend at most 10 minutes. Do not edit source files, install packages, or change host settings. Confirm the runnable target, correctness reference, benchmark, target GPU, and profiler access. Report the supported claim layer, blockers, missing evidence, and the first lowest-cost action. Do not claim a speedup.
+> Use cuda-kernel-optimizer for a read-only fit check of this project. Spend at most 10 minutes. Do not edit source files, install packages, or change host settings. Confirm the test workload, correctness checks, benchmark, target GPU, and profiler access. Report the supported claim layer, blockers, missing evidence, and the first lowest-cost action. Do not claim a speedup.
 
 This check only decides whether the project is ready; it does not claim a
-speedup. A real workload must be supplied by the user. The skill does not download or invent one.
-If the foundations are sufficient, provide the real workload, performance goal,
+speedup. The test workload must be supplied by the user and represent the real
+target; the skill does not download or invent one.
+If the foundations are sufficient, provide the test workload, performance goal,
 constraints, and allowed modification scope, then choose `quick`, `balanced`,
 or `thorough` for the formal run.
 
@@ -86,8 +92,8 @@ See [Getting Started](docs/getting-started.md) for the complete first-run path.
 
 | Workflow | Use it when | Result boundary |
 |---|---|---|
-| **Environment readiness** | The workload, reference, benchmark, profiler, or target environment is incomplete | A gap report, claim ceiling, and project-local preparation plan |
-| **Kernel optimization** | A CUDA, CUTLASS, or Triton implementation has a comparable reference | A kernel-level result with correctness and paired measurement evidence |
+| **Environment readiness** | The test workload, correctness checks, benchmark, profiler, or target environment is incomplete | A gap report, claim ceiling, and project-local preparation plan |
+| **Kernel optimization** | A CUDA, CUTLASS, or Triton implementation has runnable correctness checks | A kernel-level result with correctness and paired measurement evidence |
 | **Complete workload** | The bottleneck may span GPU, framework, CPU, transfers, communication, I/O, or runtime state | A bounded diagnosis and end-to-end evaluation on the supplied workload |
 | **Serving validation** | A local change must be checked against a product KPI | Frozen c1/c2/c4/c8/c12 strata, constraints, runtime identity, and separate performance and integrity decisions |
 | **Existing NCU report** | A `.ncu-rep` exists and the original workload must not run | Read-only analysis with exact degradation when the report cannot be interpreted |

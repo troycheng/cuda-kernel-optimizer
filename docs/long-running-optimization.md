@@ -28,10 +28,10 @@ flowchart TD
     ledger --> controller
 ```
 
-The **Workload Contract** freezes the real workload, target files, correctness
-reference, metric, constraints, environment, budget, allowed paths, and host
-policy. Changing one of those identities starts a new run; it does not silently
-change the meaning of an existing result.
+The **Workload Contract** freezes the test workload, target files, correctness
+checks, metric, constraints, environment, budget, allowed paths, and host policy.
+Changing one of those identities starts a new run; it does not silently change
+the meaning of an existing result.
 
 The **Controller** owns the clock, budget, state transitions, evidence adapters,
 candidate admission, and ledger. The AI Planner can propose a hypothesis and a
