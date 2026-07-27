@@ -36,20 +36,15 @@ evidence actions needed to decide what should happen next. Signed evidence and a
 append-only ledger keep interrupted, noisy, or drifted runs from silently changing the
 experiment or spending the same budget twice.
 
-After the first global scan, the diagnosis engine builds a performance model of
-the critical path, benefit ceiling, and remaining uncertainty. It reports an
-early investment brief before expensive profiling begins, so the user can see
-what is known, what one action comes next, and whether further work is worth the
-cost.
+After the first global scan, the diagnosis engine reports the critical path,
+benefit ceiling, uncertainty, next action, and expected cost. A run-level grant
+bounds later work by scope, risk, stage, and completed execution time; waiting
+does not consume it, and work outside the grant pauses for review.
 Automatic pre-baseline readiness: The AI checks required build, GPU, profiler,
 and workload-smoke capabilities before performance work begins.
 The user still supplies the real workload and authorization. The only automatic repair
-is a hash-locked pip install inside the declared isolated environment; host changes stay
-recommendations, and `self_check` does not prove that the GPU environment is ready.
-
-The skill never changes host-level settings automatically. Drivers, counter
-permissions, clocks, power limits, services, and system configuration remain
-recommendations unless the user separately authorizes them.
+is a hash-locked pip install inside the declared isolated environment.
+The skill never changes host-level settings automatically; `self_check` does not prove that the GPU environment is ready.
 
 ## Quick start
 
@@ -126,6 +121,11 @@ computes the timing facts and returns exactly one decision: `MEASURE`, `PURSUE`,
 The current benefit ceiling, uncertainty, cost class, and next checkpoint are
 written to `active_diagnosis/investment_brief.json`; numeric time estimates are
 included only when the same action has identity-matched timing history.
+
+For a code change, the Controller freezes one ChangeSet and advances from static
+review to correctness, a short paired screen, optional targeted profiling, and
+formal paired measurement. Completed stages survive restarts; rejection restores
+the change, a grant pause preserves it, and explicit abandonment restores it.
 
 Verified observations query only a few matching capability cards; cards supply methods, counterexamples, and checks, but do not decide results. Every admitted round starts with a falsifiable performance hypothesis.
 Only a rehashed V2.5 evidence closure counts as an evaluated candidate. Environment readiness finishes before optimization timing starts; three minutes or 10% of the total budget is a progress review point, not a timer that kills an install or repair.

@@ -41,40 +41,52 @@ Run the original user-provided business baseline before profiling or replacing
 its measurement path. The complete-service objective remains authoritative;
 operator and kernel measurements only explain it. After the first global scan,
 read `active_diagnosis/performance_model.json` and
-`active_diagnosis/investment_brief.json`. Report the supported benefit ceiling,
-uncertainty, next action, and whether further work is worth the expected cost.
-Do not invent a numeric duration without identity-matched timing history.
-Cumulative authorization is the start boundary for the next action, not a goal
-to consume. The benefit upper bound is an upper bound on removable time, not an
-expected benefit. If the next action's projected P90 exceeds authorization,
-return `REVIEW_REQUIRED` with the blocked action and projected spend; do not
-start it or call an evidence stop a performance rejection.
+`active_diagnosis/initial_investment_brief.json`. Report the supported benefit
+ceiling, uncertainty, next action, and whether further work is worth the
+expected cost. Do not invent a numeric duration without identity-matched timing
+history. A run grant is the boundary for the next action, not a target to
+consume: only completed controlled actions and reviewer aggregate waits count
+toward it, while wall time remains informational. If the next action's P90,
+scope, risk, or stage exceeds the grant, return `REVIEW_REQUIRED` without
+starting it; do not call that an evidence or performance rejection.
 
 Use `balanced` by default; respect `quick` or `thorough` when selected. Each
 budget has a soft target and a hard ceiling. The soft target guides effort. The
 hard ceiling is only a safety limit.
 
-## Candidate gate
+## Candidate gate and recovery
 
-Before execution, declare `claim_layer`, `cheapest_falsifier`,
-`estimated_cost`, `minimum_effect`, `rejection_condition`, and
-`promotion_condition`. Evaluate strictly in this order:
+Before execution, freeze one ChangeSet with `scope`, `risk`, `claim_layer`,
+`cheapest_falsifier`, per-stage `estimated_cost`, `minimum_effect`,
+`rejection_condition`, and `promotion_condition`. The frozen
+`rounds/round-1/change_set.json` is the only candidate-plan reader; the root
+mirror is input compatibility only. For workload claims, declare only the
+stages that can run and use `declared_upper_bound` for each P90.
+
+The pure gate chooses only one current stage at a time, in this order:
 
 1. static review or an independent small test;
 2. build and minimum correctness;
 3. short paired performance screen;
 4. profiler, only when it can resolve a live uncertainty;
 5. formal paired performance;
-6. full service test, only for a serving claim.
+6. full service test, only for a serving claim handled by its separate workflow.
 
 A failed stage blocks every later stage. Stop when the measured effect upper
 bound is below the contract threshold. Continue past the soft target when the
 uncertainty still overlaps the threshold and the direction has credible
 headroom. Do not continue merely to use the budget. Infrastructure repair uses
 `min(3 minutes, 10% of hard ceiling)` as a review point, not a kill timer.
-Finish environment readiness before starting the optimization clock. A repair
-may continue to its readiness deadline; terminate the process group only when
-its command timeout or the readiness hard deadline is reached.
+Finish environment readiness before starting controlled spend. A repair may
+continue to its readiness deadline; terminate the process group only when its
+command timeout or the readiness hard deadline is reached.
+
+For each candidate stage, the Controller commits intent, runs one stage, writes
+complete, consumes complete into state, then cleans up the marker. Resume must
+only consume a matching completion or clean an already consumed marker; an
+intent without completion requires manual recovery. A grant pause preserves the
+candidate and snapshot. A covering replacement grant resumes at the saved
+stage; only explicit `abandon` rolls the snapshot back.
 
 Freeze objective, constraints, environment, paths, and stability policy with
 `scripts/workload_contract.py`; calibrate with
@@ -91,10 +103,13 @@ when facts or workload evidence are missing.
 
 ## Controller boundary
 
-For a resumable run, let the Controller own state. `scripts/evidence_controller.py`
-seals allowlisted evidence; `scripts/planner_boundary.py` admits candidates.
-The frozen `audit_every_candidates` value controls baseline audits. A changed
-workload, source, objective, or environment starts a new contract and ledger.
+For a resumable run, let the Controller own state, authorization and reviewer
+completion consumption. `scripts/evidence_controller.py` seals allowlisted
+evidence; `scripts/planner_boundary.py` admits candidates. Direction and final
+reviewer requests use allowlisted summaries and fixed intent → complete →
+state-consume boundaries; external answers remain advisory. The frozen
+`audit_every_candidates` value controls baseline audits. A changed workload,
+source, objective, or environment starts a new contract and ledger.
 
 Keep at most three competing mechanism hypotheses. The deterministic decision
 is one of `MEASURE`, `PURSUE`, `REVIEW_REQUIRED`, or `STOP`. Execute only the one

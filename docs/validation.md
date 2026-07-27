@@ -5,8 +5,11 @@ predict the speedup of a new workload.
 
 ## Automated checks
 
-The local CPU/static suite ran 1,312 tests on 2026-07-26: 1,302 passed, 10 physical RTX 5090 opt-in tests were skipped, and none failed. It covers input
-validation, state recovery, evidence binding, shared-host guards, timeouts, restoration, capability retrieval,
+Release validation on 2026-07-27 covered 1,298 tests: 1,288 passed and
+10 physical RTX 5090 opt-in tests were skipped. The complete discovery run passed
+all code checks and found one stale documentation-count gate; after this page
+was corrected, that gate passed separately. The suite covers input validation, state recovery,
+evidence binding, shared-host guards, timeouts, restoration, capability retrieval,
 stability calibration, audit cadence, performance-model accounting, bounded
 hypothesis admission, targeted evidence selection, and deterministic decision logic. Pre-V1
 protocol generation 3.1 added
