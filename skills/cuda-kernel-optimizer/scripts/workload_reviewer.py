@@ -963,9 +963,9 @@ def _ordered_reviewer_configs(
             }
         )
     normalized.sort(
-        key=lambda item: priority.get(
-            item["canonical_provider"],
-            len(priority),
+        key=lambda item: (
+            priority.get(item["canonical_provider"], len(priority)),
+            item["provider"].lower(),
         )
     )
     distinct = []
