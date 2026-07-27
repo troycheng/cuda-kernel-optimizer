@@ -4214,6 +4214,18 @@ def authorize_run(
     with _run_lock(run_root):
         state = read_run_state(run_root)
         _require_run_grant_investment_control(state)
+        frozen_control = _load_frozen_control(run_root, state)
+        (
+            state,
+            _recovered_failure_decision,
+            unbound_candidate_failure,
+        ) = _candidate_recovery_preflight(run_root, state, frozen_control)
+        if unbound_candidate_failure:
+            raise ValidationError(
+                "resume the unbound candidate failure before authorization"
+            )
+        if state.get("next_action") == "manual_recovery":
+            return state
         authorization_identity_kwargs = {}
         candidate_binding_path = run_root / "candidate_binding.json"
         if (
@@ -6170,9 +6182,158 @@ def _candidate_failure_removals(
     )
 
 
+_CANDIDATE_FAILURE_STATE_REMOVALS = (
+    "before_identity_digest",
+    "change_set_digest",
+    "change_scope",
+    "candidate_hypothesis_id",
+    "candidate_identity_digest",
+    "candidate_digest",
+    "candidate_started_at_epoch",
+    "candidate_pause_authorization_sha256",
+    "candidate_stage",
+    "candidate_stage_intent_sha256",
+    "candidate_stage_intent_stage",
+    "candidate_stage_completions",
+    "candidate_failure_pending_sha256",
+)
+
+_UNBOUND_CANDIDATE_FAILURE = object()
+
+
+def _candidate_failure_record(
+    base_state: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> dict:
+    decision_digest = _canonical_digest(decision)
+    elapsed = decision.get("elapsed_seconds")
+    if elapsed is None:
+        elapsed = _controlled_spend_seconds(base_state)
+    if (
+        isinstance(elapsed, bool)
+        or not isinstance(elapsed, (int, float))
+        or not math.isfinite(float(elapsed))
+        or float(elapsed) < 0.0
+    ):
+        raise ValidationError("candidate failure elapsed time is invalid")
+    hypothesis_id = _identifier(
+        base_state.get("candidate_hypothesis_id"),
+        "candidate hypothesis_id",
+    )
+    identity_digest = _sha256(
+        base_state.get("candidate_identity_digest"),
+        "candidate identity_digest",
+    )
+    candidate_digest = _sha256(
+        base_state.get("candidate_digest"),
+        "candidate digest",
+    )
+    return {
+        "hypothesis_id": hypothesis_id,
+        "action_id": f"implement-{hypothesis_id}",
+        "implementation_status": "failed",
+        "identity_digest": identity_digest,
+        "elapsed_seconds": float(elapsed),
+        "candidate_digest": candidate_digest,
+        "decision_digest": decision_digest,
+        "failure_reason": _identifier(
+            decision.get("reason"),
+            "candidate failure reason",
+        ),
+    }
+
+
+def _candidate_failure_target_state(
+    base_state: Mapping[str, Any],
+    *,
+    decision_sha256: str,
+    context_sha256: str,
+    ledger_event: Mapping[str, Any],
+) -> dict:
+    updated = copy.deepcopy(dict(base_state))
+    completed = updated.get("completed_stages")
+    if type(completed) is not list:
+        raise ValidationError("candidate failure base completed stages are invalid")
+    updated["completed_stages"] = [
+        item
+        for item in completed
+        if item not in {"change", "review", "evaluation", "decision"}
+    ]
+    for field in _CANDIDATE_FAILURE_STATE_REMOVALS:
+        updated.pop(field, None)
+    updated.update(
+        {
+            "status": "active",
+            "stage": "active_diagnosis",
+            "next_action": "propose_hypotheses",
+            "updated_at_epoch": ledger_event["created_at_epoch"],
+            "decision_digest": decision_sha256,
+            "diagnosis_context_sha256": context_sha256,
+            "active_diagnosis_round": int(
+                base_state.get("active_diagnosis_round", 1)
+            )
+            + 1,
+            "active_diagnosis_ledger_sequence": ledger_event["sequence"],
+            "active_diagnosis_ledger_head_sha256": _canonical_digest(
+                ledger_event
+            ),
+        }
+    )
+    return updated
+
+
+def _candidate_failure_bound_state(
+    base_state: Mapping[str, Any],
+    pending_sha256: str,
+) -> dict:
+    if base_state.get("candidate_failure_pending_sha256") is not None:
+        raise ValidationError("candidate failure base state is already bound")
+    bound = copy.deepcopy(dict(base_state))
+    bound["candidate_failure_pending_sha256"] = _sha256(
+        pending_sha256,
+        "candidate failure pending digest",
+    )
+    return bound
+
+
+def _candidate_rollback_identity(
+    control: Mapping[str, Any],
+    run_root: Path,
+    state: Mapping[str, Any],
+    *,
+    scope: str,
+    before_identity_digest: str,
+) -> str:
+    binding_path = run_root / "candidate_binding.json"
+    if not binding_path.exists() and not binding_path.is_symlink():
+        return "unbound"
+    if binding_path.is_symlink() or not binding_path.is_file():
+        raise ValidationError("candidate rollback binding is invalid")
+    change = _load_registered_change_set(run_root, state, control)
+    binding = _validate_candidate_binding(
+        load_json_object(binding_path),
+        candidate=change["candidate"],
+        change_set_sha256=_canonical_digest(change),
+    )
+    _validated_identity_artifact(
+        load_json_object(
+            run_root / "rounds" / "round-1" / "after_identity.json"
+        ),
+        binding["after_identity_digest"],
+    )
+    current_identity = _identity(control, scope)["digest"]
+    if current_identity == binding["after_identity_digest"]:
+        return "candidate"
+    if current_identity == before_identity_digest:
+        return "before"
+    raise ValidationError("candidate rollback identity drifted")
+
+
 def _validate_candidate_failure_pending(
     run_root: Path,
     value: Mapping[str, Any],
+    *,
+    current_state: Mapping[str, Any],
 ) -> dict:
     pending = _object(value, "candidate failure pending")
     fields = {
@@ -6234,17 +6395,6 @@ def _validate_candidate_failure_pending(
     )
     if _canonical_digest(context) != context_digest:
         raise ValidationError("candidate failure context drifted")
-    target_state = _object(
-        pending["target_state"], "candidate failure target state"
-    )
-    if (
-        target_state.get("status") != "active"
-        or target_state.get("stage") != "active_diagnosis"
-        or target_state.get("next_action") != "propose_hypotheses"
-        or target_state.get("decision_digest") != pending["decision_sha256"]
-        or target_state.get("diagnosis_context_sha256") != context_digest
-    ):
-        raise ValidationError("candidate failure target state drifted")
     ledger_event = _object(
         pending["ledger_event"], "candidate failure ledger event"
     )
@@ -6272,21 +6422,70 @@ def _validate_candidate_failure_pending(
         or ledger_event.get("previous_event_sha256")
         != base_state.get("active_diagnosis_ledger_head_sha256")
         or pending["ledger_path"] != expected_ledger_path
-        or target_state.get("active_diagnosis_ledger_sequence")
-        != expected_sequence
-        or target_state.get("active_diagnosis_ledger_head_sha256")
-        != _canonical_digest(ledger_event)
     ):
         raise ValidationError("candidate failure ledger binding drifted")
     history = context.get("candidate_history")
     if type(history) is not list or not history:
         raise ValidationError("candidate failure history is missing")
+    base_context = copy.deepcopy(context)
+    base_history = list(base_context["candidate_history"])
+    record = base_history.pop()
+    base_context["candidate_history"] = base_history
+    if _canonical_digest(base_context) != base_state.get(
+        "diagnosis_context_sha256"
+    ):
+        raise ValidationError("candidate failure context prefix drifted")
+    expected_record = _candidate_failure_record(base_state, decision)
+    if record != expected_record:
+        raise ValidationError("candidate failure history record drifted")
     expected_payload = {
-        "candidate_history_record": history[-1],
+        "candidate_history_record": expected_record,
         "context_sha256": context_digest,
     }
     if ledger_event.get("payload_sha256") != _canonical_digest(expected_payload):
         raise ValidationError("candidate failure ledger payload drifted")
+    target_state = _object(
+        pending["target_state"], "candidate failure target state"
+    )
+    expected_target = _candidate_failure_target_state(
+        base_state,
+        decision_sha256=pending["decision_sha256"],
+        context_sha256=context_digest,
+        ledger_event=ledger_event,
+    )
+    if target_state != expected_target:
+        raise ValidationError("candidate failure target state drifted")
+    current_digest = _canonical_digest(current_state)
+    target_digest = _canonical_digest(expected_target)
+    pending_digest = _canonical_digest(pending)
+    state_pending_digest = current_state.get(
+        "candidate_failure_pending_sha256"
+    )
+    if (
+        state_pending_digest is not None
+        and _sha256(
+            state_pending_digest,
+            "state candidate failure pending digest",
+        )
+        != pending_digest
+    ):
+        raise ValidationError("candidate failure pending state binding drifted")
+    events = _verify_active_diagnosis_ledger(run_root)
+    _verify_committed_active_ledger(base_state, events)
+    base_sequence = int(base_state["active_diagnosis_ledger_sequence"])
+    if len(events) not in {base_sequence, base_sequence + 1}:
+        raise ValidationError("candidate failure ledger tail drifted")
+    if len(events) == base_sequence + 1 and events[-1] != ledger_event:
+        raise ValidationError("candidate failure ledger event drifted")
+    context_path = run_root / "diagnosis_context.json"
+    if context_path.is_symlink() or not context_path.is_file():
+        raise ValidationError("candidate failure context artifact is invalid")
+    current_context = load_json_object(context_path)
+    if current_digest == target_digest:
+        if current_context != context:
+            raise ValidationError("candidate failure committed context drifted")
+    elif current_context != base_context and current_context != context:
+        raise ValidationError("candidate failure context artifact drifted")
     return copy.deepcopy(dict(pending))
 
 
@@ -6294,22 +6493,50 @@ def _apply_candidate_failure_pending(
     run_root: Path,
     control: Mapping[str, Any],
     pending: Mapping[str, Any],
+    *,
+    bind_unbound: bool,
 ) -> dict:
-    plan = _validate_candidate_failure_pending(run_root, pending)
+    state = read_run_state(run_root)
+    plan = _validate_candidate_failure_pending(
+        run_root,
+        pending,
+        current_state=state,
+    )
     base_digest = plan["base_state_sha256"]
+    base_state = load_json_object(
+        run_root / "state_generations" / f"{base_digest}.json"
+    )
+    pending_digest = _canonical_digest(plan)
+    bound_state = _candidate_failure_bound_state(
+        base_state,
+        pending_digest,
+    )
+    bound_digest = _canonical_digest(bound_state)
     target_state = plan["target_state"]
     target_digest = _canonical_digest(target_state)
-    state = read_run_state(run_root)
     current_digest = _canonical_digest(state)
-    if current_digest not in {base_digest, target_digest}:
+    if current_digest not in {base_digest, bound_digest, target_digest}:
         raise ValidationError("candidate failure state binding drifted")
     if current_digest == base_digest:
-        _restore_snapshot(
+        if not bind_unbound:
+            raise ValidationError("candidate failure pending is not state-bound")
+        state = _write_state(run_root, bound_state)
+        current_digest = _canonical_digest(state)
+    if current_digest == bound_digest:
+        rollback_identity = _candidate_rollback_identity(
             control,
             run_root,
-            plan["scope"],
-            plan["before_identity_digest"],
+            base_state,
+            scope=plan["scope"],
+            before_identity_digest=plan["before_identity_digest"],
         )
+        if rollback_identity != "before":
+            _restore_snapshot(
+                control,
+                run_root,
+                plan["scope"],
+                plan["before_identity_digest"],
+            )
         for path, value in (
             (run_root / "decision.json", plan["decision"]),
             (run_root / "diagnosis_context.json", plan["context"]),
@@ -6357,7 +6584,12 @@ def _commit_candidate_failure(
     control: Mapping[str, Any],
     pending: Mapping[str, Any],
 ) -> dict:
-    plan = _validate_candidate_failure_pending(run_root, pending)
+    state = read_run_state(run_root)
+    plan = _validate_candidate_failure_pending(
+        run_root,
+        pending,
+        current_state=state,
+    )
     pending_path = run_root / "candidate_failure_pending.json"
     if pending_path.exists():
         if (
@@ -6367,22 +6599,38 @@ def _commit_candidate_failure(
             raise ValidationError("a different candidate failure is pending")
     else:
         _atomic_json(pending_path, plan)
-    return _apply_candidate_failure_pending(run_root, control, plan)
+    return _apply_candidate_failure_pending(
+        run_root,
+        control,
+        plan,
+        bind_unbound=True,
+    )
 
 
 def _recover_candidate_failure(
     run_root: Path,
     control: Mapping[str, Any],
-) -> dict | None:
+) -> dict | object | None:
     pending_path = run_root / "candidate_failure_pending.json"
     if not pending_path.exists() and not pending_path.is_symlink():
         return None
     if pending_path.is_symlink() or not pending_path.is_file():
         raise ValidationError("candidate failure pending must be a regular file")
+    pending = load_json_object(pending_path)
+    state = read_run_state(run_root)
+    if state.get("candidate_failure_pending_sha256") is None:
+        base_digest = _sha256(
+            pending.get("base_state_sha256"),
+            "candidate failure pending base state",
+        )
+        if _canonical_digest(state) == base_digest:
+            pending_path.unlink()
+            return _UNBOUND_CANDIDATE_FAILURE
     return _apply_candidate_failure_pending(
         run_root,
         control,
-        load_json_object(pending_path),
+        pending,
+        bind_unbound=False,
     )
 
 
@@ -6399,30 +6647,9 @@ def _resume_active_diagnosis_after_candidate_rejection(
     context = load_json_object(run_root / "diagnosis_context.json")
     if _canonical_digest(context) != state.get("diagnosis_context_sha256"):
         raise ValidationError("diagnosis context digest drifted before candidate failure")
-    hypothesis_id = _identifier(
-        state.get("candidate_hypothesis_id"), "candidate hypothesis_id"
-    )
-    identity_digest = _sha256(
-        state.get("candidate_identity_digest"), "candidate identity_digest"
-    )
-    candidate_digest = _sha256(
-        state.get("candidate_digest"), "candidate digest"
-    )
-    elapsed = (
-        float(time_gate["elapsed_seconds"])
-        if time_gate is not None
-        else max(0.0, time.time() - float(state["candidate_started_at_epoch"]))
-    )
-    record = {
-        "hypothesis_id": hypothesis_id,
-        "action_id": f"implement-{hypothesis_id}",
-        "implementation_status": "failed",
-        "identity_digest": identity_digest,
-        "elapsed_seconds": elapsed,
-        "candidate_digest": candidate_digest,
-        "decision_digest": _canonical_digest(decision),
-        "failure_reason": _identifier(reason, "candidate failure reason"),
-    }
+    if decision.get("reason") != reason:
+        raise ValidationError("candidate failure reason drifted before commit")
+    record = _candidate_failure_record(state, decision)
     transition_at = time.time()
     refreshed = copy.deepcopy(context)
     refreshed.setdefault("candidate_history", []).append(record)
@@ -6436,40 +6663,12 @@ def _resume_active_diagnosis_after_candidate_rejection(
         },
         created_at_epoch=transition_at,
     )
-    updated = copy.deepcopy(dict(state))
-    updated["completed_stages"] = [
-        item
-        for item in updated["completed_stages"]
-        if item not in {"change", "review", "evaluation", "decision"}
-    ]
-    for field in (
-        "before_identity_digest",
-        "change_set_digest",
-        "change_scope",
-        "candidate_hypothesis_id",
-        "candidate_identity_digest",
-        "candidate_digest",
-        "candidate_started_at_epoch",
-        "candidate_pause_authorization_sha256",
-        *_CANDIDATE_STAGE_STATE_FIELDS,
-    ):
-        updated.pop(field, None)
     decision_digest = _canonical_digest(decision)
-    updated.update(
-        {
-            "status": "active",
-            "stage": "active_diagnosis",
-            "next_action": "propose_hypotheses",
-            "updated_at_epoch": transition_at,
-            "decision_digest": decision_digest,
-            "diagnosis_context_sha256": context_digest,
-            "active_diagnosis_round": int(
-                state.get("active_diagnosis_round", 1)
-            )
-            + 1,
-            "active_diagnosis_ledger_sequence": ledger_event["sequence"],
-            "active_diagnosis_ledger_head_sha256": _canonical_digest(ledger_event),
-        }
+    updated = _candidate_failure_target_state(
+        state,
+        decision_sha256=decision_digest,
+        context_sha256=context_digest,
+        ledger_event=ledger_event,
     )
     pending = {
         "schema_version": (
@@ -7343,6 +7542,99 @@ def _persist_candidate_manual_recovery(
         }
     )
     return _write_state(run_root, blocked)
+
+
+def _has_candidate_stage_checkpoint(
+    run_root: Path,
+    state: Mapping[str, Any],
+) -> bool:
+    return (
+        state.get("candidate_stage_intent_sha256") is not None
+        or bool(state.get("candidate_stage_completions"))
+        or (run_root / "candidate_stage_intent.json").exists()
+        or (run_root / "candidate_stage_intent.json").is_symlink()
+        or (run_root / "candidate_stage_complete.json").exists()
+        or (run_root / "candidate_stage_complete.json").is_symlink()
+    )
+
+
+def _candidate_recovery_preflight(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+) -> tuple[dict, dict | None, bool]:
+    try:
+        recovered_failure = _recover_candidate_failure(run_root, control)
+    except (KeyError, OSError, ValidationError):
+        return (
+            _persist_candidate_manual_recovery(
+                run_root,
+                state,
+                reason="candidate_failure_recovery_invalid",
+            ),
+            None,
+            False,
+        )
+    if recovered_failure is _UNBOUND_CANDIDATE_FAILURE:
+        return read_run_state(run_root), None, True
+    if recovered_failure is not None:
+        decision = load_json_object(run_root / "decision.json")
+        if (
+            _canonical_digest(decision)
+            != recovered_failure.get("decision_digest")
+            or decision.get("status") != "rejected"
+            or decision.get("rolled_back") is not True
+        ):
+            return (
+                _persist_candidate_manual_recovery(
+                    run_root,
+                    recovered_failure,
+                    reason="candidate_failure_recovery_invalid",
+                ),
+                None,
+                False,
+            )
+        return recovered_failure, decision, False
+    current = copy.deepcopy(dict(state))
+    if not _has_candidate_stage_checkpoint(run_root, current):
+        return current, None, False
+    try:
+        change = _load_registered_change_set(
+            run_root,
+            current,
+            control,
+        )
+        binding = _validate_candidate_binding(
+            _load_candidate_stage_marker(
+                run_root / "candidate_binding.json",
+                "candidate binding",
+            ),
+            candidate=change["candidate"],
+            change_set_sha256=_canonical_digest(change),
+        )
+        _validated_identity_artifact(
+            load_json_object(
+                run_root / "rounds" / "round-1" / "after_identity.json"
+            ),
+            binding["after_identity_digest"],
+        )
+        recovered_stage = _recover_candidate_stage_checkpoint(
+            run_root,
+            current,
+            control,
+            binding,
+        )
+    except (KeyError, OSError, ValidationError):
+        return (
+            _persist_candidate_manual_recovery(
+                run_root,
+                current,
+                reason="candidate_stage_recovery_invalid",
+            ),
+            None,
+            False,
+        )
+    return recovered_stage, None, False
 
 
 def _execute_candidate_stage(
@@ -8345,6 +8637,20 @@ def abandon(run_dir: os.PathLike[str] | str) -> dict:
     with _run_lock(run_root):
         state = read_run_state(run_root)
         decision_path = run_root / "decision.json"
+        control = _load_frozen_control(run_root, state)
+        (
+            state,
+            recovered_failure_decision,
+            unbound_candidate_failure,
+        ) = _candidate_recovery_preflight(run_root, state, control)
+        if unbound_candidate_failure:
+            raise ValidationError(
+                "resume the unbound candidate failure before abandon"
+            )
+        if recovered_failure_decision is not None:
+            return recovered_failure_decision
+        if state.get("next_action") == "manual_recovery":
+            return state
         if state.get("status") == "completed":
             decision = load_json_object(decision_path)
             if (
@@ -8354,14 +8660,40 @@ def abandon(run_dir: os.PathLike[str] | str) -> dict:
             ):
                 raise ValidationError("completed run cannot be abandoned")
             return decision
-        control = _load_frozen_control(run_root, state)
         scope = state.get("change_scope")
         before_identity = state.get("before_identity_digest")
         if scope not in {"project", "isolated_environment"}:
             raise ValidationError("run has no registered candidate to abandon")
         _sha256(before_identity, "candidate before identity")
+        rollback_identity = "unbound"
+        binding_path = run_root / "candidate_binding.json"
+        if binding_path.exists() or binding_path.is_symlink():
+            try:
+                rollback_identity = _candidate_rollback_identity(
+                    control,
+                    run_root,
+                    state,
+                    scope=scope,
+                    before_identity_digest=before_identity,
+                )
+            except (KeyError, OSError, ValidationError):
+                return _persist_candidate_manual_recovery(
+                    run_root,
+                    state,
+                    reason="candidate_abandon_identity_or_artifact_drift",
+                )
         try:
-            _restore_snapshot(control, run_root, scope, before_identity)
+            if rollback_identity != "before":
+                _restore_snapshot(
+                    control,
+                    run_root,
+                    scope,
+                    before_identity,
+                )
+            if _identity(control, scope)["digest"] != before_identity:
+                raise ValidationError(
+                    "abandon rollback did not restore the frozen identity"
+                )
         except (OSError, ValidationError) as error:
             decision = {
                 "schema_version": "cuda-workload-optimizer/decision-v1",
@@ -8431,7 +8763,9 @@ def _resume_run_unlocked(run_root: Path) -> dict:
     state = read_run_state(run_root)
     control = _load_frozen_control(run_root, state)
     recovered = _recover_candidate_failure(run_root, control)
-    if recovered is not None:
+    if recovered is _UNBOUND_CANDIDATE_FAILURE:
+        state = read_run_state(run_root)
+    elif recovered is not None:
         state = recovered
     if state["next_action"] == "collect_evidence":
         return _collect_active_diagnosis_evidence_unlocked(control, run_root)

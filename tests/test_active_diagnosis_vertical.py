@@ -1247,88 +1247,221 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             self.assertEqual(context["candidate_history"], [])
 
     def test_candidate_failure_recovers_from_fixed_pending_record(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp).resolve()
-            (
-                helper,
-                control,
-                run_dir,
-                project,
-                hypothesis,
-                request,
-            ) = self._controller_with_two_supported_directions(root)
-            ready = helper.controller.register_active_diagnosis_proposal(
-                control, run_dir, hypothesis, request
-            )
-            self.assertEqual(ready["next_action"], "register_change")
-            change = helper._change("slow")
-            change["diagnosis_ids"] = ["h-framework-gap"]
-            helper.controller.register_change(control, run_dir, change)
-            (project / "configs" / "value.json").write_text(
-                '{"workers": 8}\n', encoding="utf-8"
-            )
-            pending = run_dir / "candidate_failure_pending.json"
-            original_atomic = helper.controller._atomic_json
-            interrupted = False
+        for tamper in (
+            "unbound",
+            "none",
+            "decision",
+            "context",
+            "target_state",
+        ):
+            with self.subTest(tamper=tamper), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                (
+                    helper,
+                    control,
+                    run_dir,
+                    project,
+                    hypothesis,
+                    request,
+                ) = self._controller_with_two_supported_directions(root)
+                ready = helper.controller.register_active_diagnosis_proposal(
+                    control, run_dir, hypothesis, request
+                )
+                self.assertEqual(ready["next_action"], "register_change")
+                change = helper._change("slow")
+                change["diagnosis_ids"] = ["h-framework-gap"]
+                helper.controller.register_change(control, run_dir, change)
+                config = project / "configs" / "value.json"
+                config.write_text('{"workers": 8}\n', encoding="utf-8")
+                pending = run_dir / "candidate_failure_pending.json"
+                if tamper == "unbound":
+                    original_atomic = helper.controller._atomic_json
+                    interrupted = False
 
-            def interrupt(path, value):
-                nonlocal interrupted
-                path = Path(path)
-                if (
-                    path.name == "state_commit.json"
-                    and pending.is_file()
-                    and not interrupted
-                ):
-                    interrupted = True
-                    raise OSError("interrupted candidate failure commit")
-                return original_atomic(path, value)
+                    def interrupt_pending(path, value):
+                        nonlocal interrupted
+                        path = Path(path)
+                        result = original_atomic(path, value)
+                        if path == pending and not interrupted:
+                            interrupted = True
+                            raise OSError(
+                                "interrupted after unbound candidate failure"
+                            )
+                        return result
 
-            with mock.patch.object(
-                helper.controller, "_atomic_json", side_effect=interrupt
-            ):
-                with self.assertRaisesRegex(
-                    OSError, "interrupted candidate failure commit"
-                ):
-                    helper.controller.evaluate_change(run_dir)
+                    patches = mock.patch.object(
+                        helper.controller,
+                        "_atomic_json",
+                        side_effect=interrupt_pending,
+                    )
+                    message = "interrupted after unbound candidate failure"
+                else:
+                    def interrupt_bound_restore(*_args, **_kwargs):
+                        prepared = json.loads(pending.read_text("utf-8"))
+                        bound = helper.controller.read_run_state(run_dir)
+                        self.assertEqual(
+                            bound.get("candidate_failure_pending_sha256"),
+                            helper.controller._canonical_digest(prepared),
+                        )
+                        raise OSError(
+                            "interrupted after bound candidate failure"
+                        )
 
-            prepared = json.loads(pending.read_text("utf-8"))
-            self.assertEqual(
-                set(prepared),
-                {
-                    "schema_version",
-                    "base_state_sha256",
-                    "scope",
-                    "before_identity_digest",
-                    "decision",
-                    "decision_sha256",
-                    "context",
-                    "context_sha256",
-                    "ledger_path",
-                    "ledger_event",
-                    "target_state",
-                },
-            )
-            self.assertFalse(
-                (run_dir / "active_diagnosis" / "pending_transition.json").exists()
-            )
+                    patches = mock.patch.object(
+                        helper.controller,
+                        "_restore_snapshot",
+                        side_effect=interrupt_bound_restore,
+                    )
+                    message = "interrupted after bound candidate failure"
 
-            recovered = helper.controller.resume_run(run_dir)
-            context = json.loads(
-                (run_dir / "diagnosis_context.json").read_text("utf-8")
-            )
-            events = helper.controller._verify_active_diagnosis_ledger(run_dir)
-            self.assertEqual(recovered["next_action"], "propose_hypotheses")
-            self.assertEqual(len(context["candidate_history"]), 1)
-            self.assertEqual(
-                sum(item["event_type"] == "candidate" for item in events), 1
-            )
-            self.assertFalse(pending.exists())
-            self.assertFalse((run_dir / "snapshot" / "project").exists())
-            self.assertFalse((run_dir / "candidate_binding.json").exists())
-            self.assertEqual(
-                recovered["diagnosis_context_sha256"],
-                helper.controller._canonical_digest(context),
-            )
+                with patches:
+                    with self.assertRaisesRegex(
+                        OSError,
+                        message,
+                    ):
+                        helper.controller.evaluate_change(run_dir)
+
+                prepared = json.loads(pending.read_text("utf-8"))
+                self.assertEqual(
+                    set(prepared),
+                    {
+                        "schema_version",
+                        "base_state_sha256",
+                        "scope",
+                        "before_identity_digest",
+                        "decision",
+                        "decision_sha256",
+                        "context",
+                        "context_sha256",
+                        "ledger_path",
+                        "ledger_event",
+                        "target_state",
+                    },
+                )
+                self.assertFalse(
+                    (
+                        run_dir
+                        / "active_diagnosis"
+                        / "pending_transition.json"
+                    ).exists()
+                )
+                base_state = helper.controller.read_run_state(run_dir)
+                base_context_bytes = (run_dir / "diagnosis_context.json").read_bytes()
+                base_ledger = helper.controller._verify_active_diagnosis_ledger(
+                    run_dir
+                )
+
+                if tamper == "unbound":
+                    self.assertNotIn(
+                        "candidate_failure_pending_sha256",
+                        base_state,
+                    )
+                    with mock.patch.object(
+                        helper.controller,
+                        "_execute_candidate_stage",
+                        side_effect=AssertionError(
+                            "candidate stage reran during pure redecision"
+                        ),
+                    ) as execute_stage:
+                        decision = helper.controller.resume_run(run_dir)
+                    execute_stage.assert_not_called()
+                    self.assertEqual(decision["status"], "rejected")
+                    recovered = helper.controller.read_run_state(run_dir)
+                elif tamper != "none":
+                    self.assertEqual(
+                        base_state["candidate_failure_pending_sha256"],
+                        helper.controller._canonical_digest(prepared),
+                    )
+                    rewritten = copy.deepcopy(prepared)
+                    record = rewritten["context"]["candidate_history"][-1]
+                    if tamper == "decision":
+                        rewritten["decision"]["reason"] = "constraint_failed"
+                        rewritten["decision_sha256"] = (
+                            helper.controller._canonical_digest(
+                                rewritten["decision"]
+                            )
+                        )
+                        record["failure_reason"] = "constraint_failed"
+                        record["decision_digest"] = rewritten["decision_sha256"]
+                        rewritten["target_state"]["decision_digest"] = (
+                            rewritten["decision_sha256"]
+                        )
+                    elif tamper == "context":
+                        record["elapsed_seconds"] += 17.0
+                    else:
+                        rewritten["target_state"][
+                            "controlled_spend_seconds"
+                        ] += 1.0
+                    if tamper in {"decision", "context"}:
+                        rewritten["context_sha256"] = (
+                            helper.controller._canonical_digest(
+                                rewritten["context"]
+                            )
+                        )
+                        rewritten["ledger_event"]["payload_sha256"] = (
+                            helper.controller._canonical_digest(
+                                {
+                                    "candidate_history_record": record,
+                                    "context_sha256": rewritten[
+                                        "context_sha256"
+                                    ],
+                                }
+                            )
+                        )
+                        rewritten["target_state"][
+                            "diagnosis_context_sha256"
+                        ] = rewritten["context_sha256"]
+                        rewritten["target_state"][
+                            "active_diagnosis_ledger_head_sha256"
+                        ] = helper.controller._canonical_digest(
+                            rewritten["ledger_event"]
+                        )
+                    pending.write_text(
+                        json.dumps(rewritten),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaises(helper.controller.ValidationError):
+                        helper.controller.resume_run(run_dir)
+
+                    self.assertEqual(
+                        helper.controller.read_run_state(run_dir),
+                        base_state,
+                    )
+                    self.assertEqual(config.read_text("utf-8"), '{"workers": 8}\n')
+                    self.assertEqual(
+                        (run_dir / "diagnosis_context.json").read_bytes(),
+                        base_context_bytes,
+                    )
+                    self.assertEqual(
+                        helper.controller._verify_active_diagnosis_ledger(run_dir),
+                        base_ledger,
+                    )
+                    self.assertTrue(pending.is_file())
+                    continue
+                else:
+                    self.assertEqual(
+                        base_state["candidate_failure_pending_sha256"],
+                        helper.controller._canonical_digest(prepared),
+                    )
+                    recovered = helper.controller.resume_run(run_dir)
+
+                context = json.loads(
+                    (run_dir / "diagnosis_context.json").read_text("utf-8")
+                )
+                events = helper.controller._verify_active_diagnosis_ledger(run_dir)
+                self.assertEqual(recovered["next_action"], "propose_hypotheses")
+                self.assertEqual(len(context["candidate_history"]), 1)
+                self.assertEqual(
+                    sum(item["event_type"] == "candidate" for item in events), 1
+                )
+                self.assertFalse(pending.exists())
+                self.assertFalse((run_dir / "snapshot" / "project").exists())
+                self.assertFalse((run_dir / "candidate_binding.json").exists())
+                self.assertEqual(
+                    recovered["diagnosis_context_sha256"],
+                    helper.controller._canonical_digest(context),
+                )
 
     def test_raw_external_knowledge_is_normalized_and_selects_one_local_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

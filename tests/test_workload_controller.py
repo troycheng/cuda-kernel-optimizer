@@ -6749,6 +6749,268 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(state["next_action"], "done")
             self.assertEqual(config.read_text("utf-8"), '{"workers": 4}\n')
 
+    def test_abandon_arbitrates_recovery_before_candidate_rollback(self) -> None:
+        with self.subTest(bound_intent="abandon"), tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control, run_dir, _project = self._registered_candidate(root)
+            config = root / "project" / "configs" / "value.json"
+            with mock.patch.object(
+                self.controller,
+                "_run_candidate_static_review_bounded",
+                side_effect=KeyboardInterrupt(),
+            ), self.assertRaises(KeyboardInterrupt):
+                self.controller.evaluate_change(run_dir)
+            intent = (run_dir / "candidate_stage_intent.json").read_bytes()
+            bound_state = self.controller.read_run_state(run_dir)
+
+            with mock.patch.object(
+                self.controller,
+                "_restore_snapshot",
+                side_effect=AssertionError("unknown runner rollback attempted"),
+            ) as restore:
+                recovered = self.controller.abandon(run_dir)
+
+            restore.assert_not_called()
+            self.assertEqual(
+                (recovered["status"], recovered["next_action"]),
+                ("manual_recovery_required", "manual_recovery"),
+            )
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 8}\n')
+            self.assertEqual(
+                (run_dir / "candidate_stage_intent.json").read_bytes(),
+                intent,
+            )
+            self.assertEqual(
+                recovered["candidate_stage_intent_sha256"],
+                bound_state["candidate_stage_intent_sha256"],
+            )
+            self.assertTrue((run_dir / "candidate_binding.json").is_file())
+            self.assertTrue((run_dir / "snapshot" / "project").is_dir())
+
+        with self.subTest(bound_intent="authorize"), tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project, config, _paused = (
+                self._paused_active_candidate(root)
+            )
+            self.controller.authorize_run(
+                control,
+                run_dir,
+                _run_grant(
+                    "grant-before-interrupted-correctness",
+                    max_controlled_seconds=3600.0,
+                ),
+            )
+            with mock.patch.object(
+                self.controller,
+                "_run_python_workload_once_bounded",
+                side_effect=KeyboardInterrupt(),
+            ), self.assertRaises(KeyboardInterrupt):
+                self.controller.resume_run(run_dir)
+            intent = (run_dir / "candidate_stage_intent.json").read_bytes()
+            grant_root = run_dir / "active_diagnosis" / "authorization_grants"
+            grant_names = sorted(path.name for path in grant_root.glob("*.json"))
+            events = self.controller._verify_active_diagnosis_ledger(run_dir)
+
+            recovered = self.controller.authorize_run(
+                control,
+                run_dir,
+                _run_grant(
+                    "grant-after-interrupted-correctness",
+                    max_controlled_seconds=3600.0,
+                ),
+            )
+
+            self.assertEqual(
+                (recovered["status"], recovered["next_action"]),
+                ("manual_recovery_required", "manual_recovery"),
+            )
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 8}\n')
+            self.assertEqual(
+                (run_dir / "candidate_stage_intent.json").read_bytes(),
+                intent,
+            )
+            self.assertEqual(
+                sorted(path.name for path in grant_root.glob("*.json")),
+                grant_names,
+            )
+            self.assertEqual(
+                self.controller._verify_active_diagnosis_ledger(run_dir),
+                events,
+            )
+
+        with self.subTest(checkpoint="complete"), tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control, run_dir, _project = self._registered_candidate(root)
+            config = root / "project" / "configs" / "value.json"
+            before = self.controller.read_run_state(run_dir)
+            original_write_state = self.controller._write_state
+            interrupted = False
+
+            def interrupt_completion_commit(path, value):
+                nonlocal interrupted
+                if (
+                    not interrupted
+                    and (run_dir / "candidate_stage_complete.json").is_file()
+                    and value.get("controlled_spend_seconds", 0.0)
+                    > before["controlled_spend_seconds"]
+                ):
+                    interrupted = True
+                    raise OSError("candidate completion commit interrupted")
+                return original_write_state(path, value)
+
+            with mock.patch.object(
+                self.controller,
+                "_write_state",
+                side_effect=interrupt_completion_commit,
+            ), self.assertRaisesRegex(
+                OSError, "candidate completion commit interrupted"
+            ):
+                self.controller.evaluate_change(run_dir)
+            original_restore = self.controller._restore_snapshot
+            with mock.patch.object(
+                self.controller,
+                "_restore_snapshot",
+                wraps=original_restore,
+            ) as restore:
+                first = self.controller.abandon(run_dir)
+                committed = self.controller.read_run_state(run_dir)
+                second = self.controller.abandon(run_dir)
+
+            self.assertEqual(first, second)
+            self.assertEqual(first["status"], "abandoned")
+            self.assertEqual(restore.call_count, 1)
+            self.assertIn(
+                "static_review",
+                committed.get("candidate_stage_completions", {}),
+            )
+            self.assertGreater(
+                committed["controlled_spend_seconds"],
+                before["controlled_spend_seconds"],
+            )
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 4}\n')
+            self.assertFalse(
+                (run_dir / "candidate_stage_intent.json").exists()
+            )
+            self.assertFalse(
+                (run_dir / "candidate_stage_complete.json").exists()
+            )
+
+        with self.subTest(pending="candidate_failure"), tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project, config, _paused = (
+                self._paused_active_candidate(root)
+            )
+            self.controller.authorize_run(
+                control,
+                run_dir,
+                _run_grant(
+                    "grant-before-candidate-failure",
+                    max_controlled_seconds=3600.0,
+                ),
+            )
+            evaluator = mock.Mock()
+            evaluator.evaluate_pairs.return_value = {
+                "status": "evaluated",
+                "primary": {
+                    "status": "confirmed_loss",
+                    "estimate_pct": -5.0,
+                    "ci_low_pct": -6.0,
+                    "ci_high_pct": -4.0,
+                },
+                "constraints": [],
+            }
+            pending = run_dir / "candidate_failure_pending.json"
+
+            def interrupt_bound_restore(*_args, **_kwargs):
+                prepared = json.loads(pending.read_text("utf-8"))
+                bound = self.controller.read_run_state(run_dir)
+                self.assertEqual(
+                    bound.get("candidate_failure_pending_sha256"),
+                    self.controller._canonical_digest(prepared),
+                )
+                raise OSError("bound candidate failure interrupted")
+
+            with mock.patch.object(
+                self.controller,
+                "_load_evaluate_module",
+                return_value=evaluator,
+            ), mock.patch.object(
+                self.controller,
+                "_restore_snapshot",
+                side_effect=interrupt_bound_restore,
+            ), self.assertRaisesRegex(
+                OSError, "bound candidate failure interrupted"
+            ):
+                self.controller.resume_run(run_dir)
+            events_before = self.controller._verify_active_diagnosis_ledger(
+                run_dir
+            )
+            context_before = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+
+            decision = self.controller.abandon(run_dir)
+
+            state = self.controller.read_run_state(run_dir)
+            events = self.controller._verify_active_diagnosis_ledger(run_dir)
+            context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            self.assertEqual(decision["status"], "rejected")
+            self.assertTrue(decision["rolled_back"])
+            self.assertNotEqual(decision["status"], "abandoned")
+            self.assertEqual(
+                (state["status"], state["next_action"]),
+                ("active", "propose_hypotheses"),
+            )
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 4}\n')
+            self.assertFalse(pending.exists())
+            self.assertEqual(
+                len(context["candidate_history"]),
+                len(context_before["candidate_history"]) + 1,
+            )
+            self.assertEqual(
+                sum(item["event_type"] == "candidate" for item in events),
+                sum(
+                    item["event_type"] == "candidate"
+                    for item in events_before
+                )
+                + 1,
+            )
+            replayed = self.controller.resume_run(run_dir)
+            self.assertEqual(replayed, state)
+            self.assertEqual(
+                self.controller._verify_active_diagnosis_ledger(run_dir),
+                events,
+            )
+
+        with self.subTest(identity="foreign"), tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control, run_dir, _project, config, _paused = (
+                self._paused_active_candidate(root)
+            )
+            config.write_text('{"workers": 9}\n', encoding="utf-8")
+            binding = (run_dir / "candidate_binding.json").read_bytes()
+
+            with mock.patch.object(
+                self.controller,
+                "_restore_snapshot",
+                side_effect=AssertionError("foreign identity was overwritten"),
+            ) as restore:
+                recovered = self.controller.abandon(run_dir)
+
+            restore.assert_not_called()
+            self.assertEqual(
+                (recovered["status"], recovered["next_action"]),
+                ("manual_recovery_required", "manual_recovery"),
+            )
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 9}\n')
+            self.assertEqual(
+                (run_dir / "candidate_binding.json").read_bytes(),
+                binding,
+            )
+            self.assertTrue((run_dir / "snapshot" / "project").is_dir())
+
     def test_paused_candidate_identity_drift_requires_manual_recovery(
         self,
     ) -> None:
