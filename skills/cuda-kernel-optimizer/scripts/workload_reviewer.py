@@ -957,6 +957,7 @@ def _ordered_reviewer_configs(
             {
                 "provider": provider,
                 "canonical_provider": canonical,
+                "input_index": index,
                 "underlying_model": underlying_model,
                 "argv": list(argv),
                 "timeout_seconds": float(timeout),
@@ -965,7 +966,10 @@ def _ordered_reviewer_configs(
     normalized.sort(
         key=lambda item: (
             priority.get(item["canonical_provider"], len(priority)),
-            item["provider"].lower(),
+            item["provider"].lower()
+            if item["canonical_provider"] in priority
+            else "",
+            item["input_index"],
         )
     )
     distinct = []
