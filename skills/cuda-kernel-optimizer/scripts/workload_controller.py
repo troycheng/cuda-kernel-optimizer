@@ -3485,7 +3485,14 @@ def _start_run_unlocked(
         raise ValidationError("run_dir must be outside project_root")
     control_digest = _canonical_digest(normalized)
     state_path = run_root / "state.json"
-    if state_path.exists():
+    if any(
+        path.exists() or path.is_symlink()
+        for path in (
+            state_path,
+            run_root / "state_commit.json",
+            run_root / "state_generations",
+        )
+    ):
         state = read_run_state(run_root)
         _require_run_grant_investment_control(state)
         if state["control_digest"] != control_digest:

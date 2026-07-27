@@ -7085,14 +7085,26 @@ class WorkloadRoundTests(unittest.TestCase):
             self.controller._write_state(run_dir, legacy)
             hypothesis, request = self._active_proposal(run_dir)
             change = self._change()
+            (run_dir / "state.json").unlink()
+            runner = mock.Mock(
+                side_effect=AssertionError("legacy run reached a runner")
+            )
+            with mock.patch.object(
+                self.controller,
+                "_load_evaluate_module",
+                return_value=mock.Mock(measure_candidate=runner),
+            ), self.assertRaisesRegex(
+                self.controller.ValidationError,
+                "legacy investment control requires restart",
+            ):
+                self.controller.start_run(control, run_dir)
+            runner.assert_not_called()
+            self.assertEqual(self.controller.read_run_state(run_dir), legacy)
             before_files = {
                 path.relative_to(run_dir).as_posix(): path.read_bytes()
                 for path in run_dir.rglob("*")
                 if path.is_file()
             }
-            runner = mock.Mock(
-                side_effect=AssertionError("legacy run reached a runner")
-            )
             entries = {
                 "start_run": lambda: self.controller.start_run(control, run_dir),
                 "register_diagnosis": lambda: (
