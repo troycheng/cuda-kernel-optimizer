@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -82,7 +83,10 @@ class ReviewerProtocolTests(unittest.TestCase):
         self.reviewer = _load_reviewer()
 
     def test_request_is_canonical_digest_bound_and_detached(self) -> None:
-        diagnosis = {"primary_category": "kernel"}
+        diagnosis = {
+            "review_kind": "direction",
+            "performance_summary": {"observed_layers": ["gpu"]},
+        }
         request = self.reviewer.build_review_request(
             diagnosis=diagnosis,
             change_set={"id": "round-1"},
@@ -94,8 +98,11 @@ class ReviewerProtocolTests(unittest.TestCase):
         self.assertEqual(
             request["request_digest"], self.reviewer.request_digest(request)
         )
-        diagnosis["primary_category"] = "changed"
-        self.assertEqual(request["diagnosis"]["primary_category"], "kernel")
+        diagnosis["performance_summary"]["observed_layers"] = ["framework"]
+        self.assertEqual(
+            request["review_summary"]["performance"]["observed_layers"],
+            ["gpu"],
+        )
 
     def test_response_accepts_only_advisory_verdicts_and_matching_digest(self) -> None:
         request = _request(self.reviewer)
@@ -155,6 +162,129 @@ class ReviewerProcessTests(unittest.TestCase):
         )
         return path
 
+    def test_reviewer_summary_is_allowlisted_for_direction_and_final(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            captured = root / "provider-stdin.json"
+            provider = self._script(
+                root,
+                f"""
+                request = json.load(sys.stdin)
+                pathlib.Path({str(captured)!r}).write_text(json.dumps(request))
+                print(json.dumps({{
+                    "schema_version": "cuda-workload-optimizer/review-v1",
+                    "request_digest": request["request_digest"],
+                    "verdict": "support",
+                    "concerns": [],
+                    "suggested_experiments": []
+                }}))
+                """,
+            )
+            config = [{
+                "provider": "google-ai-mode",
+                "underlying_model": "safe-model",
+                "argv": [sys.executable, str(provider)],
+                "timeout_seconds": 2,
+            }]
+            poisons = (
+                "/private/workspace/customer-a/model.py",
+                "gpu-prod-17.internal",
+                "CUDA_VISIBLE_DEVICES=secret-business-gpu",
+                "customer invoice image payload",
+                "diff --git a/private.py b/private.py",
+            )
+            for kind in ("direction", "final"):
+                with self.subTest(kind=kind):
+                    captured.unlink(missing_ok=True)
+                    request = self.reviewer.build_review_request(
+                        diagnosis={
+                            "review_kind": kind,
+                            "hypothesis": poisons[3],
+                            "host": poisons[1],
+                            "performance_summary": {
+                                "window_duration_us": 1000.0,
+                                "minimum_effect_us": 10.0,
+                                "observed_layers": ["gpu"],
+                                "missing_layers": ["framework"],
+                                "critical_path": [poisons[0]],
+                            },
+                        },
+                        change_set={
+                            "scope": "project",
+                            "risk": "low",
+                            "candidate": {
+                                "effect_pct": 5.0,
+                                "ci_low_pct": 4.0,
+                                "ci_high_pct": 6.0,
+                            },
+                            "business_input": poisons[3],
+                        },
+                        redacted_diff=poisons[4],
+                        experiment={
+                            "evaluation_status": "evaluated",
+                            "primary_status": "confirmed_win",
+                            "constraint_statuses": ["passed"],
+                            "environment": poisons[2],
+                        },
+                        artifact_hashes={
+                            "performance_model.json": "a" * 64,
+                            "hypothesis_result.json": "b" * 64,
+                            "evidence_selection.json": "c" * 64,
+                        },
+                    )
+                    self.reviewer.run_reviewers(
+                        config,
+                        request,
+                        root / kind,
+                        total_timeout_seconds=2,
+                    )
+                    provider_request = json.loads(
+                        captured.read_text("utf-8")
+                    )
+                    self.assertEqual(
+                        set(provider_request),
+                        {
+                            "schema_version",
+                            "review_summary",
+                            "request_digest",
+                        },
+                    )
+                    summary = provider_request["review_summary"]
+                    self.assertEqual(
+                        set(summary),
+                        {
+                            "schema_version",
+                            "review_kind",
+                            "question",
+                            "performance",
+                            "direction",
+                            "final",
+                            "artifact_hashes",
+                        },
+                    )
+                    self.assertEqual(summary["review_kind"], kind)
+                    serialized = json.dumps(provider_request, sort_keys=True)
+                    for poison in poisons:
+                        self.assertNotIn(poison, serialized)
+
+                    invalid = copy.deepcopy(provider_request)
+                    invalid["review_summary"]["unexpected"] = "closed"
+                    invalid["request_digest"] = self.reviewer.request_digest(
+                        invalid
+                    )
+                    captured.unlink()
+                    with self.assertRaisesRegex(
+                        self.reviewer.ReviewerError,
+                        "review_summary.*unknown",
+                    ):
+                        self.reviewer.run_reviewers(
+                            config,
+                            invalid,
+                            root / f"{kind}-invalid",
+                            total_timeout_seconds=2,
+                        )
+                    self.assertFalse(captured.exists())
+
     def test_run_reviewers_rejects_execution_or_sensitive_request_before_provider_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -187,12 +317,12 @@ class ReviewerProcessTests(unittest.TestCase):
                 with self.subTest(field=field):
                     marker.unlink(missing_ok=True)
                     request = _request(self.reviewer)
-                    request["diagnosis"][field] = value
+                    request["review_summary"][field] = value
                     request["request_digest"] = self.reviewer.request_digest(request)
                     run_root = root / field
                     with self.assertRaisesRegex(
                         self.reviewer.ReviewerError,
-                        "command|callback|credential",
+                        "unknown",
                     ):
                         self.reviewer.run_reviewers(
                             config, request, run_root, total_timeout_seconds=1

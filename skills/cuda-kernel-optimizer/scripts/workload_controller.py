@@ -57,6 +57,15 @@ _DEFAULT_LOG_LIMIT = 64 * 1024
 _OUTPUT_LIMIT = 1024 * 1024
 _EVIDENCE_TERMINATION_RESERVE_SECONDS = 0.05
 _EVIDENCE_ACCOUNTING_MARGIN_SECONDS = 0.05
+_REVIEW_CALL_INTENT_SCHEMA = (
+    "cuda-workload-optimizer/review-call-intent-v1"
+)
+_REVIEW_CALL_COMPLETE_SCHEMA = (
+    "cuda-workload-optimizer/review-call-complete-v1"
+)
+_DIAGNOSIS_PUBLISH_INTENT_SCHEMA = (
+    "cuda-workload-optimizer/diagnosis-publish-intent-v1"
+)
 _SAFE_ENV = {
     "HOME",
     "LANG",
@@ -1604,91 +1613,167 @@ def review_change(
     *,
     deadline_epoch: float | None = None,
 ) -> dict:
+    """Record a safe standalone summary; provider calls are Controller-managed."""
     normalized = validate_control_manifest(control)
     change = validate_change_set(change_set, normalized)
     run_root = Path(run_dir).expanduser().resolve(strict=False)
-    diagnosis_path = run_root / "diagnosis.json"
-    diagnosis = load_json_object(diagnosis_path)
-    diff_path = run_root / "candidate.diff"
-    redacted_diff = "Diff content withheld; set reviewer.include_diff=true to opt in."
-    if "reviewers" in normalized:
-        reviewer_includes_diff = all(
-            item.get("include_diff", False) for item in normalized["reviewers"]
-        )
-    else:
-        reviewer_includes_diff = normalized.get("reviewer", {}).get(
-            "include_diff", False
-        )
-    if diff_path.exists():
-        if diff_path.stat().st_size > 256 * 1024:
-            raise ValidationError("candidate.diff exceeds reviewer request limit")
-        if reviewer_includes_diff:
-            redacted_diff = _redact_log(diff_path.read_text("utf-8"), ())
-        else:
-            redacted_diff += f" sha256={_sha256_path(diff_path)}"
     reviewer = _load_reviewer_module()
-    blocks = {"quick": 3, "balanced": 5, "thorough": 9}[normalized["budget"]]
-    request = reviewer.build_review_request(
-        diagnosis=diagnosis,
-        change_set=change,
-        redacted_diff=redacted_diff,
-        experiment={
-            "blocks": blocks,
-            "evaluation": "paired_ab_ba",
-            "expected_metrics": change["expected_metrics"],
-        },
-        artifact_hashes={
-            "diagnosis.json": _sha256_path(diagnosis_path),
-            "change_set.json": _canonical_digest(change),
-        },
+    request = _final_review_request(
+        run_root,
+        change,
+        {"status": "unknown", "primary": {}, "constraints": []},
     )
     _atomic_json(run_root / "review_request.json", request)
-    if "reviewer" not in normalized and "reviewers" not in normalized:
-        return reviewer.write_skipped_review(request, run_root)
-    if "reviewers" in normalized:
-        total_timeout = 180.0
-        if deadline_epoch is not None:
-            remaining = float(deadline_epoch) - time.time()
-            if remaining < 1:
-                return reviewer.write_skipped_review(request, run_root)
-            total_timeout = min(total_timeout, remaining)
-        configs = [
-            {
-                "provider": item["provider"],
-                "underlying_model": item.get("underlying_model", "unknown"),
-                "argv": item["argv"],
-                "timeout_seconds": min(
-                    float(item["timeout_seconds"]), total_timeout
-                ),
-            }
-            for item in normalized["reviewers"]
-        ]
-        if reviewer.select_reviewer_configs(configs, "final"):
-            return reviewer.run_prioritized_reviewers(
-                configs,
-                request,
-                run_root,
-                trigger="final",
-                total_timeout_seconds=total_timeout,
-            )
-        return reviewer.run_reviewers(
-            configs,
-            request,
-            run_root,
-            total_timeout_seconds=total_timeout,
-        )
-    reviewer_config = {
-        "argv": normalized["reviewer"]["argv"],
-        "timeout_seconds": normalized["reviewer"]["timeout_seconds"],
+    return reviewer.write_skipped_review(
+        request,
+        run_root,
+        reason="controller_managed",
+    )
+
+
+def _final_review_request(
+    run_root: Path,
+    change: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+) -> dict:
+    reviewer = _load_reviewer_module()
+    diagnosis_path = run_root / "diagnosis.json"
+    primary = evaluation.get("primary")
+    if not isinstance(primary, Mapping):
+        primary = {}
+    constraints = evaluation.get("constraints")
+    if type(constraints) is not list:
+        constraints = []
+    candidate_diff = run_root / "candidate.diff"
+    hashes = {
+        "diagnosis.json": _sha256_path(diagnosis_path),
+        "change_set.json": _canonical_digest(change),
     }
-    if deadline_epoch is not None:
-        remaining = float(deadline_epoch) - time.time()
-        if remaining < 1:
-            return reviewer.write_skipped_review(request, run_root)
-        reviewer_config["timeout_seconds"] = min(
-            float(reviewer_config["timeout_seconds"]), remaining
+    if candidate_diff.is_file() and not candidate_diff.is_symlink():
+        hashes["candidate.diff"] = _sha256_path(candidate_diff)
+    return reviewer.validate_review_request(
+        reviewer.build_review_request(
+            diagnosis={"review_kind": "final"},
+            change_set={
+                "scope": change["scope"],
+                "risk": change["risk"],
+                "candidate": {
+                    "effect_pct": primary.get("estimate_pct"),
+                    "ci_low_pct": primary.get("ci_low_pct"),
+                    "ci_high_pct": primary.get("ci_high_pct"),
+                },
+            },
+            redacted_diff=(
+                "present" if "candidate.diff" in hashes else ""
+            ),
+            experiment={
+                "evaluation_status": evaluation.get("status", "unknown"),
+                "primary_status": primary.get("status", "unknown"),
+                "constraint_statuses": [
+                    item.get("status", "unknown")
+                    for item in constraints
+                    if isinstance(item, Mapping)
+                ],
+            },
+            artifact_hashes=hashes,
         )
-    return reviewer.run_reviewer(reviewer_config, request, run_root)
+    )
+
+
+def _completed_final_review_aggregate(
+    run_root: Path,
+    state: Mapping[str, Any],
+    request: Mapping[str, Any],
+    control: Mapping[str, Any],
+) -> dict | None:
+    completions = state.get("review_call_completions", {})
+    if type(completions) is not dict:
+        raise ValidationError("review completion state is invalid")
+    review_root = _review_call_root(run_root, "final")
+    for complete_digest in completions.values():
+        path = review_root / "generations" / "completions" / f"{complete_digest}.json"
+        if not path.is_file() or path.is_symlink():
+            continue
+        complete = _review_generation(
+            review_root, "complete", complete_digest
+        )
+        intent_digest = _sha256(
+            complete.get("intent_sha256"),
+            "final review intent",
+        )
+        intent = _validate_review_call_intent(
+            "final",
+            _review_generation(review_root, "intent", intent_digest),
+        )
+        if intent["request"] != request:
+            continue
+        base = load_json_object(
+            run_root
+            / "state_generations"
+            / f"{intent['base_state_sha256']}.json"
+        )
+        if any(
+            base.get(field) != state.get(field)
+            for field in (
+                "authorization_grant_sha256",
+                "candidate_digest",
+                "change_set_digest",
+            )
+        ):
+            continue
+        aggregate_digest = _sha256(
+            complete.get("aggregate_sha256"),
+            "final review aggregate",
+        )
+        aggregate = _validate_review_aggregate(
+            intent,
+            _review_generation(review_root, "aggregate", aggregate_digest),
+            _reviewer_configs(control),
+        )
+        _validate_review_call_complete(
+            "final",
+            intent,
+            complete,
+            aggregate,
+        )
+        if _canonical_digest(complete) != complete_digest:
+            raise ValidationError("final review completion digest drifted")
+        return aggregate
+    return None
+
+
+def _run_final_managed_review(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+    change: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+) -> tuple[dict, dict]:
+    reviewer = _load_reviewer_module()
+    request = _final_review_request(run_root, change, evaluation)
+    _atomic_json(run_root / "review_request.json", request)
+    prior = _completed_final_review_aggregate(
+        run_root,
+        state,
+        request,
+        control,
+    )
+    if prior is not None:
+        _atomic_json(run_root / "review.json", prior)
+        return copy.deepcopy(dict(state)), prior
+    if not _reviewer_configs(control):
+        skipped = reviewer.write_skipped_review(request, run_root)
+        return copy.deepcopy(dict(state)), skipped
+    committed, aggregate = _managed_review_call(
+        run_root,
+        state,
+        control,
+        "final",
+        request,
+        trigger="final",
+    )
+    _atomic_json(run_root / "review.json", aggregate)
+    return committed, aggregate
 
 
 def _write_final_review_adjudication(
@@ -4226,6 +4311,26 @@ def authorize_run(
             )
         if state.get("next_action") == "manual_recovery":
             return state
+        state, diagnosis_recovery = _recover_diagnosis_publish(
+            run_root,
+            state,
+        )
+        if diagnosis_recovery != "none":
+            return state
+        for review_kind in ("direction", "final"):
+            state, review_recovery, _aggregate = (
+                _recover_reviewer_checkpoint(
+                    run_root,
+                    state,
+                    review_kind,
+                )
+            )
+            if review_recovery == "waiting":
+                raise ValidationError(
+                    "pending direction review rejects a new grant"
+                )
+            if review_recovery != "none":
+                return state
         authorization_identity_kwargs = {}
         candidate_binding_path = run_root / "candidate_binding.json"
         if (
@@ -4628,6 +4733,1170 @@ def _controlled_spend_seconds(state: Mapping[str, Any]) -> float:
     return float(value)
 
 
+def _review_call_root(run_root: Path, review_kind: str) -> Path:
+    if review_kind == "direction":
+        return run_root / "active_diagnosis" / "direction_review"
+    if review_kind == "final":
+        return run_root / "final_review"
+    raise ValidationError("review kind must be direction or final")
+
+
+def _review_generation(
+    review_root: Path,
+    generation_kind: str,
+    digest: str,
+    value: Mapping[str, Any] | None = None,
+) -> dict:
+    directory = {
+        "intent": "intents",
+        "aggregate": "aggregates",
+        "complete": "completions",
+    }.get(generation_kind)
+    if directory is None:
+        raise ValidationError("review generation kind is invalid")
+    digest = _sha256(digest, f"review {generation_kind} generation")
+    path = review_root / "generations" / directory / f"{digest}.json"
+    if value is None:
+        loaded = load_json_object(path)
+        if _canonical_digest(loaded) != digest:
+            raise ValidationError(f"review {generation_kind} generation drifted")
+        return loaded
+    detached = copy.deepcopy(dict(value))
+    if _canonical_digest(detached) != digest:
+        raise ValidationError(f"review {generation_kind} digest is invalid")
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or load_json_object(path) != detached:
+            raise ValidationError(f"review {generation_kind} generation conflicts")
+    else:
+        _atomic_json(path, detached)
+    return detached
+
+
+def _reviewer_configs(control: Mapping[str, Any]) -> list[dict]:
+    if type(control.get("reviewers")) is list:
+        source = control["reviewers"]
+    elif isinstance(control.get("reviewer"), Mapping):
+        item = control["reviewer"]
+        source = [
+            {
+                "provider": "local-reviewer",
+                "underlying_model": "unknown",
+                "argv": item["argv"],
+                "timeout_seconds": item["timeout_seconds"],
+            }
+        ]
+    else:
+        return []
+    return [
+        {
+            "provider": item["provider"],
+            "underlying_model": item.get("underlying_model", "unknown"),
+            "argv": copy.deepcopy(item["argv"]),
+            "timeout_seconds": float(item["timeout_seconds"]),
+        }
+        for item in source
+    ]
+
+
+def _review_maximum_total_wait_seconds(
+    configs: Sequence[Mapping[str, Any]],
+) -> float:
+    seen = set()
+    total = 0.0
+    for item in configs:
+        key = (
+            str(item["provider"]).strip().lower(),
+            str(item.get("underlying_model", "unknown")).strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        timeout = float(item["timeout_seconds"])
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValidationError("reviewer timeout is invalid")
+        total += timeout
+    return max(1.0, min(180.0, total))
+
+
+def _review_authorization_grant(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any] | None,
+    review_kind: str,
+) -> dict:
+    kwargs = {}
+    if review_kind == "final":
+        kwargs = {
+            "active_scope_identity_digest": _sha256(
+                state.get("candidate_identity_digest"),
+                "final review candidate identity",
+            ),
+            "allow_active_scope_identity_drift": True,
+        }
+    return _load_bound_authorization_grant(
+        run_root,
+        state,
+        control,
+        **kwargs,
+    )
+
+
+def _validate_review_call_intent(
+    review_kind: str,
+    value: Mapping[str, Any],
+) -> dict:
+    intent = _object(value, f"{review_kind} review intent")
+    fields = {
+        "schema_version",
+        "review_kind",
+        "review_id",
+        "base_state_sha256",
+        "authorization_grant_sha256",
+        "request",
+        "request_sha256",
+        "maximum_total_wait_seconds",
+        "created_at_epoch",
+    }
+    _closed(intent, fields, f"{review_kind} review intent")
+    _required(intent, fields, f"{review_kind} review intent")
+    if (
+        intent["schema_version"] != _REVIEW_CALL_INTENT_SCHEMA
+        or intent["review_kind"] != review_kind
+    ):
+        raise ValidationError(f"{review_kind} review intent identity drifted")
+    reviewer = _load_reviewer_module()
+    try:
+        request = reviewer.validate_review_request(intent["request"])
+    except ValueError as error:
+        raise ValidationError(f"{review_kind} review request is invalid") from error
+    base_sha = _sha256(intent["base_state_sha256"], "review base state")
+    grant_sha = _sha256(
+        intent["authorization_grant_sha256"],
+        "review authorization grant",
+    )
+    expected_review_id = _canonical_digest(
+        {
+            "review_kind": review_kind,
+            "base_state_sha256": base_sha,
+            "request_digest": request["request_digest"],
+        }
+    )
+    maximum = intent["maximum_total_wait_seconds"]
+    created = intent["created_at_epoch"]
+    if (
+        request["review_summary"]["review_kind"] != review_kind
+        or intent["request_sha256"] != _canonical_digest(request)
+        or intent["review_id"] != expected_review_id
+        or type(maximum) not in {int, float}
+        or not math.isfinite(float(maximum))
+        or not 1 <= float(maximum) <= 180
+        or grant_sha != intent["authorization_grant_sha256"]
+        or type(created) not in {int, float}
+        or not math.isfinite(float(created))
+    ):
+        raise ValidationError(f"{review_kind} review intent binding is invalid")
+    normalized = copy.deepcopy(dict(intent))
+    normalized["request"] = request
+    normalized["maximum_total_wait_seconds"] = float(maximum)
+    return normalized
+
+
+def _validate_review_aggregate(
+    intent: Mapping[str, Any],
+    value: Mapping[str, Any],
+    configs: Sequence[Mapping[str, Any]],
+) -> dict:
+    kind = intent["review_kind"]
+    aggregate = _object(value, f"{kind} review aggregate")
+    fields = {
+        "schema_version",
+        "status",
+        "request_digest",
+        "trigger",
+        "target_completed_provider_count",
+        "providers_requested",
+        "providers_completed",
+        "failed_providers",
+        "heterogeneous_models",
+        "total_timeout_seconds",
+        "total_wait_seconds",
+        "reviews",
+    }
+    _closed(aggregate, fields, f"{kind} review aggregate")
+    _required(aggregate, fields, f"{kind} review aggregate")
+    if (
+        aggregate["schema_version"]
+        != "cuda-workload-optimizer/review-aggregate-v1"
+        or aggregate["status"] not in {"completed", "unavailable", "skipped"}
+        or aggregate["request_digest"]
+        != intent["request"]["request_digest"]
+    ):
+        raise ValidationError(f"{kind} review aggregate identity drifted")
+    allowed_triggers = (
+        {"ordinary", "major", "plateau"}
+        if kind == "direction"
+        else {"final"}
+    )
+    target = aggregate["target_completed_provider_count"]
+    allowed_providers = {str(item["provider"]) for item in configs}
+    for field in (
+        "providers_requested",
+        "providers_completed",
+        "failed_providers",
+        "heterogeneous_models",
+        "reviews",
+    ):
+        if type(aggregate[field]) is not list:
+            raise ValidationError(f"{kind} review aggregate array is invalid")
+    requested = aggregate["providers_requested"]
+    completed = aggregate["providers_completed"]
+    failed = aggregate["failed_providers"]
+    if (
+        aggregate["trigger"] not in allowed_triggers
+        or type(target) is not int
+        or not 0 <= target <= 3
+        or len(requested) != len(set(requested))
+        or any(
+            type(provider) is not str
+            or provider not in allowed_providers
+            for provider in requested
+        )
+        or any(provider not in requested for provider in completed + failed)
+        or set(completed) & set(failed)
+    ):
+        raise ValidationError(f"{kind} review provider coverage is invalid")
+    timeout = aggregate["total_timeout_seconds"]
+    waited = aggregate["total_wait_seconds"]
+    if (
+        type(timeout) not in {int, float}
+        or type(waited) not in {int, float}
+        or not math.isfinite(float(timeout))
+        or not math.isfinite(float(waited))
+        or not 0 <= float(waited) <= float(timeout)
+        or float(timeout) > float(intent["maximum_total_wait_seconds"])
+    ):
+        raise ValidationError(f"{kind} review aggregate wait is invalid")
+    if any(
+        _object(item, f"{kind} review result").get("provider") not in requested
+        for item in aggregate["reviews"]
+    ):
+        raise ValidationError(f"{kind} review result provider is invalid")
+    return copy.deepcopy(dict(aggregate))
+
+
+def _validate_review_call_complete(
+    review_kind: str,
+    intent: Mapping[str, Any],
+    value: Mapping[str, Any],
+    aggregate: Mapping[str, Any],
+) -> dict:
+    complete = _object(value, f"{review_kind} review complete")
+    fields = {
+        "schema_version",
+        "review_kind",
+        "review_id",
+        "intent_sha256",
+        "request_sha256",
+        "aggregate_sha256",
+        "total_wait_seconds",
+        "completed_at_epoch",
+    }
+    _closed(complete, fields, f"{review_kind} review complete")
+    _required(complete, fields, f"{review_kind} review complete")
+    if (
+        complete["schema_version"] != _REVIEW_CALL_COMPLETE_SCHEMA
+        or complete["review_kind"] != review_kind
+        or complete["review_id"] != intent["review_id"]
+        or complete["intent_sha256"] != _canonical_digest(intent)
+        or complete["request_sha256"] != intent["request_sha256"]
+        or complete["aggregate_sha256"] != _canonical_digest(aggregate)
+    ):
+        raise ValidationError(f"{review_kind} review complete binding drifted")
+    waited = complete["total_wait_seconds"]
+    if (
+        type(waited) not in {int, float}
+        or not math.isfinite(float(waited))
+        or float(waited) != float(aggregate["total_wait_seconds"])
+        or not 0
+        <= float(waited)
+        <= float(intent["maximum_total_wait_seconds"])
+    ):
+        raise ValidationError(f"{review_kind} review complete wait is invalid")
+    completed = complete["completed_at_epoch"]
+    if (
+        type(completed) not in {int, float}
+        or not math.isfinite(float(completed))
+        or float(completed) < float(intent["created_at_epoch"])
+    ):
+        raise ValidationError(f"{review_kind} review complete time is invalid")
+    return copy.deepcopy(dict(complete))
+
+
+def _persist_task6_manual_recovery(
+    run_root: Path,
+    state: Mapping[str, Any],
+    *,
+    reason: str,
+) -> dict:
+    blocked = copy.deepcopy(dict(state))
+    blocked.update(
+        {
+            "status": "manual_recovery_required",
+            "stage": "recovery",
+            "next_action": "manual_recovery",
+            "manual_recovery_reason": _identifier(
+                reason, "task 6 manual recovery reason"
+            ),
+            "updated_at_epoch": time.time(),
+        }
+    )
+    return _write_state(run_root, blocked)
+
+
+def _load_review_call_evidence(
+    run_root: Path,
+    review_kind: str,
+    state: Mapping[str, Any],
+) -> tuple[dict | None, dict | None, dict | None]:
+    root = _review_call_root(run_root, review_kind)
+    intent_path, complete_path = root / "intent.json", root / "complete.json"
+    if intent_path.is_symlink() or complete_path.is_symlink():
+        raise ValidationError(f"{review_kind} review marker must be regular")
+    intent = load_json_object(intent_path) if intent_path.is_file() else None
+    complete = load_json_object(complete_path) if complete_path.is_file() else None
+    if intent is None and complete is not None:
+        intent = _review_generation(
+            root,
+            "intent",
+            _sha256(complete.get("intent_sha256"), "review complete intent"),
+        )
+    if intent is None:
+        return None, None, None
+    intent = _validate_review_call_intent(review_kind, intent)
+    intent_digest = _canonical_digest(intent)
+    if _review_generation(root, "intent", intent_digest) != intent:
+        raise ValidationError(f"{review_kind} review intent generation drifted")
+    if complete is None:
+        completions = state.get("review_call_completions", {})
+        digest = (
+            completions.get(intent["review_id"])
+            if isinstance(completions, Mapping)
+            else None
+        )
+        if digest is not None:
+            complete = _review_generation(
+                root, "complete", _sha256(digest, "state review completion")
+            )
+    if complete is None:
+        return intent, None, None
+    aggregate = _review_generation(
+        root,
+        "aggregate",
+        _sha256(complete.get("aggregate_sha256"), "review aggregate"),
+    )
+    configs = _reviewer_configs(_load_frozen_control(run_root, state))
+    aggregate = _validate_review_aggregate(intent, aggregate, configs)
+    complete = _validate_review_call_complete(
+        review_kind, intent, complete, aggregate
+    )
+    if _review_generation(root, "complete", _canonical_digest(complete)) != complete:
+        raise ValidationError(
+            f"{review_kind} review completion generation drifted"
+        )
+    return intent, complete, aggregate
+
+
+def _cleanup_review_call_markers(
+    run_root: Path,
+    review_kind: str,
+) -> None:
+    review_root = _review_call_root(run_root, review_kind)
+    _remove_path(review_root / "intent.json")
+    _remove_path(review_root / "complete.json")
+
+
+def _consume_review_call_complete(
+    run_root: Path,
+    state: Mapping[str, Any],
+    review_kind: str,
+    intent: Mapping[str, Any],
+    complete: Mapping[str, Any],
+) -> dict:
+    intent_digest = _canonical_digest(intent)
+    complete_digest = _canonical_digest(complete)
+    completions = copy.deepcopy(state.get("review_call_completions", {}))
+    if type(completions) is not dict:
+        raise ValidationError("review completion state is invalid")
+    prior = completions.get(intent["review_id"])
+    if prior is not None and prior != complete_digest:
+        raise ValidationError(f"{review_kind} review completion conflicts")
+    if prior == complete_digest:
+        return copy.deepcopy(dict(state))
+    if state.get("review_call_intent_sha256") != intent_digest:
+        raise ValidationError(f"{review_kind} review intent is not state-bound")
+    base = load_json_object(
+        run_root
+        / "state_generations"
+        / f"{intent['base_state_sha256']}.json"
+    )
+    if (
+        _canonical_digest(base) != intent["base_state_sha256"]
+        or base.get("authorization_grant_sha256")
+        != intent["authorization_grant_sha256"]
+    ):
+        raise ValidationError(f"{review_kind} review base state drifted")
+    grant = _review_authorization_grant(
+        run_root,
+        state,
+        None,
+        review_kind,
+    )
+    spend = _controlled_spend_seconds(state) + float(
+        complete["total_wait_seconds"]
+    )
+    if spend > float(grant["max_controlled_seconds"]):
+        raise ValidationError(f"{review_kind} review exceeds authorization")
+    completions[intent["review_id"]] = complete_digest
+    updated = copy.deepcopy(dict(state))
+    updated["review_call_completions"] = completions
+    updated["controlled_spend_seconds"] = spend
+    updated.pop("review_call_intent_sha256", None)
+    updated["updated_at_epoch"] = max(
+        float(updated.get("updated_at_epoch", 0.0)),
+        float(complete["completed_at_epoch"]),
+    )
+    return _write_state(run_root, updated)
+
+
+def _recover_reviewer_checkpoint(
+    run_root: Path,
+    state: Mapping[str, Any],
+    review_kind: str,
+) -> tuple[dict, str, dict | None]:
+    root = _review_call_root(run_root, review_kind)
+    if not any(
+        path.exists() or path.is_symlink()
+        for path in (root / "intent.json", root / "complete.json")
+    ):
+        return copy.deepcopy(dict(state)), "none", None
+    try:
+        intent, complete, aggregate = _load_review_call_evidence(
+            run_root, review_kind, state
+        )
+        if intent is None:
+            raise ValidationError(f"{review_kind} review evidence is incomplete")
+        intent_digest = _canonical_digest(intent)
+        completions = state.get("review_call_completions", {})
+        if type(completions) is not dict:
+            raise ValidationError("review completion state is invalid")
+        consumed = completions.get(intent["review_id"])
+        if consumed is not None:
+            _sha256(consumed, "consumed review completion")
+        binding = state.get("review_call_intent_sha256")
+        if binding is None:
+            if complete is not None and consumed == _canonical_digest(complete):
+                _cleanup_review_call_markers(run_root, review_kind)
+                return copy.deepcopy(dict(state)), "cleaned", aggregate
+            if (
+                complete is None
+                and _canonical_digest(state) == intent["base_state_sha256"]
+            ):
+                _cleanup_review_call_markers(run_root, review_kind)
+                return copy.deepcopy(dict(state)), "discarded_unbound", None
+            raise ValidationError(
+                f"{review_kind} review marker is not bound to state"
+            )
+        if (
+            binding != intent_digest
+            or
+            state.get("authorization_grant_sha256")
+            != intent["authorization_grant_sha256"]
+        ):
+            raise ValidationError(f"{review_kind} review state binding drifted")
+        if complete is None:
+            blocked = _persist_task6_manual_recovery(
+                run_root, state, reason=f"{review_kind}_review_outcome_unknown"
+            )
+            return blocked, "manual", None
+        if review_kind == "direction":
+            return copy.deepcopy(dict(state)), "waiting", aggregate
+        committed = _consume_review_call_complete(
+            run_root, state, review_kind, intent, complete
+        )
+        _cleanup_review_call_markers(run_root, review_kind)
+        return committed, "consumed", aggregate
+    except (KeyError, OSError, ValidationError, ValueError):
+        blocked = _persist_task6_manual_recovery(
+            run_root, state, reason=f"{review_kind}_review_recovery_invalid"
+        )
+        return blocked, "manual", None
+
+
+def _empty_review_aggregate(
+    request_digest: str,
+    trigger: str,
+    status: str,
+    total_timeout_seconds: float,
+) -> dict:
+    return {
+        "schema_version": "cuda-workload-optimizer/review-aggregate-v1",
+        "status": status,
+        "request_digest": request_digest,
+        "trigger": trigger,
+        "target_completed_provider_count": 0,
+        "providers_requested": [],
+        "providers_completed": [],
+        "failed_providers": [],
+        "heterogeneous_models": [],
+        "total_timeout_seconds": float(total_timeout_seconds),
+        "total_wait_seconds": 0.0,
+        "reviews": [],
+    }
+
+
+def _managed_review_call(
+    run_root: Path,
+    state: Mapping[str, Any],
+    control: Mapping[str, Any],
+    review_kind: str,
+    request: Mapping[str, Any],
+    *,
+    trigger: str,
+) -> tuple[dict, dict]:
+    reviewer = _load_reviewer_module()
+    try:
+        safe_request = reviewer.validate_review_request(request)
+    except ValueError as error:
+        raise ValidationError(f"{review_kind} review request is invalid") from error
+    if safe_request["review_summary"]["review_kind"] != review_kind:
+        raise ValidationError(f"{review_kind} review request kind is invalid")
+    current, outcome, recovered_aggregate = _recover_reviewer_checkpoint(
+        run_root,
+        state,
+        review_kind,
+    )
+    if outcome == "manual":
+        return current, _empty_review_aggregate(
+            safe_request["request_digest"], trigger, "unavailable", 0.0
+        )
+    if outcome == "waiting":
+        existing_intent, _complete, _aggregate = _load_review_call_evidence(
+            run_root,
+            review_kind,
+            current,
+        )
+        if (
+            existing_intent is None
+            or existing_intent["request"] != safe_request
+        ):
+            raise ValidationError(
+                "direction review requires the same proposal and request"
+            )
+        return current, copy.deepcopy(recovered_aggregate)
+    configs = _reviewer_configs(control)
+    if not configs:
+        raise ValidationError("managed review requires configured reviewers")
+    if current.get("review_call_intent_sha256") is not None:
+        raise ValidationError("another reviewer call is already pending")
+    maximum_wait = _review_maximum_total_wait_seconds(configs)
+    grant = _review_authorization_grant(
+        run_root,
+        current,
+        control,
+        review_kind,
+    )
+    created = time.time()
+    base_digest = _canonical_digest(current)
+    review_id = _canonical_digest(
+        {
+            "review_kind": review_kind,
+            "base_state_sha256": base_digest,
+            "request_digest": safe_request["request_digest"],
+        }
+    )
+    intent = {
+        "schema_version": _REVIEW_CALL_INTENT_SCHEMA,
+        "review_kind": review_kind,
+        "review_id": review_id,
+        "base_state_sha256": base_digest,
+        "authorization_grant_sha256": current[
+            "authorization_grant_sha256"
+        ],
+        "request": safe_request,
+        "request_sha256": _canonical_digest(safe_request),
+        "maximum_total_wait_seconds": maximum_wait,
+        "created_at_epoch": created,
+    }
+    intent = _validate_review_call_intent(review_kind, intent)
+    intent_digest = _canonical_digest(intent)
+    review_root = _review_call_root(run_root, review_kind)
+    _review_generation(review_root, "intent", intent_digest, intent)
+    _atomic_json(review_root / "intent.json", intent)
+    bound = copy.deepcopy(dict(current))
+    bound["review_call_intent_sha256"] = intent_digest
+    bound["updated_at_epoch"] = created
+    bound = _write_state(run_root, bound)
+
+    remaining = (
+        float(grant["max_controlled_seconds"])
+        - _controlled_spend_seconds(bound)
+    )
+    if remaining < maximum_wait:
+        aggregate = _empty_review_aggregate(
+            safe_request["request_digest"], trigger, "skipped", maximum_wait
+        )
+    else:
+        try:
+            aggregate = reviewer.run_prioritized_reviewers(
+                configs,
+                safe_request,
+                review_root / "provider",
+                trigger=trigger,
+                total_timeout_seconds=maximum_wait,
+            )
+        except (OSError, RuntimeError, ValueError):
+            aggregate = _empty_review_aggregate(
+                safe_request["request_digest"],
+                trigger,
+                "unavailable",
+                maximum_wait,
+            )
+    aggregate = _validate_review_aggregate(intent, aggregate, configs)
+    aggregate_digest = _canonical_digest(aggregate)
+    _review_generation(
+        review_root, "aggregate", aggregate_digest, aggregate
+    )
+    _atomic_json(review_root / "review.json", aggregate)
+    complete = {
+        "schema_version": _REVIEW_CALL_COMPLETE_SCHEMA,
+        "review_kind": review_kind,
+        "review_id": review_id,
+        "intent_sha256": intent_digest,
+        "request_sha256": intent["request_sha256"],
+        "aggregate_sha256": aggregate_digest,
+        "total_wait_seconds": float(aggregate["total_wait_seconds"]),
+        "completed_at_epoch": time.time(),
+    }
+    complete = _validate_review_call_complete(
+        review_kind,
+        intent,
+        complete,
+        aggregate,
+    )
+    complete_digest = _canonical_digest(complete)
+    _review_generation(
+        review_root, "complete", complete_digest, complete
+    )
+    _atomic_json(review_root / "complete.json", complete)
+    if review_kind == "direction":
+        return bound, aggregate
+    committed = _consume_review_call_complete(
+        run_root,
+        bound,
+        review_kind,
+        intent,
+        complete,
+    )
+    _cleanup_review_call_markers(run_root, review_kind)
+    return committed, aggregate
+
+
+def _direction_review_for_diagnosis_publish(
+    run_root: Path,
+    state: Mapping[str, Any],
+) -> tuple[dict | None, dict | None]:
+    if state.get("review_call_intent_sha256") is None:
+        return None, None
+    intent, complete, aggregate = _load_review_call_evidence(
+        run_root,
+        "direction",
+        state,
+    )
+    if (
+        intent is None
+        or complete is None
+        or aggregate is None
+        or state.get("review_call_intent_sha256")
+        != _canonical_digest(intent)
+    ):
+        raise ValidationError(
+            "direction review is not complete for diagnosis publication"
+        )
+    return complete, aggregate
+
+
+def _direction_review_generation(
+    run_root: Path,
+    base: Mapping[str, Any],
+    complete_digest: str,
+) -> tuple[dict, dict]:
+    root = _review_call_root(run_root, "direction")
+    complete = _review_generation(
+        root, "complete", _sha256(complete_digest, "direction completion")
+    )
+    intent_digest = _sha256(
+        complete.get("intent_sha256"), "direction review intent"
+    )
+    intent = _validate_review_call_intent(
+        "direction", _review_generation(root, "intent", intent_digest)
+    )
+    aggregate = _validate_review_aggregate(
+        intent,
+        _review_generation(
+            root,
+            "aggregate",
+            _sha256(complete.get("aggregate_sha256"), "direction aggregate"),
+        ),
+        _reviewer_configs(_load_frozen_control(run_root, base)),
+    )
+    complete = _validate_review_call_complete(
+        "direction", intent, complete, aggregate
+    )
+    if (
+        _canonical_digest(complete) != complete_digest
+        or base.get("review_call_intent_sha256") != intent_digest
+        or base.get("authorization_grant_sha256")
+        != intent["authorization_grant_sha256"]
+    ):
+        raise ValidationError("diagnosis direction review binding drifted")
+    return complete, aggregate
+
+
+def _diagnosis_proposal_binding(
+    bundle: Mapping[str, Mapping[str, Any]],
+    direction_review_aggregate: Mapping[str, Any] | None,
+) -> dict:
+    return {
+        "context_sha256": _canonical_digest(bundle["diagnosis_context"]),
+        "hypothesis_set_sha256": bundle["hypothesis_generation"][
+            "hypothesis_set_sha256"
+        ],
+        "request_set_sha256": _canonical_digest(bundle["request_set"]),
+        "selection_sha256": _canonical_digest(bundle["evidence_selection"]),
+        "decision_sha256": _canonical_digest(bundle["decision"]),
+        "investment_brief_sha256": _canonical_digest(
+            bundle["investment_brief"]
+        ),
+        "external_direction_review_sha256": (
+            None
+            if direction_review_aggregate is None
+            else _canonical_digest(direction_review_aggregate)
+        ),
+        "knowledge_adaptation_sha256": _canonical_digest(
+            bundle["knowledge_adaptation"]
+        ),
+    }
+
+
+def _diagnosis_publish_target_state(
+    base: Mapping[str, Any],
+    bundle: Mapping[str, Mapping[str, Any]],
+    proposal_ledger_event: Mapping[str, Any],
+    committed_at_epoch: float,
+    *,
+    direction_review_complete: Mapping[str, Any] | None,
+    direction_review_aggregate: Mapping[str, Any] | None,
+) -> dict:
+    context = bundle["diagnosis_context"]
+    generation = bundle["hypothesis_generation"]
+    selection = bundle["evidence_selection"]
+    decision = bundle["decision"]
+    brief = bundle["investment_brief"]
+    next_action = {
+        "MEASURE": "collect_evidence",
+        "PURSUE": "register_change",
+        "REVIEW_REQUIRED": "review_required",
+        "STOP": "done",
+    }[decision["decision"]]
+    target = copy.deepcopy(dict(base))
+    selected = brief["selected_action"]
+    blocked = brief["blocked_action"]
+    target.update(
+        {
+            "stage": "active_diagnosis",
+            "next_action": next_action,
+            "updated_at_epoch": float(committed_at_epoch),
+            "hypothesis_set_sha256": generation["hypothesis_set_sha256"],
+            "evidence_selection_sha256": _canonical_digest(selection),
+            "diagnostic_decision_sha256": _canonical_digest(decision),
+            "investment_brief_sha256": _canonical_digest(brief),
+            "terminal_reason": decision["terminal_reason"],
+            "diagnosis_context_sha256": _canonical_digest(context),
+            "active_diagnosis_ledger_sequence": proposal_ledger_event["sequence"],
+            "active_diagnosis_ledger_head_sha256": _canonical_digest(
+                proposal_ledger_event
+            ),
+            "investment_summary": {
+                "decision": brief["decision"],
+                "cumulative_investment": copy.deepcopy(brief["cumulative_investment"]),
+                "selected_action_id": None if selected is None else selected["action_id"],
+                "blocked_action_id": None if blocked is None else blocked["action_id"],
+                "next_feedback_point": brief["next_feedback_point"],
+            },
+        }
+    )
+    if decision["decision"] == "STOP":
+        target["status"] = "completed"
+    if (
+        decision["decision"] == "MEASURE"
+        and selection["selected_request"] is not None
+    ):
+        target["selected_request_signature"] = selection[
+            "selected_request"
+        ]["request_signature"]
+    if "diagnosis_proposal" not in target["completed_stages"]:
+        target["completed_stages"].append("diagnosis_proposal")
+    if direction_review_complete is not None:
+        if direction_review_aggregate is None:
+            raise ValidationError(
+                "direction review completion is missing its aggregate"
+            )
+        completions = copy.deepcopy(
+            target.get("review_call_completions", {})
+        )
+        if type(completions) is not dict:
+            raise ValidationError("review completion state is invalid")
+        complete_digest = _canonical_digest(direction_review_complete)
+        prior = completions.get(direction_review_complete["review_id"])
+        if prior is not None and prior != complete_digest:
+            raise ValidationError("direction review completion conflicts")
+        completions[direction_review_complete["review_id"]] = complete_digest
+        target["review_call_completions"] = completions
+        target["controlled_spend_seconds"] = (
+            _controlled_spend_seconds(base)
+            + float(direction_review_complete["total_wait_seconds"])
+        )
+        target["external_direction_review_sha256"] = _canonical_digest(
+            direction_review_aggregate
+        )
+        target.pop("review_call_intent_sha256", None)
+    target.pop("diagnosis_publish_intent_sha256", None)
+    return target
+
+
+def _validate_diagnosis_publish_intent(
+    run_root: Path,
+    value: Mapping[str, Any],
+) -> tuple[dict, dict, dict | None, dict | None]:
+    intent = _object(value, "diagnosis publish intent")
+    fields = {
+        "schema_version", "base_state_sha256", "base_ledger_sequence",
+        "base_ledger_head_sha256", "direction_review_complete_sha256",
+        "diagnosis_context", "knowledge_adaptation", "hypothesis_generation",
+        "hypothesis_result", "request_set", "evidence_selection", "decision",
+        "investment_brief", "proposal_ledger_path", "proposal_ledger_event",
+        "target_state", "created_at_epoch",
+    }
+    _closed(intent, fields, "diagnosis publish intent")
+    _required(intent, fields, "diagnosis publish intent")
+    if intent["schema_version"] != _DIAGNOSIS_PUBLISH_INTENT_SCHEMA:
+        raise ValidationError("diagnosis publish intent schema is invalid")
+    base_digest = _sha256(intent["base_state_sha256"], "diagnosis base state")
+    base = load_json_object(run_root / "state_generations" / f"{base_digest}.json")
+    if _canonical_digest(base) != base_digest:
+        raise ValidationError("diagnosis publish base state drifted")
+    if (
+        type(intent["base_ledger_sequence"]) is not int
+        or intent["base_ledger_sequence"] < 1
+        or intent["base_ledger_sequence"] != base.get("active_diagnosis_ledger_sequence")
+        or intent["base_ledger_head_sha256"]
+        != base.get("active_diagnosis_ledger_head_sha256")
+    ):
+        raise ValidationError("diagnosis publish ledger base drifted")
+    _sha256(intent["base_ledger_head_sha256"], "diagnosis base ledger head")
+    for field in (
+        "diagnosis_context", "knowledge_adaptation", "hypothesis_generation",
+        "hypothesis_result", "request_set", "evidence_selection", "decision",
+        "investment_brief", "proposal_ledger_event", "target_state",
+    ):
+        _object(intent[field], f"diagnosis publish {field}")
+    bundle = {
+        field: intent[field]
+        for field in (
+            "diagnosis_context", "knowledge_adaptation",
+            "hypothesis_generation", "hypothesis_result", "request_set",
+            "evidence_selection", "decision", "investment_brief",
+        )
+    }
+    generation = intent["hypothesis_generation"]
+    if (
+        generation != intent["hypothesis_result"]
+        or generation.get("hypothesis_set_sha256")
+        != _canonical_digest(generation.get("hypothesis_set"))
+    ):
+        raise ValidationError("diagnosis publish hypothesis generation drifted")
+    if intent["investment_brief"] != intent["decision"].get("investment_brief"):
+        raise ValidationError("diagnosis publish investment brief drifted")
+    event = intent["proposal_ledger_event"]
+    event_fields = {
+        "schema_version", "sequence", "event_type",
+        "previous_event_sha256", "payload_sha256", "created_at_epoch",
+    }
+    _closed(event, event_fields, "diagnosis publish proposal ledger event")
+    _required(event, event_fields, "diagnosis publish proposal ledger event")
+    if (
+        event["schema_version"] != "cuda-optimizer/active-diagnosis-event-v1"
+        or event["sequence"] != intent["base_ledger_sequence"] + 1
+        or event["event_type"] != "proposal"
+        or event["previous_event_sha256"] != intent["base_ledger_head_sha256"]
+    ):
+        raise ValidationError("diagnosis publish proposal ledger drifted")
+    expected_ledger_path = (
+        Path("active_diagnosis")
+        / "ledger"
+        / f"{event['sequence']:06d}-proposal.json"
+    ).as_posix()
+    if intent["proposal_ledger_path"] != expected_ledger_path:
+        raise ValidationError("diagnosis publish ledger path drifted")
+    created = intent["created_at_epoch"]
+    if (
+        type(created) not in {int, float}
+        or not math.isfinite(float(created))
+        or float(event["created_at_epoch"]) != float(created)
+    ):
+        raise ValidationError("diagnosis publish time drifted")
+
+    direction_complete = None
+    direction_aggregate = None
+    complete_digest = intent["direction_review_complete_sha256"]
+    if complete_digest is not None:
+        direction_complete, direction_aggregate = (
+            _direction_review_generation(run_root, base, complete_digest)
+        )
+    elif base.get("review_call_intent_sha256") is not None:
+        raise ValidationError(
+            "diagnosis publish omitted a pending direction review"
+        )
+
+    proposal_binding = _diagnosis_proposal_binding(bundle, direction_aggregate)
+    if event["payload_sha256"] != _canonical_digest(proposal_binding):
+        raise ValidationError("diagnosis publish proposal payload binding drifted")
+    expected_target = _diagnosis_publish_target_state(
+        base,
+        bundle,
+        event,
+        float(created),
+        direction_review_complete=direction_complete,
+        direction_review_aggregate=direction_aggregate,
+    )
+    if intent["target_state"] != expected_target:
+        raise ValidationError("diagnosis publish target state drifted")
+    return copy.deepcopy(dict(intent)), base, direction_complete, direction_aggregate
+
+
+def _materialize_diagnosis_publish(
+    run_root: Path,
+    intent: Mapping[str, Any],
+) -> None:
+    active_root = run_root / "active_diagnosis"
+    generation = intent["hypothesis_generation"]
+    fixed_artifacts = (
+        (run_root / "diagnosis_context.json", intent["diagnosis_context"]),
+        (
+            active_root / "knowledge_adaptation.json",
+            intent["knowledge_adaptation"],
+        ),
+        (
+            active_root
+            / "hypothesis_generations"
+            / f"{generation['hypothesis_set_sha256']}.json",
+            generation,
+        ),
+        (active_root / "hypothesis_result.json", intent["hypothesis_result"]),
+        (active_root / "request_set.json", intent["request_set"]),
+        (
+            active_root / "evidence_selection.json",
+            intent["evidence_selection"],
+        ),
+        (active_root / "decision.json", intent["decision"]),
+        (
+            active_root / "investment_brief.json",
+            intent["investment_brief"],
+        ),
+    )
+    for path, artifact in fixed_artifacts:
+        _atomic_json(path, artifact)
+    events = _verify_active_diagnosis_ledger(run_root)
+    base_sequence = intent["base_ledger_sequence"]
+    event = intent["proposal_ledger_event"]
+    if len(events) == base_sequence:
+        _atomic_json(run_root / intent["proposal_ledger_path"], event)
+    elif len(events) != base_sequence + 1 or events[-1] != event:
+        raise ValidationError(
+            "diagnosis publish found a foreign proposal ledger tail"
+        )
+    for path, artifact in fixed_artifacts:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or load_json_object(path) != artifact
+        ):
+            raise ValidationError("diagnosis publish artifact drifted")
+    events = _verify_active_diagnosis_ledger(run_root)
+    if len(events) != base_sequence + 1 or events[-1] != event:
+        raise ValidationError("diagnosis publish ledger was not materialized")
+
+
+def _cleanup_diagnosis_publish(
+    run_root: Path,
+    *,
+    consumed_direction_review: bool,
+) -> None:
+    _remove_path(
+        run_root / "active_diagnosis" / "diagnosis_publish_intent.json"
+    )
+    if consumed_direction_review:
+        _cleanup_review_call_markers(run_root, "direction")
+
+
+def _publish_diagnosis_bundle(
+    run_root: Path,
+    base: Mapping[str, Any],
+    *,
+    diagnosis_context: Mapping[str, Any],
+    knowledge_adaptation: Mapping[str, Any],
+    hypothesis_generation: Mapping[str, Any],
+    request_set: Mapping[str, Any],
+    evidence_selection: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    investment_brief: Mapping[str, Any],
+) -> dict:
+    direction_complete, direction_aggregate = (
+        _direction_review_for_diagnosis_publish(run_root, base)
+    )
+    bundle = {
+        "diagnosis_context": copy.deepcopy(dict(diagnosis_context)),
+        "knowledge_adaptation": copy.deepcopy(dict(knowledge_adaptation)),
+        "hypothesis_generation": copy.deepcopy(dict(hypothesis_generation)),
+        "hypothesis_result": copy.deepcopy(dict(hypothesis_generation)),
+        "request_set": copy.deepcopy(dict(request_set)),
+        "evidence_selection": copy.deepcopy(dict(evidence_selection)),
+        "decision": copy.deepcopy(dict(decision)),
+        "investment_brief": copy.deepcopy(dict(investment_brief)),
+    }
+    proposal_binding = _diagnosis_proposal_binding(
+        bundle, direction_aggregate
+    )
+    created = time.time()
+    ledger_path, ledger_event = _prepare_active_diagnosis_event(
+        run_root,
+        "proposal",
+        proposal_binding,
+        created_at_epoch=created,
+    )
+    target = _diagnosis_publish_target_state(
+        base,
+        bundle,
+        ledger_event,
+        created,
+        direction_review_complete=direction_complete,
+        direction_review_aggregate=direction_aggregate,
+    )
+    intent = {
+        "schema_version": _DIAGNOSIS_PUBLISH_INTENT_SCHEMA,
+        "base_state_sha256": _canonical_digest(base),
+        "base_ledger_sequence": base[
+            "active_diagnosis_ledger_sequence"
+        ],
+        "base_ledger_head_sha256": base[
+            "active_diagnosis_ledger_head_sha256"
+        ],
+        "direction_review_complete_sha256": (
+            None
+            if direction_complete is None
+            else _canonical_digest(direction_complete)
+        ),
+        **bundle,
+        "proposal_ledger_path": ledger_path,
+        "proposal_ledger_event": ledger_event,
+        "target_state": target,
+        "created_at_epoch": created,
+    }
+    intent, _base, _complete, _aggregate = (
+        _validate_diagnosis_publish_intent(run_root, intent)
+    )
+    intent_path = (
+        run_root / "active_diagnosis" / "diagnosis_publish_intent.json"
+    )
+    _atomic_json(intent_path, intent)
+    bound = copy.deepcopy(dict(base))
+    bound["diagnosis_publish_intent_sha256"] = _canonical_digest(intent)
+    bound["updated_at_epoch"] = created
+    _write_state(run_root, bound)
+    _materialize_diagnosis_publish(run_root, intent)
+    _validate_diagnosis_publish_intent(run_root, intent)
+    committed = _write_state(run_root, target)
+    _cleanup_diagnosis_publish(
+        run_root,
+        consumed_direction_review=direction_complete is not None,
+    )
+    return committed
+
+
+def _recover_diagnosis_publish(
+    run_root: Path,
+    state: Mapping[str, Any],
+) -> tuple[dict, str]:
+    intent_path = (
+        run_root / "active_diagnosis" / "diagnosis_publish_intent.json"
+    )
+    if not intent_path.exists() and not intent_path.is_symlink():
+        return copy.deepcopy(dict(state)), "none"
+    try:
+        if intent_path.is_symlink() or not intent_path.is_file():
+            raise ValidationError(
+                "diagnosis publish intent must be a regular file"
+            )
+        intent, base, direction_complete, _direction_aggregate = (
+            _validate_diagnosis_publish_intent(
+                run_root,
+                load_json_object(intent_path),
+            )
+        )
+        intent_digest = _canonical_digest(intent)
+        target = intent["target_state"]
+        current_digest = _canonical_digest(state)
+        binding = state.get("diagnosis_publish_intent_sha256")
+        if binding is None:
+            if current_digest == intent["base_state_sha256"]:
+                _remove_path(intent_path)
+                return copy.deepcopy(dict(state)), "discarded_unbound"
+            if current_digest == _canonical_digest(target):
+                _materialize_diagnosis_publish(run_root, intent)
+                _cleanup_diagnosis_publish(
+                    run_root,
+                    consumed_direction_review=direction_complete is not None,
+                )
+                return copy.deepcopy(dict(state)), "cleaned"
+            raise ValidationError(
+                "diagnosis publish intent is not bound to current state"
+            )
+        if binding != intent_digest:
+            raise ValidationError("diagnosis publish intent binding drifted")
+        expected_bound = copy.deepcopy(base)
+        expected_bound["diagnosis_publish_intent_sha256"] = intent_digest
+        expected_bound["updated_at_epoch"] = intent["created_at_epoch"]
+        if state != expected_bound:
+            raise ValidationError("diagnosis publish bound state drifted")
+        _materialize_diagnosis_publish(run_root, intent)
+        _validate_diagnosis_publish_intent(run_root, intent)
+        committed = _write_state(run_root, target)
+        _cleanup_diagnosis_publish(
+            run_root,
+            consumed_direction_review=direction_complete is not None,
+        )
+        return committed, "recovered"
+    except (KeyError, OSError, ValidationError, ValueError):
+        return (
+            _persist_task6_manual_recovery(
+                run_root,
+                state,
+                reason="diagnosis_publish_recovery_invalid",
+            ),
+            "manual",
+        )
+
+
 def _controlled_spend_after_execution(
     state: Mapping[str, Any],
     execution: Mapping[str, Any],
@@ -4691,9 +5960,8 @@ def _review_diagnostic_direction(
     hypothesis_result: Mapping[str, Any],
     selection: Mapping[str, Any],
 ) -> dict | None:
-    """Run an optional redacted direction challenge at bounded trigger points."""
-    reviewers = control.get("reviewers")
-    if type(reviewers) is not list or not reviewers:
+    """Run an optional state-bound direction challenge."""
+    if not _reviewer_configs(control):
         return None
     active = [
         item
@@ -4711,50 +5979,21 @@ def _review_diagnostic_direction(
     else:
         return None
     reviewer = _load_reviewer_module()
-    active_root = run_root / "active_diagnosis" / "direction_review"
     selected = selection.get("selected_request")
     selected_summary = None
     if isinstance(selected, Mapping):
         action = selected.get("controller_action", {})
         selected_summary = {
-            "action_id": selected.get("action_id"),
             "evidence_kind": action.get("evidence_kind"),
             "cost": action.get("cost"),
-            "target_hypothesis_ids": copy.deepcopy(
-                selected.get("target_hypothesis_ids", [])
-            ),
         }
-    performance_summary = {
-        "window_duration_us": performance_model["window_duration_us"],
-        "minimum_effect_us": performance_model["minimum_effect_us"],
-        "observed_layers": copy.deepcopy(performance_model["observed_layers"]),
-        "missing_layers": copy.deepcopy(performance_model["missing_layers"]),
-        "critical_path": copy.deepcopy(performance_model["critical_path"]),
-        "layer_directions": copy.deepcopy(performance_model["layer_directions"]),
-        "uncertainties": copy.deepcopy(performance_model["uncertainties"]),
-    }
-    hypothesis_summary = [
-        {
-            "hypothesis_id": item["hypothesis_id"],
-            "mechanism": item["mechanism"],
-            "claim_layer": item["claim_layer"],
-            "confidence": item["confidence"],
-            "support_evidence_ids": copy.deepcopy(item["support_evidence_ids"]),
-            "oppose_evidence_ids": copy.deepcopy(item["oppose_evidence_ids"]),
-            "missing_evidence_kinds": copy.deepcopy(item["missing_evidence_kinds"]),
-        }
-        for item in active
-    ]
     request = reviewer.build_review_request(
         diagnosis={
-            "kind": "performance_direction",
-            "performance_summary": performance_summary,
+            "review_kind": "direction",
+            "performance_summary": performance_model,
         },
-        change_set={
-            "kind": "diagnostic_hypotheses",
-            "hypotheses": hypothesis_summary,
-        },
-        redacted_diff="Source, raw inputs, hostnames, credentials, and raw logs are excluded.",
+        change_set={"hypotheses": active},
+        redacted_diff="",
         experiment={
             "selection_status": selection.get("status"),
             "selected_action": selected_summary,
@@ -4765,52 +6004,15 @@ def _review_diagnostic_direction(
             "evidence_selection.json": _canonical_digest(selection),
         },
     )
-    _atomic_json(active_root / "request.json", request)
-    grant = _load_bound_authorization_grant(run_root, state, control)
-    remaining = (
-        float(grant["max_controlled_seconds"])
-        - _controlled_spend_seconds(state)
+    _managed_state, aggregate = _managed_review_call(
+        run_root,
+        state,
+        control,
+        "direction",
+        request,
+        trigger=trigger,
     )
-    if remaining < 1:
-        aggregate = {
-            "status": "unavailable",
-            "providers_requested": [],
-            "providers_completed": [],
-            "failed_providers": [],
-            "total_wait_seconds": 0.0,
-            "reviews": [],
-        }
-        _atomic_json(active_root / "review.json", aggregate)
-        return aggregate
-    configs = [
-        {
-            "provider": item["provider"],
-            "underlying_model": item.get("underlying_model", "unknown"),
-            "argv": item["argv"],
-            "timeout_seconds": item["timeout_seconds"],
-        }
-        for item in reviewers
-    ]
-    try:
-        return reviewer.run_prioritized_reviewers(
-            configs,
-            request,
-            active_root,
-            trigger=trigger,
-            total_timeout_seconds=min(180.0, remaining),
-        )
-    except (OSError, RuntimeError, ValueError) as error:
-        aggregate = {
-            "status": "unavailable",
-            "providers_requested": [],
-            "providers_completed": [],
-            "failed_providers": [],
-            "total_wait_seconds": 0.0,
-            "reviews": [],
-            "failure": str(error),
-        }
-        _atomic_json(active_root / "review.json", aggregate)
-        return aggregate
+    return aggregate
 
 
 def _register_active_diagnosis_proposal_unlocked(
@@ -4829,7 +6031,30 @@ def _register_active_diagnosis_proposal_unlocked(
     state = read_run_state(run_root)
     if state["control_digest"] != _canonical_digest(normalized):
         raise ValidationError("control manifest drifted before diagnosis proposal")
-    _load_frozen_control(run_root, state)
+    frozen_control = _load_frozen_control(run_root, state)
+    (
+        state,
+        recovered_failure_decision,
+        unbound_candidate_failure,
+    ) = _candidate_recovery_preflight(run_root, state, frozen_control)
+    if unbound_candidate_failure:
+        raise ValidationError(
+            "resume the unbound candidate failure before diagnosis proposal"
+        )
+    if recovered_failure_decision is not None:
+        return state
+    if state.get("next_action") == "manual_recovery":
+        return state
+    state, diagnosis_recovery = _recover_diagnosis_publish(run_root, state)
+    if diagnosis_recovery != "none":
+        return state
+    state, review_recovery, _review_aggregate = (
+        _recover_reviewer_checkpoint(run_root, state, "direction")
+    )
+    if review_recovery == "manual":
+        return state
+    if review_recovery not in {"none", "waiting"}:
+        return state
     if state["next_action"] != "propose_hypotheses":
         raise ValidationError("run is not ready for an active diagnosis proposal")
     _active_ledger_append_boundary(run_root, "proposal")
@@ -4920,6 +6145,9 @@ def _register_active_diagnosis_proposal_unlocked(
             hypothesis_result,
             selection,
         )
+        state = read_run_state(run_root)
+        if state.get("next_action") == "manual_recovery":
+            return state
         decision_context = copy.deepcopy(context)
         decision_context["knowledge_adaptation"] = copy.deepcopy(
             knowledge_adaptation
@@ -4936,94 +6164,22 @@ def _register_active_diagnosis_proposal_unlocked(
         )
     except ValueError as error:
         raise ValidationError(f"active diagnosis proposal rejected: {error}") from error
-    active_root = run_root / "active_diagnosis"
     context = copy.deepcopy(context)
     context["closed_mechanism_keys"] = evolution["closed_mechanism_keys"]
     context["closed_scope_records"] = evolution["closed_scope_records"]
     context["knowledge_adaptation"] = copy.deepcopy(knowledge_adaptation)
-    _atomic_json(run_root / "diagnosis_context.json", context)
-    _atomic_json(
-        active_root / "knowledge_adaptation.json", knowledge_adaptation
-    )
-    _atomic_json(
-        active_root
-        / "hypothesis_generations"
-        / f"{hypothesis_result['hypothesis_set_sha256']}.json",
-        hypothesis_result,
-    )
-    _atomic_json(active_root / "hypothesis_result.json", hypothesis_result)
-    _atomic_json(
-        active_root / "request_set.json",
-        adapted_request_set,
-    )
-    _atomic_json(active_root / "evidence_selection.json", selection)
-    _atomic_json(active_root / "decision.json", decision)
     investment_brief = copy.deepcopy(decision["investment_brief"])
-    _atomic_json(active_root / "investment_brief.json", investment_brief)
-    proposal_binding = {
-        "context_sha256": _canonical_digest(context),
-        "hypothesis_set_sha256": hypothesis_result["hypothesis_set_sha256"],
-        "request_set_sha256": _canonical_digest(adapted_request_set),
-        "selection_sha256": _canonical_digest(selection),
-        "decision_sha256": _canonical_digest(decision),
-        "investment_brief_sha256": _canonical_digest(investment_brief),
-        "external_direction_review_sha256": (
-            None if external_review is None else _canonical_digest(external_review)
-        ),
-        "knowledge_adaptation_sha256": _canonical_digest(knowledge_adaptation),
-    }
-    _append_active_diagnosis_event(run_root, "proposal", proposal_binding)
-    next_action = {
-        "MEASURE": "collect_evidence",
-        "PURSUE": "register_change",
-        "REVIEW_REQUIRED": "review_required",
-        "STOP": "done",
-    }[decision["decision"]]
-    updated = copy.deepcopy(state)
-    updated.update(
-        {
-            "stage": "active_diagnosis",
-            "next_action": next_action,
-            "updated_at_epoch": time.time(),
-            "hypothesis_set_sha256": hypothesis_result["hypothesis_set_sha256"],
-            "evidence_selection_sha256": _canonical_digest(selection),
-            "diagnostic_decision_sha256": _canonical_digest(decision),
-            "investment_brief_sha256": _canonical_digest(investment_brief),
-            "terminal_reason": decision["terminal_reason"],
-            "diagnosis_context_sha256": _canonical_digest(context),
-            "investment_summary": {
-                "decision": investment_brief["decision"],
-                "cumulative_investment": copy.deepcopy(
-                    investment_brief["cumulative_investment"]
-                ),
-                "selected_action_id": (
-                    None
-                    if investment_brief["selected_action"] is None
-                    else investment_brief["selected_action"]["action_id"]
-                ),
-                "blocked_action_id": (
-                    None
-                    if investment_brief["blocked_action"] is None
-                    else investment_brief["blocked_action"]["action_id"]
-                ),
-                "next_feedback_point": investment_brief["next_feedback_point"],
-            },
-        }
+    return _publish_diagnosis_bundle(
+        run_root,
+        state,
+        diagnosis_context=context,
+        knowledge_adaptation=knowledge_adaptation,
+        hypothesis_generation=hypothesis_result,
+        request_set=adapted_request_set,
+        evidence_selection=selection,
+        decision=decision,
+        investment_brief=investment_brief,
     )
-    if decision["decision"] == "STOP":
-        updated["status"] = "completed"
-    if external_review is not None:
-        updated["external_direction_review_sha256"] = _canonical_digest(
-            external_review
-        )
-    updated.update(_active_ledger_binding(_verify_active_diagnosis_ledger(run_root)))
-    if decision["decision"] == "MEASURE" and selection["selected_request"] is not None:
-        updated["selected_request_signature"] = selection["selected_request"][
-            "request_signature"
-        ]
-    if "diagnosis_proposal" not in updated["completed_stages"]:
-        updated["completed_stages"].append("diagnosis_proposal")
-    return _write_state(run_root, updated)
 
 
 def _validate_evidence_result(
@@ -7879,6 +9035,33 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         if _canonical_digest(decision) != state.get("decision_digest"):
             raise ValidationError("decision artifact digest does not match state")
         return decision
+    control = _load_frozen_control(run_root, state)
+    (
+        state,
+        recovered_failure_decision,
+        unbound_candidate_failure,
+    ) = _candidate_recovery_preflight(run_root, state, control)
+    if unbound_candidate_failure:
+        raise ValidationError(
+            "resume the unbound candidate failure before evaluation"
+        )
+    if recovered_failure_decision is not None:
+        return recovered_failure_decision
+    if state.get("next_action") == "manual_recovery":
+        return state
+    state, diagnosis_recovery = _recover_diagnosis_publish(run_root, state)
+    if diagnosis_recovery != "none":
+        return state
+    state, direction_recovery, _direction_aggregate = (
+        _recover_reviewer_checkpoint(run_root, state, "direction")
+    )
+    if direction_recovery in {"manual", "waiting"}:
+        return state
+    state, final_recovery, _final_aggregate = (
+        _recover_reviewer_checkpoint(run_root, state, "final")
+    )
+    if final_recovery == "manual":
+        return state
     if state.get("stage") == "decision" and state["next_action"] == "review_required":
         raise ValidationError(
             "legacy review-required run cannot resume under candidate lifecycle v1"
@@ -8548,12 +9731,15 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             reason="frozen_artifact_drift",
             primary_status=evaluation.get("primary", {}).get("status"),
         )
-    review_artifact = review_change(
-        control,
+    state, review_artifact = _run_final_managed_review(
         run_root,
+        state,
+        control,
         change,
-        deadline_epoch=min(state["deadline_epoch"], time.time() + 180),
+        evaluation,
     )
+    if state.get("next_action") == "manual_recovery":
+        return state
     _write_final_review_adjudication(run_root, review_artifact, evaluation)
     if (
         _identity(control, change["scope"])["digest"]
@@ -8778,6 +9964,21 @@ def _resume_run_unlocked(run_root: Path) -> dict:
         state = read_run_state(run_root)
     elif recovered is not None:
         state = recovered
+    if state.get("next_action") == "manual_recovery":
+        return state
+    state, diagnosis_recovery = _recover_diagnosis_publish(run_root, state)
+    if diagnosis_recovery in {"recovered", "cleaned", "manual"}:
+        return state
+    state, direction_recovery, _direction_aggregate = (
+        _recover_reviewer_checkpoint(run_root, state, "direction")
+    )
+    if direction_recovery in {"waiting", "cleaned", "manual"}:
+        return state
+    state, final_recovery, _final_aggregate = (
+        _recover_reviewer_checkpoint(run_root, state, "final")
+    )
+    if final_recovery == "manual":
+        return state
     if state["next_action"] == "collect_evidence":
         return _collect_active_diagnosis_evidence_unlocked(control, run_root)
     if state["next_action"] == "edit_then_evaluate" and (

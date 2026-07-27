@@ -1507,6 +1507,569 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     helper.controller._canonical_digest(context),
                 )
 
+    def test_diagnosis_publish_recovers_one_complete_bundle(self) -> None:
+        for mode in ("middle-artifact", "cleanup", "ledger-drift"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                helper = workload_fixtures.WorkloadRoundTests()
+                helper.setUp()
+                control, run_dir, _project = helper._workspace(root)
+                workload_fixtures._enable_v2_readiness(control, root)
+                workload_fixtures._enable_active_diagnosis(control, root)
+                helper.controller.start_run(control, run_dir)
+                helper._authorize_active_run(
+                    control,
+                    run_dir,
+                    f"grant-diagnosis-publish-{mode}",
+                )
+                hypothesis, request = helper._active_proposal(run_dir)
+                active = run_dir / "active_diagnosis"
+                intent_path = active / "diagnosis_publish_intent.json"
+                interrupted = False
+
+                if mode == "cleanup":
+                    original_remove = helper.controller._remove_path
+
+                    def interrupt_cleanup(path):
+                        nonlocal interrupted
+                        if Path(path) == intent_path and not interrupted:
+                            interrupted = True
+                            raise OSError("interrupted diagnosis cleanup")
+                        return original_remove(path)
+
+                    fault = mock.patch.object(
+                        helper.controller,
+                        "_remove_path",
+                        side_effect=interrupt_cleanup,
+                    )
+                    message = "interrupted diagnosis cleanup"
+                else:
+                    original_atomic = helper.controller._atomic_json
+
+                    def interrupt_middle(path, value):
+                        nonlocal interrupted
+                        result = original_atomic(path, value)
+                        if (
+                            Path(path) == active / "evidence_selection.json"
+                            and intent_path.is_file()
+                            and not interrupted
+                        ):
+                            interrupted = True
+                            raise OSError(
+                                "interrupted diagnosis middle artifact"
+                            )
+                        return result
+
+                    fault = mock.patch.object(
+                        helper.controller,
+                        "_atomic_json",
+                        side_effect=interrupt_middle,
+                    )
+                    message = "interrupted diagnosis middle artifact"
+
+                with fault, self.assertRaisesRegex(OSError, message):
+                    helper.controller.register_active_diagnosis_proposal(
+                        control,
+                        run_dir,
+                        hypothesis,
+                        request,
+                    )
+
+                intent = json.loads(intent_path.read_text("utf-8"))
+                self.assertEqual(
+                    set(intent),
+                    {
+                        "schema_version",
+                        "base_state_sha256",
+                        "base_ledger_sequence",
+                        "base_ledger_head_sha256",
+                        "direction_review_complete_sha256",
+                        "diagnosis_context",
+                        "knowledge_adaptation",
+                        "hypothesis_generation",
+                        "hypothesis_result",
+                        "request_set",
+                        "evidence_selection",
+                        "decision",
+                        "investment_brief",
+                        "proposal_ledger_path",
+                        "proposal_ledger_event",
+                        "target_state",
+                        "created_at_epoch",
+                    },
+                )
+                target_state = copy.deepcopy(intent["target_state"])
+                if mode == "ledger-drift":
+                    foreign = copy.deepcopy(intent["proposal_ledger_event"])
+                    foreign["payload_sha256"] = "f" * 64
+                    helper.controller._atomic_json(
+                        run_dir / intent["proposal_ledger_path"],
+                        foreign,
+                    )
+                    recovered = helper.controller.resume_run(run_dir)
+                    self.assertEqual(
+                        (recovered["status"], recovered["next_action"]),
+                        ("manual_recovery_required", "manual_recovery"),
+                    )
+                    self.assertTrue(intent_path.is_file())
+                    continue
+
+                with mock.patch.object(
+                    helper.controller,
+                    "_load_evidence_selector_module",
+                    side_effect=AssertionError(
+                        "diagnosis selection reran during publish recovery"
+                    ),
+                ), mock.patch.object(
+                    helper.controller,
+                    "_load_diagnostic_decision_module",
+                    side_effect=AssertionError(
+                        "diagnosis decision reran during publish recovery"
+                    ),
+                ):
+                    recovered = helper.controller.resume_run(run_dir)
+
+                self.assertEqual(recovered, target_state)
+                self.assertEqual(
+                    helper.controller.read_run_state(run_dir),
+                    target_state,
+                )
+                self.assertFalse(intent_path.exists())
+                fixed_artifacts = {
+                    run_dir / "diagnosis_context.json": intent[
+                        "diagnosis_context"
+                    ],
+                    active / "knowledge_adaptation.json": intent[
+                        "knowledge_adaptation"
+                    ],
+                    active
+                    / "hypothesis_generations"
+                    / (
+                        intent["hypothesis_generation"][
+                            "hypothesis_set_sha256"
+                        ]
+                        + ".json"
+                    ): intent["hypothesis_generation"],
+                    active / "hypothesis_result.json": intent[
+                        "hypothesis_result"
+                    ],
+                    active / "request_set.json": intent["request_set"],
+                    active / "evidence_selection.json": intent[
+                        "evidence_selection"
+                    ],
+                    active / "decision.json": intent["decision"],
+                    active / "investment_brief.json": intent[
+                        "investment_brief"
+                    ],
+                    run_dir / intent["proposal_ledger_path"]: intent[
+                        "proposal_ledger_event"
+                    ],
+                }
+                for path, expected in fixed_artifacts.items():
+                    self.assertEqual(
+                        json.loads(path.read_text("utf-8")),
+                        expected,
+                    )
+                events = helper.controller._verify_active_diagnosis_ledger(
+                    run_dir
+                )
+                self.assertEqual(
+                    sum(
+                        item["event_type"] == "proposal"
+                        for item in events
+                    ),
+                    1,
+                )
+
+    def test_reviewer_checkpoint_is_exactly_once_for_direction_and_final(
+        self,
+    ) -> None:
+        wait_seconds = 0.25
+
+        def reviewer_config() -> list[dict]:
+            return [
+                {
+                    "provider": "google-ai-mode",
+                    "underlying_model": "safe-model",
+                    "argv": ["controller-managed-reviewer"],
+                    "timeout_seconds": 5,
+                    "include_diff": True,
+                }
+            ]
+
+        def unavailable_aggregate(_configs, request, *_args, **kwargs) -> dict:
+            return {
+                "schema_version": "cuda-workload-optimizer/review-aggregate-v1",
+                "status": "unavailable",
+                "request_digest": request["request_digest"],
+                "trigger": kwargs.get("trigger", "final"),
+                "target_completed_provider_count": 1,
+                "providers_requested": ["google-ai-mode"],
+                "providers_completed": [],
+                "failed_providers": ["google-ai-mode"],
+                "heterogeneous_models": [],
+                "total_timeout_seconds": float(
+                    kwargs.get("total_timeout_seconds", 5.0)
+                ),
+                "total_wait_seconds": wait_seconds,
+                "reviews": [
+                    {
+                        "provider": "google-ai-mode",
+                        "underlying_model": "safe-model",
+                        "status": "unavailable",
+                        "response": None,
+                        "failure": "provider unavailable",
+                        "duration_seconds": wait_seconds,
+                    }
+                ],
+            }
+
+        def active_setup(root: Path):
+            helper = workload_fixtures.WorkloadRoundTests()
+            helper.setUp()
+            control, run_dir, project = helper._workspace(root)
+            workload_fixtures._enable_v2_readiness(control, root)
+            workload_fixtures._enable_active_diagnosis(control, root)
+            control["reviewers"] = reviewer_config()
+            helper.controller.start_run(control, run_dir)
+            helper._authorize_active_run(
+                control,
+                run_dir,
+                f"grant-review-{root.name}",
+            )
+            return helper, control, run_dir, project
+
+        def final_setup(root: Path):
+            helper, control, run_dir, project = active_setup(root)
+            reviewer = helper.controller._load_reviewer_module()
+            with mock.patch.object(
+                reviewer,
+                "run_prioritized_reviewers",
+                side_effect=unavailable_aggregate,
+            ):
+                ready = helper._register_supported_active_direction(
+                    control,
+                    run_dir,
+                )
+            self.assertEqual(ready["next_action"], "register_change")
+            decision = json.loads(
+                (
+                    run_dir
+                    / "active_diagnosis"
+                    / "decision.json"
+                ).read_text("utf-8")
+            )
+            change = helper._change()
+            change["diagnosis_ids"] = [
+                decision["next_action"]["hypothesis_id"]
+            ]
+            helper.controller.register_change(control, run_dir, change)
+            (project / "configs" / "value.json").write_text(
+                '{"workers": 8}\n',
+                encoding="utf-8",
+            )
+            return helper, control, run_dir, project
+
+        for kind in ("direction", "final"):
+            for boundary in ("after-call", "cleanup"):
+                with self.subTest(
+                    kind=kind,
+                    boundary=boundary,
+                ), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp).resolve()
+                    if kind == "direction":
+                        helper, control, run_dir, _project = active_setup(root)
+                        hypothesis, request = helper._active_proposal(run_dir)
+                        operation = lambda: (
+                            helper.controller.register_active_diagnosis_proposal(
+                                control,
+                                run_dir,
+                                hypothesis,
+                                request,
+                            )
+                        )
+                        review_root = (
+                            run_dir
+                            / "active_diagnosis"
+                            / "direction_review"
+                        )
+                    else:
+                        helper, _control, run_dir, _project = final_setup(root)
+                        operation = lambda: helper.controller.evaluate_change(
+                            run_dir
+                        )
+                        review_root = run_dir / "final_review"
+                    reviewer = helper.controller._load_reviewer_module()
+                    provider_starting_spend = {}
+
+                    def panel_result(*args, **kwargs):
+                        provider_starting_spend.setdefault(
+                            "value",
+                            helper.controller.read_run_state(run_dir)[
+                                "controlled_spend_seconds"
+                            ],
+                        )
+                        return unavailable_aggregate(*args, **kwargs)
+
+                    panel = mock.Mock(side_effect=panel_result)
+                    starting = helper.controller.read_run_state(run_dir)
+                    starting_spend = starting["controlled_spend_seconds"]
+                    complete_path = review_root / "complete.json"
+                    interrupted = False
+
+                    if boundary == "after-call":
+                        original_write_state = helper.controller._write_state
+
+                        def interrupt_consume(path, value):
+                            nonlocal interrupted
+                            should_interrupt = complete_path.is_file()
+                            if kind == "direction":
+                                should_interrupt = (
+                                    should_interrupt
+                                    and value.get(
+                                        "diagnosis_publish_intent_sha256"
+                                    )
+                                    is not None
+                                )
+                            else:
+                                complete = (
+                                    json.loads(
+                                        complete_path.read_text("utf-8")
+                                    )
+                                    if complete_path.is_file()
+                                    else {}
+                                )
+                                should_interrupt = (
+                                    should_interrupt
+                                    and value.get(
+                                        "review_call_completions", {}
+                                    ).get(complete.get("review_id"))
+                                    == helper.controller._canonical_digest(
+                                        complete
+                                    )
+                                )
+                            if should_interrupt and not interrupted:
+                                interrupted = True
+                                raise OSError(
+                                    f"interrupted {kind} review consumption"
+                                )
+                            return original_write_state(path, value)
+
+                        fault = mock.patch.object(
+                            helper.controller,
+                            "_write_state",
+                            side_effect=interrupt_consume,
+                        )
+                    else:
+                        original_remove = helper.controller._remove_path
+
+                        def interrupt_cleanup(path):
+                            nonlocal interrupted
+                            if (
+                                Path(path) == review_root / "intent.json"
+                                and not interrupted
+                            ):
+                                interrupted = True
+                                raise OSError(
+                                    f"interrupted {kind} review cleanup"
+                                )
+                            return original_remove(path)
+
+                        fault = mock.patch.object(
+                            helper.controller,
+                            "_remove_path",
+                            side_effect=interrupt_cleanup,
+                        )
+
+                    with mock.patch.object(
+                        reviewer,
+                        "run_prioritized_reviewers",
+                        panel,
+                    ), fault, self.assertRaisesRegex(
+                        OSError,
+                        f"interrupted {kind} review",
+                    ):
+                        operation()
+
+                    self.assertEqual(panel.call_count, 1)
+                    prepared_complete = json.loads(
+                        complete_path.read_text("utf-8")
+                    )
+                    if kind == "direction" and boundary == "after-call":
+                        waiting = helper.controller.resume_run(run_dir)
+                        self.assertEqual(
+                            waiting["next_action"],
+                            "propose_hypotheses",
+                        )
+                        self.assertEqual(
+                            waiting["controlled_spend_seconds"],
+                            starting_spend,
+                        )
+                        foreign = copy.deepcopy(hypothesis)
+                        foreign["set_id"] = "foreign-review-proposal"
+                        with self.assertRaisesRegex(
+                            helper.controller.ValidationError,
+                            "same proposal|review",
+                        ):
+                            helper.controller.register_active_diagnosis_proposal(
+                                control,
+                                run_dir,
+                                foreign,
+                                request,
+                            )
+                        result = (
+                            helper.controller.register_active_diagnosis_proposal(
+                                control,
+                                run_dir,
+                                hypothesis,
+                                request,
+                            )
+                        )
+                    else:
+                        result = helper.controller.resume_run(run_dir)
+
+                    committed = helper.controller.read_run_state(run_dir)
+                    complete = json.loads(
+                        (
+                            review_root
+                            / "generations"
+                            / "completions"
+                            / (
+                                next(
+                                    value
+                                    for review_id, value in committed[
+                                        "review_call_completions"
+                                    ].items()
+                                    if review_id
+                                    == prepared_complete["review_id"]
+                                )
+                                + ".json"
+                            )
+                        ).read_text("utf-8")
+                    )
+                    self.assertEqual(panel.call_count, 1)
+                    self.assertAlmostEqual(
+                        committed["controlled_spend_seconds"],
+                        provider_starting_spend["value"] + wait_seconds,
+                    )
+                    self.assertEqual(
+                        committed["review_call_completions"][
+                            complete["review_id"]
+                        ],
+                        helper.controller._canonical_digest(complete),
+                    )
+                    self.assertFalse(
+                        (review_root / "intent.json").exists()
+                    )
+                    self.assertFalse(
+                        (review_root / "complete.json").exists()
+                    )
+                    if kind == "direction":
+                        self.assertEqual(
+                            result["next_action"],
+                            "collect_evidence",
+                        )
+                    else:
+                        self.assertEqual(result["status"], "promoted")
+
+        with self.subTest(kind="direction", boundary="unknown"), (
+            tempfile.TemporaryDirectory()
+        ) as tmp:
+            root = Path(tmp).resolve()
+            helper, control, run_dir, _project = active_setup(root)
+            hypothesis, request = helper._active_proposal(run_dir)
+            reviewer = helper.controller._load_reviewer_module()
+            before = helper.controller.read_run_state(run_dir)
+            with mock.patch.object(
+                reviewer,
+                "run_prioritized_reviewers",
+                side_effect=KeyboardInterrupt(),
+            ), self.assertRaises(KeyboardInterrupt):
+                helper.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    hypothesis,
+                    request,
+                )
+            with mock.patch.object(
+                reviewer,
+                "run_prioritized_reviewers",
+                side_effect=AssertionError("unknown review reran"),
+            ) as panel:
+                recovered = helper.controller.resume_run(run_dir)
+            panel.assert_not_called()
+            self.assertEqual(
+                (recovered["status"], recovered["next_action"]),
+                ("manual_recovery_required", "manual_recovery"),
+            )
+            self.assertEqual(
+                recovered["controlled_spend_seconds"],
+                before["controlled_spend_seconds"],
+            )
+
+        with self.subTest(kind="final", boundary="unknown-abandon"), (
+            tempfile.TemporaryDirectory()
+        ) as tmp:
+            root = Path(tmp).resolve()
+            helper, _control, run_dir, _project = final_setup(root)
+            reviewer = helper.controller._load_reviewer_module()
+            observed = {}
+
+            def interrupt_final(*_args, **_kwargs):
+                observed["state"] = helper.controller.read_run_state(run_dir)
+                raise KeyboardInterrupt()
+
+            with mock.patch.object(
+                reviewer,
+                "run_prioritized_reviewers",
+                side_effect=interrupt_final,
+            ), self.assertRaises(KeyboardInterrupt):
+                helper.controller.evaluate_change(run_dir)
+            abandoned = helper.controller.abandon(run_dir)
+            self.assertEqual(abandoned["status"], "abandoned")
+            self.assertIn(
+                "review_call_intent_sha256",
+                helper.controller.read_run_state(run_dir),
+            )
+            self.assertEqual(
+                helper.controller.read_run_state(run_dir)[
+                    "controlled_spend_seconds"
+                ],
+                observed["state"]["controlled_spend_seconds"],
+            )
+            self.assertTrue((run_dir / "final_review" / "intent.json").is_file())
+            self.assertFalse(
+                (run_dir / "final_review" / "complete.json").exists()
+            )
+
+        with self.subTest(kind="final", boundary="standalone-skipped"), (
+            tempfile.TemporaryDirectory()
+        ) as tmp:
+            root = Path(tmp).resolve()
+            helper = workload_fixtures.WorkloadRoundTests()
+            helper.setUp()
+            control, run_dir, _project = helper._workspace(root)
+            control["reviewers"] = reviewer_config()
+            helper.controller.start_run(control, run_dir)
+            reviewer = helper.controller._load_reviewer_module()
+            panel = mock.Mock(side_effect=unavailable_aggregate)
+            with mock.patch.object(
+                reviewer,
+                "run_prioritized_reviewers",
+                panel,
+            ):
+                skipped = helper.controller.review_change(
+                    control,
+                    run_dir,
+                    helper._change(),
+                )
+            panel.assert_not_called()
+            self.assertEqual(skipped["status"], "skipped")
+            self.assertEqual(
+                skipped["execution"]["reason"],
+                "controller_managed",
+            )
+
     def test_raw_external_knowledge_is_normalized_and_selects_one_local_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

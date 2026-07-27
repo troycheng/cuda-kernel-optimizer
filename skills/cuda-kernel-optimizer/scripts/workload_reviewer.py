@@ -21,6 +21,7 @@ from typing import Any
 
 
 REQUEST_SCHEMA = "cuda-workload-optimizer/review-request-v1"
+SUMMARY_SCHEMA = "cuda-workload-optimizer/review-summary-v1"
 RESPONSE_SCHEMA = "cuda-workload-optimizer/review-v1"
 ARTIFACT_SCHEMA = "cuda-workload-optimizer/review-artifact-v1"
 AGGREGATE_SCHEMA = "cuda-workload-optimizer/review-aggregate-v1"
@@ -52,7 +53,26 @@ _SECRET_NAME = re.compile(
 _SECRET_LOG = re.compile(
     r'''(?i)(["']?\b[A-Z0-9_]{0,128}(?:API[_-]?KEY|AUTH|COOKIE|CREDENTIAL|PASSWORD|SECRET|TOKEN)[A-Z0-9_]{0,128}\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n,;}]+)'''
 )
-_REQUEST_EXECUTION_FIELDS = {"callback", "command"}
+_REVIEW_KINDS = {"direction", "final"}
+_QUESTIONS = {"direction": "challenge_direction", "final": "challenge_final_evidence"}
+_EXECUTION_LAYERS = {
+    "gpu", "framework", "transfer", "cpu_data", "communication", "io", "environment",
+}
+_CLAIM_LAYERS = {"kernel", "runtime", "workload", "environment", "system"}
+_CONFIDENCE_BUCKETS = {"low", "medium", "high", "inconclusive"}
+_EVIDENCE_KINDS = {
+    "timeline", "framework", "cpu_data", "transfer",
+    "communication", "io", "environment", "custom",
+}
+_RISK_LEVELS = {"none", "low", "medium", "high"}
+_EVALUATION_STATUSES = {"evaluated", "not_evaluated", "failed", "skipped", "unknown"}
+_PRIMARY_STATUSES = {"confirmed_win", "inconclusive", "regression", "failed", "unknown"}
+_CONSTRAINT_STATUSES = {"passed", "failed", "skipped", "unknown"}
+_DIRECTION_SELECTION_STATUSES = {"selected", "evidence_gap", "blocked", "skipped", "unknown"}
+_ARTIFACT_HASH_NAMES = {
+    "performance_model.json", "hypothesis_result.json", "evidence_selection.json",
+    "diagnosis.json", "change_set.json", "candidate.diff",
+}
 _SAFE_ENV = {
     "HOME",
     "LANG",
@@ -75,29 +95,6 @@ def _canonical_bytes(value: Any) -> bytes:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
-
-
-def _json_copy(value: Any, field: str) -> Any:
-    if value is None or type(value) in {bool, str, int}:
-        return copy.deepcopy(value)
-    if type(value) is float:
-        if not math.isfinite(value):
-            raise ReviewerError(f"{field} numbers must be finite")
-        return value
-    if type(value) is list:
-        return [_json_copy(item, f"{field}[]") for item in value]
-    if type(value) is dict:
-        result = {}
-        for key, item in value.items():
-            if type(key) is not str or not key:
-                raise ReviewerError(f"{field} keys must be non-empty strings")
-            if _SECRET_NAME.search(key):
-                raise ReviewerError(f"{field} must not contain credentials: {key}")
-            if key.lower() in _REQUEST_EXECUTION_FIELDS:
-                raise ReviewerError(f"{field} must not contain execution field: {key}")
-            result[key] = _json_copy(item, f"{field}.{key}")
-        return result
-    raise ReviewerError(f"{field} must contain JSON-compatible values")
 
 
 def _object(value: Any, field: str) -> dict:
@@ -130,6 +127,182 @@ def _canonical_model(model: str) -> str:
     return model.strip().lower()
 
 
+def _source_number(value: Any, *, minimum: float = -1.0e18) -> float:
+    if type(value) not in {int, float} or not math.isfinite(float(value)):
+        return 0.0
+    return min(1.0e18, max(minimum, float(value)))
+
+
+def _source_enums(value: Any, allowed: set[str], maximum: int = 16) -> list[str]:
+    if type(value) is not list:
+        return []
+    return list(
+        dict.fromkeys(item for item in value if type(item) is str and item in allowed)
+    )[:maximum]
+
+
+def _source_object(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _source_enum(value: Any, allowed: set[str], fallback: Any) -> Any:
+    return value if type(value) is str and value in allowed else fallback
+
+
+def _validate_number(value: Any, field: str, minimum: float) -> float:
+    if (
+        type(value) not in {int, float}
+        or not math.isfinite(float(value))
+        or not minimum <= float(value) <= 1.0e18
+    ):
+        raise ReviewerError(f"{field} must be a bounded finite number")
+    return float(value)
+
+
+def _validate_enums(
+    value: Any, field: str, allowed: set[str], maximum: int = 16
+) -> list[str]:
+    if (
+        type(value) is not list
+        or len(value) > maximum
+        or len(value) != len({item for item in value if type(item) is str})
+        or any(type(item) is not str or item not in allowed for item in value)
+    ):
+        raise ReviewerError(f"{field} contains an invalid enum")
+    return list(value)
+
+
+def _validate_exact(value: Any, fields: set[str], field: str) -> dict:
+    result = _object(value, field)
+    _closed(result, fields, field)
+    _required(result, fields, field)
+    return result
+
+
+def _validate_review_summary(value: Mapping[str, Any]) -> dict:
+    summary = _validate_exact(
+        value,
+        {
+            "schema_version", "review_kind", "question", "performance",
+            "direction", "final", "artifact_hashes",
+        },
+        "review_summary",
+    )
+    kind = summary["review_kind"]
+    if (
+        summary["schema_version"] != SUMMARY_SCHEMA
+        or type(kind) is not str
+        or kind not in _REVIEW_KINDS
+        or summary["question"] != _QUESTIONS.get(kind)
+    ):
+        raise ReviewerError("review_summary identity is invalid")
+    performance_fields = {
+        "window_duration_us", "minimum_effect_us",
+        "layer_benefit_upper_bound_us", "observed_layers",
+        "missing_layers", "critical_path_layers", "uncertainty_kinds",
+    }
+    performance = _validate_exact(
+        summary["performance"], performance_fields, "review_summary.performance"
+    )
+    for name in (
+        "window_duration_us", "minimum_effect_us", "layer_benefit_upper_bound_us"
+    ):
+        _validate_number(performance[name], f"review_summary.performance.{name}", 0.0)
+    for name, allowed in (
+        ("observed_layers", _EXECUTION_LAYERS),
+        ("missing_layers", _EXECUTION_LAYERS),
+        ("critical_path_layers", _EXECUTION_LAYERS),
+        ("uncertainty_kinds", _EVIDENCE_KINDS),
+    ):
+        _validate_enums(performance[name], f"review_summary.performance.{name}", allowed)
+    if kind == "direction":
+        names = {
+            "candidate_count", "claim_layers", "confidence_buckets",
+            "support_evidence_count", "oppose_evidence_count",
+            "missing_evidence_count", "selection_status",
+            "selected_evidence_kind", "declared_cost_upper_bound_seconds",
+        }
+        item = _validate_exact(summary["direction"], names, "review_summary.direction")
+        if summary["final"] is not None:
+            raise ReviewerError("review_summary.final must be null for direction")
+        for name in (
+            "candidate_count", "support_evidence_count",
+            "oppose_evidence_count", "missing_evidence_count",
+        ):
+            if type(item[name]) is not int or not 0 <= item[name] <= 131072:
+                raise ReviewerError(f"review_summary.direction.{name} is invalid")
+        _validate_enums(item["claim_layers"], "review_summary.direction.claim_layers", _CLAIM_LAYERS)
+        _validate_enums(
+            item["confidence_buckets"],
+            "review_summary.direction.confidence_buckets",
+            _CONFIDENCE_BUCKETS,
+        )
+        if (
+            type(item["selection_status"]) is not str
+            or item["selection_status"] not in _DIRECTION_SELECTION_STATUSES
+            or (
+                item["selected_evidence_kind"] is not None
+                and (
+                    type(item["selected_evidence_kind"]) is not str
+                    or item["selected_evidence_kind"] not in _EVIDENCE_KINDS
+                )
+            )
+        ):
+            raise ReviewerError("review_summary.direction enum is invalid")
+        _validate_number(
+            item["declared_cost_upper_bound_seconds"],
+            "review_summary.direction.declared_cost_upper_bound_seconds",
+            0.0,
+        )
+    else:
+        names = {
+            "scope_kind", "risk_level", "evaluation_status", "primary_status",
+            "constraint_count", "constraints_passed", "observed_effect_pct",
+            "ci_low_pct", "ci_high_pct", "diff_present",
+            "candidate_diff_sha256",
+        }
+        item = _validate_exact(summary["final"], names, "review_summary.final")
+        if summary["direction"] is not None:
+            raise ReviewerError("review_summary.direction must be null for final")
+        if (
+            type(item["scope_kind"]) is not str
+            or item["scope_kind"] not in {"project", "environment", "isolated_environment"}
+            or type(item["risk_level"]) is not str
+            or item["risk_level"] not in _RISK_LEVELS
+            or type(item["evaluation_status"]) is not str
+            or item["evaluation_status"] not in _EVALUATION_STATUSES
+            or type(item["primary_status"]) is not str
+            or item["primary_status"] not in _PRIMARY_STATUSES
+            or type(item["constraint_count"]) is not int
+            or not 0 <= item["constraint_count"] <= 1024
+            or type(item["constraints_passed"]) is not bool
+            or type(item["diff_present"]) is not bool
+        ):
+            raise ReviewerError("review_summary.final enum, count, or flag is invalid")
+        for name in ("observed_effect_pct", "ci_low_pct", "ci_high_pct"):
+            _validate_number(item[name], f"review_summary.final.{name}", -1.0e18)
+        digest = item["candidate_diff_sha256"]
+        if digest is not None and (
+            type(digest) is not str or _SHA256.fullmatch(digest) is None
+        ):
+            raise ReviewerError("review_summary.final.candidate_diff_sha256 is invalid")
+    hashes = _object(summary["artifact_hashes"], "review_summary.artifact_hashes")
+    if set(hashes) - _ARTIFACT_HASH_NAMES or any(
+        type(digest) is not str or _SHA256.fullmatch(digest) is None
+        for digest in hashes.values()
+    ):
+        raise ReviewerError("review_summary.artifact_hashes is invalid")
+    return copy.deepcopy(summary)
+
+
+def _safe_request(summary: Mapping[str, Any]) -> dict:
+    base = {
+        "schema_version": REQUEST_SCHEMA,
+        "review_summary": _validate_review_summary(summary),
+    }
+    return {**base, "request_digest": _digest(base)}
+
+
 def build_review_request(
     *,
     diagnosis: Mapping[str, Any],
@@ -138,73 +311,134 @@ def build_review_request(
     experiment: Mapping[str, Any],
     artifact_hashes: Mapping[str, str],
 ) -> dict:
-    """Build a detached request whose digest covers every advisory input."""
+    """Reduce local facts to the one closed provider request envelope."""
+    diagnosis = _object(diagnosis, "diagnosis")
+    change_set = _object(change_set, "change_set")
+    experiment = _object(experiment, "experiment")
     hashes = _object(artifact_hashes, "artifact_hashes")
-    for name, digest in hashes.items():
-        _string(name, "artifact_hashes key", maximum=512)
-        if type(digest) is not str or _SHA256.fullmatch(digest) is None:
-            raise ReviewerError(f"artifact_hashes.{name} must be a SHA-256 digest")
-    diff = redacted_diff
-    if type(diff) is not str:
-        raise ReviewerError("redacted_diff must be a string")
-    if len(diff.encode("utf-8")) > 256 * 1024:
-        raise ReviewerError("redacted_diff exceeds 262144 bytes")
-    base = {
-        "schema_version": REQUEST_SCHEMA,
-        "diagnosis": _json_copy(_object(diagnosis, "diagnosis"), "diagnosis"),
-        "change_set": _json_copy(_object(change_set, "change_set"), "change_set"),
-        "redacted_diff": diff,
-        "experiment": _json_copy(_object(experiment, "experiment"), "experiment"),
-        "artifact_hashes": copy.deepcopy(hashes),
+    if type(redacted_diff) is not str or len(redacted_diff.encode("utf-8")) > 256 * 1024:
+        raise ReviewerError("redacted_diff must be a string of at most 262144 bytes")
+    if set(hashes) - _ARTIFACT_HASH_NAMES or any(
+        type(digest) is not str or _SHA256.fullmatch(digest) is None
+        for digest in hashes.values()
+    ):
+        raise ReviewerError("artifact_hashes is invalid")
+    kind = _source_enum(diagnosis.get("review_kind"), _REVIEW_KINDS, "final")
+    performance_source = _source_object(diagnosis.get("performance_summary"))
+    hypotheses = change_set.get("hypotheses")
+    hypotheses = hypotheses if type(hypotheses) is list else []
+    candidate = _source_object(change_set.get("candidate"))
+    selected = _source_object(experiment.get("selected_action"))
+    cost = _source_object(selected.get("cost"))
+    statuses = _source_enums(
+        experiment.get("constraint_statuses"), _CONSTRAINT_STATUSES, 32
+    )
+    direction = None
+    final = None
+    if kind == "direction":
+        def evidence_count(name: str) -> int:
+            return sum(
+                min(len(item.get(name, [])), 1024)
+                for item in hypotheses
+                if isinstance(item, Mapping) and type(item.get(name, [])) is list
+            )
+
+        direction = {
+            "candidate_count": min(len(hypotheses), 128),
+            "claim_layers": _source_enums(
+                [item.get("claim_layer") for item in hypotheses if isinstance(item, Mapping)],
+                _CLAIM_LAYERS,
+            ),
+            "confidence_buckets": _source_enums(
+                [item.get("confidence") for item in hypotheses if isinstance(item, Mapping)],
+                _CONFIDENCE_BUCKETS,
+            ),
+            "support_evidence_count": evidence_count("support_evidence_ids"),
+            "oppose_evidence_count": evidence_count("oppose_evidence_ids"),
+            "missing_evidence_count": evidence_count("missing_evidence_kinds"),
+            "selection_status": _source_enum(
+                experiment.get("selection_status"),
+                _DIRECTION_SELECTION_STATUSES,
+                "unknown",
+            ),
+            "selected_evidence_kind": _source_enum(
+                selected.get("evidence_kind"), _EVIDENCE_KINDS, None
+            ),
+            "declared_cost_upper_bound_seconds": _source_number(
+                cost.get("p90_seconds", selected.get("declared_cost_upper_bound_seconds")),
+                minimum=0.0,
+            ),
+        }
+    else:
+        final = {
+            "scope_kind": _source_enum(
+                change_set.get("scope"),
+                {"project", "environment", "isolated_environment"},
+                "project",
+            ),
+            "risk_level": _source_enum(change_set.get("risk"), _RISK_LEVELS, "none"),
+            "evaluation_status": _source_enum(
+                experiment.get("evaluation_status"), _EVALUATION_STATUSES, "unknown"
+            ),
+            "primary_status": _source_enum(
+                experiment.get("primary_status"), _PRIMARY_STATUSES, "unknown"
+            ),
+            "constraint_count": len(statuses),
+            "constraints_passed": bool(statuses) and set(statuses) == {"passed"},
+            "observed_effect_pct": _source_number(candidate.get("effect_pct")),
+            "ci_low_pct": _source_number(candidate.get("ci_low_pct")),
+            "ci_high_pct": _source_number(candidate.get("ci_high_pct")),
+            "diff_present": bool(redacted_diff),
+            "candidate_diff_sha256": hashes.get("candidate.diff"),
+        }
+    performance = {
+        name: _source_number(performance_source.get(name), minimum=0.0)
+        for name in (
+            "window_duration_us", "minimum_effect_us",
+            "layer_benefit_upper_bound_us",
+        )
     }
-    return {**base, "request_digest": _digest(base)}
+    for name, allowed in (
+        ("observed_layers", _EXECUTION_LAYERS),
+        ("missing_layers", _EXECUTION_LAYERS),
+        ("critical_path_layers", _EXECUTION_LAYERS),
+        ("uncertainty_kinds", _EVIDENCE_KINDS),
+    ):
+        source_name = "critical_path" if name == "critical_path_layers" else name
+        performance[name] = _source_enums(performance_source.get(source_name), allowed)
+    return _safe_request(
+        {
+            "schema_version": SUMMARY_SCHEMA,
+            "review_kind": kind,
+            "question": _QUESTIONS[kind],
+            "performance": performance,
+            "direction": direction,
+            "final": final,
+            "artifact_hashes": copy.deepcopy(hashes),
+        }
+    )
 
 
 def request_digest(request: Mapping[str, Any]) -> str:
-    """Recompute the digest of a review request without trusting its digest field."""
+    """Recompute the digest without trusting the request's digest field."""
     value = copy.deepcopy(_object(request, "request"))
     value.pop("request_digest", None)
     return _digest(value)
 
 
 def validate_review_request(value: Mapping[str, Any]) -> dict:
-    """Reject unsafe or malformed advisory input before a provider can start."""
-    request = _object(value, "review request")
-    fields = {
-        "schema_version",
-        "diagnosis",
-        "change_set",
-        "redacted_diff",
-        "experiment",
-        "artifact_hashes",
-        "request_digest",
-    }
-    _closed(request, fields, "review request")
-    _required(request, fields, "review request")
+    """Reject malformed advisory input before a provider can start."""
+    request = _validate_exact(
+        value,
+        {"schema_version", "review_summary", "request_digest"},
+        "review request",
+    )
     if request["schema_version"] != REQUEST_SCHEMA:
         raise ReviewerError(f"review request schema_version must be {REQUEST_SCHEMA}")
-    hashes = _object(request["artifact_hashes"], "artifact_hashes")
-    for name, digest in hashes.items():
-        _string(name, "artifact_hashes key", maximum=512)
-        if type(digest) is not str or _SHA256.fullmatch(digest) is None:
-            raise ReviewerError(f"artifact_hashes.{name} must be a SHA-256 digest")
-    diff = request["redacted_diff"]
-    if type(diff) is not str:
-        raise ReviewerError("redacted_diff must be a string")
-    if len(diff.encode("utf-8")) > 256 * 1024:
-        raise ReviewerError("redacted_diff exceeds 262144 bytes")
-    base = {
-        "schema_version": REQUEST_SCHEMA,
-        "diagnosis": _json_copy(_object(request["diagnosis"], "diagnosis"), "diagnosis"),
-        "change_set": _json_copy(_object(request["change_set"], "change_set"), "change_set"),
-        "redacted_diff": diff,
-        "experiment": _json_copy(_object(request["experiment"], "experiment"), "experiment"),
-        "artifact_hashes": copy.deepcopy(hashes),
-    }
-    expected = _digest(base)
-    if request["request_digest"] != expected:
+    safe = _safe_request(request["review_summary"])
+    if request["request_digest"] != safe["request_digest"]:
         raise ReviewerError("review request digest is invalid")
-    return {**base, "request_digest": expected}
+    return safe
 
 
 def validate_review_response(
@@ -848,14 +1082,21 @@ def run_prioritized_reviewers(
     return aggregate
 
 
-def write_skipped_review(request: Mapping[str, Any], run_dir: str | os.PathLike[str]) -> dict:
+def write_skipped_review(
+    request: Mapping[str, Any],
+    run_dir: str | os.PathLike[str],
+    *,
+    reason: str = "reviewer not configured",
+) -> dict:
     """Record that no reviewer was configured without changing the decision path."""
     request = validate_review_request(request)
+    if reason not in {"reviewer not configured", "controller_managed"}:
+        raise ReviewerError("skipped review reason is invalid")
     artifact = _artifact(
         request,
         status="skipped",
         response=None,
-        execution={"failure": None, "reason": "reviewer not configured"},
+        execution={"failure": None, "reason": reason},
     )
     _atomic_json(Path(run_dir).expanduser().resolve(strict=False) / "review.json", artifact)
     return artifact
