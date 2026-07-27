@@ -2489,15 +2489,18 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             wall_limited["deadline_epoch"] = time.time() + 0.5
             helper.controller._write_state(run_dir, wall_limited)
             observed_timeouts = []
+            observed_returncodes = []
             original_wait = helper.controller._wait_process_with_heartbeats
 
             def observe_wait(process, *, timeout_seconds, **kwargs):
                 observed_timeouts.append(float(timeout_seconds))
-                return original_wait(
+                outcome = original_wait(
                     process,
                     timeout_seconds=timeout_seconds,
                     **kwargs,
                 )
+                observed_returncodes.append(process.returncode)
+                return outcome
 
             try:
                 with mock.patch.object(
@@ -2528,6 +2531,11 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     remaining_authorization,
                 )
                 self.assertTrue(execution["timed_out"])
+                self.assertIsInstance(observed_returncodes[0], int)
+                self.assertEqual(
+                    execution["exit_code"],
+                    observed_returncodes[0],
+                )
                 self.assertEqual(
                     completion["execution_sha256"],
                     helper.controller._canonical_digest(execution),

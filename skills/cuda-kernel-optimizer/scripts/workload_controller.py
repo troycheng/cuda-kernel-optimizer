@@ -1149,12 +1149,22 @@ def _process_group_exists(process_group: int) -> bool:
     return True
 
 
-def _stop_group(process: Any, *, deadline_monotonic: float) -> None:
+def _stop_group(
+    process: Any,
+    *,
+    term_deadline_monotonic: float,
+    deadline_monotonic: float,
+) -> None:
     process_group = process.pid
+    term_deadline = float(term_deadline_monotonic)
     deadline = float(deadline_monotonic)
-    if not math.isfinite(deadline):
+    if (
+        not math.isfinite(term_deadline)
+        or not math.isfinite(deadline)
+        or term_deadline > deadline
+    ):
         raise ValidationError(
-            "process termination deadline must be finite"
+            "process termination deadlines are invalid"
         )
 
     try:
@@ -1162,7 +1172,7 @@ def _stop_group(process: Any, *, deadline_monotonic: float) -> None:
     except (ProcessLookupError, PermissionError):
         pass
     while _process_group_exists(process_group):
-        remaining = deadline - time.monotonic()
+        remaining = term_deadline - time.monotonic()
         if remaining <= 0.0:
             break
         process.poll()
@@ -1174,17 +1184,23 @@ def _stop_group(process: Any, *, deadline_monotonic: float) -> None:
             os.killpg(process_group, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-    remaining = deadline - time.monotonic()
-    if remaining > 0.0:
-        try:
-            process.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-    else:
+    while True:
         process.poll()
+        group_exists = _process_group_exists(process_group)
+        if process.returncode is not None and not group_exists:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            raise ValidationError(
+                "process group termination exceeded the safety deadline"
+            )
+        if process.returncode is None:
+            try:
+                process.wait(timeout=min(0.01, remaining))
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            time.sleep(min(0.01, remaining))
 
 
 def _wait_process_with_heartbeats(
@@ -1194,6 +1210,7 @@ def _wait_process_with_heartbeats(
     label: str,
     heartbeat_interval_seconds: float = 30.0,
     termination_grace_seconds: float = 0.25,
+    accounting_margin_seconds: float = 0.05,
     event_sink=None,
 ) -> tuple[int | None, bool, float, str]:
     """Wait visibly and preserve the existing process-group hard stop."""
@@ -1207,6 +1224,11 @@ def _wait_process_with_heartbeats(
     if not math.isfinite(termination_grace) or termination_grace <= 0:
         raise ValidationError(
             "process termination grace must be a positive finite number"
+        )
+    accounting_margin = float(accounting_margin_seconds)
+    if not math.isfinite(accounting_margin) or accounting_margin <= 0:
+        raise ValidationError(
+            "process accounting margin must be a positive finite number"
         )
     task = _identifier(label, "heartbeat label")
 
@@ -1224,26 +1246,32 @@ def _wait_process_with_heartbeats(
         remaining = timeout - elapsed
         if remaining <= 0:
             timed_out = True
+            term_deadline = time.monotonic() + termination_grace
             _stop_group(
                 process,
-                deadline_monotonic=time.monotonic() + termination_grace,
+                term_deadline_monotonic=term_deadline,
+                deadline_monotonic=term_deadline + accounting_margin,
             )
             break
         try:
             process.wait(timeout=min(interval, remaining))
             if _process_group_exists(process.pid):
+                term_deadline = time.monotonic() + termination_grace
                 _stop_group(
                     process,
-                    deadline_monotonic=time.monotonic() + termination_grace,
+                    term_deadline_monotonic=term_deadline,
+                    deadline_monotonic=term_deadline + accounting_margin,
                 )
             break
         except subprocess.TimeoutExpired:
             elapsed = max(0.0, time.monotonic() - started)
             if elapsed >= timeout:
                 timed_out = True
+                term_deadline = time.monotonic() + termination_grace
                 _stop_group(
                     process,
-                    deadline_monotonic=time.monotonic() + termination_grace,
+                    term_deadline_monotonic=term_deadline,
+                    deadline_monotonic=term_deadline + accounting_margin,
                 )
                 break
             emit(
@@ -6246,6 +6274,7 @@ def _run_active_evidence_adapter(
         process,
         timeout_seconds=timeout,
         termination_grace_seconds=termination_reserve,
+        accounting_margin_seconds=accounting_margin,
         label=f"evidence-{action['action_id']}",
         event_sink=events.append,
     )
