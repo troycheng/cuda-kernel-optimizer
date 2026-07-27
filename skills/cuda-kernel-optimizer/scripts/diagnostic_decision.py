@@ -438,12 +438,20 @@ def _investment_inputs(
         )
     if authorization is None:
         maximum = elapsed
+        max_risk = "high"
     else:
+        authorized = _object(authorization, "authorization")
         maximum = _number(
-            _object(authorization, "authorization").get("max_seconds"),
+            authorized.get("max_seconds"),
             "authorization.max_seconds",
         )
-    return {"max_seconds": maximum}, {"elapsed_seconds": elapsed}
+        max_risk = authorized.get("max_risk")
+        if max_risk not in {"none", "low", "medium", "high"}:
+            raise ValidationError("authorization.max_risk is unsupported")
+    return {
+        "max_seconds": maximum,
+        "max_risk": max_risk,
+    }, {"elapsed_seconds": elapsed}
 
 
 def _direction_portfolio(
@@ -862,14 +870,23 @@ def decide_next_step(
                     "authorization_reason": unavailable_reason,
                 }
         elif adaptive["decision"] == "REVIEW_REQUIRED":
-            decision, reason, checkpoint = (
-                "REVIEW_REQUIRED",
-                "cumulative_authorization_exceeded",
-                "after_authorization_decision",
-            )
+            if adaptive["reason"] == "risk_authorization_exceeded":
+                decision, reason, checkpoint = (
+                    "REVIEW_REQUIRED",
+                    "evidence_risk_exceeds_authorization",
+                    "after_authorization_decision",
+                )
+                authorization_reason = "risk_exceeds_authorization"
+            else:
+                decision, reason, checkpoint = (
+                    "REVIEW_REQUIRED",
+                    "cumulative_authorization_exceeded",
+                    "after_authorization_decision",
+                )
+                authorization_reason = "cumulative_time_exceeded"
             next_action = {
                 "action_id": None if blocked_investment is None else blocked_investment["action_id"],
-                "authorization_reason": "cumulative_time_exceeded",
+                "authorization_reason": authorization_reason,
             }
         elif adaptive["decision"] == "STOP":
             decision, reason, checkpoint = "STOP", adaptive["reason"], "terminal"

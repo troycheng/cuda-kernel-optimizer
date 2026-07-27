@@ -84,8 +84,12 @@ def candidate_action(action_id: str, **kwargs) -> dict:
     return evidence_action(action_id, direction="z", **kwargs)
 
 
-def authorization(*, max_seconds: float = 3600.0) -> dict:
-    return {"max_seconds": max_seconds}
+def authorization(
+    *,
+    max_seconds: float = 3600.0,
+    max_risk: str = "high",
+) -> dict:
+    return {"max_seconds": max_seconds, "max_risk": max_risk}
 
 
 def spend(*, elapsed_seconds: float = 0.0) -> dict:

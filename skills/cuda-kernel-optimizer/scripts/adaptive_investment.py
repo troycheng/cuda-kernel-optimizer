@@ -239,10 +239,22 @@ def _actions(value: Sequence[Mapping[str, Any]], known_directions: set[str]) -> 
     return sorted(result, key=lambda item: item["action_id"])
 
 
-def _authorization(value: Mapping[str, Any], label: str) -> float:
-    if not isinstance(value, Mapping) or set(value) != {"max_seconds"}:
-        raise ValidationError(f"{label} must contain only max_seconds")
-    return _finite(value["max_seconds"], f"{label}.max_seconds", minimum=0.0)
+def _authorization(value: Mapping[str, Any], label: str) -> dict:
+    if not isinstance(value, Mapping) or set(value) != {
+        "max_seconds",
+        "max_risk",
+    }:
+        raise ValidationError(
+            f"{label} must contain only max_seconds and max_risk"
+        )
+    return {
+        "max_seconds": _finite(
+            value["max_seconds"],
+            f"{label}.max_seconds",
+            minimum=0.0,
+        ),
+        "max_risk": _level(value["max_risk"], f"{label}.max_risk"),
+    }
 
 
 def _spend(value: Mapping[str, Any]) -> float:
@@ -341,7 +353,7 @@ def decide_next_action(
 ) -> dict:
     """Return one evidence-authoritative next decision without side effects."""
     minimum = _finite(minimum_effect, "minimum_effect", minimum=0.0)
-    max_seconds = _authorization(authorization, "authorization")
+    authorized = _authorization(authorization, "authorization")
     elapsed = _spend(spend)
     portfolio = _directions(directions, minimum)
     by_id = {item["direction_id"]: item for item in portfolio}
@@ -380,7 +392,12 @@ def decide_next_action(
 
     chosen = min(undominated, key=_rank)
     projected = elapsed + chosen["p90_seconds"]
-    if projected > max_seconds:
+    if _LEVELS[chosen["risk"]] > _LEVELS[authorized["max_risk"]]:
+        return _result(
+            "REVIEW_REQUIRED", "risk_authorization_exceeded", portfolio,
+            blocked=chosen, projected=projected, skipped=skipped,
+        )
+    if projected > authorized["max_seconds"]:
         return _result(
             "REVIEW_REQUIRED", "authorization_exceeded", portfolio,
             blocked=chosen, projected=projected, skipped=skipped,

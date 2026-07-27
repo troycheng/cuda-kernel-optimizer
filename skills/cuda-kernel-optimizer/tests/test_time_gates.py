@@ -179,25 +179,22 @@ class TimeGateTests(unittest.TestCase):
         self.assertEqual(first["decision"], "RUN_STAGE")
         self.assertEqual(first["next_stage"], "formal_paired")
 
-    def test_follow_up_is_blocked_before_action_when_p90_exceeds_authorization(self) -> None:
+    def test_follow_up_uses_grant_not_preset_hard_ceiling(self) -> None:
         self.contract["hard_ceiling_seconds"] = 22.0
         self.contract["soft_target_seconds"] = 20.0
 
         result = self._gate().decide(
             self._passed_through_short(lower_bound=0.5, upper_bound=1.5),
             3.0,
-            self._authorization(),
+            self._authorization(max_controlled_seconds=23.0),
         )
 
-        self.assertEqual(result["decision"], "REVIEW_REQUIRED")
-        self.assertEqual(
-            result["stop_reason"], "authorization_insufficient_for_next_action"
-        )
+        self.assertEqual(result["decision"], "RUN_STAGE")
+        self.assertEqual(result["stop_reason"], "next_stage_authorized")
         self.assertEqual(result["next_stage"], "formal_paired")
-        self.assertEqual(result["blocked_action"]["action_id"], "formal_paired")
+        self.assertIsNone(result["blocked_action"])
         self.assertEqual(result["projected_spend"]["p90_seconds"], 23.0)
         self.assertEqual(result["elapsed_seconds"], 3.0)
-        self.assertIn("formal_paired", result["skipped_expensive_stages"])
 
     def test_authoritative_spend_is_reflected_once_in_projection_and_soft_target(self) -> None:
         self.contract["soft_target_seconds"] = 50.0

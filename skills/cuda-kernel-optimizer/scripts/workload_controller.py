@@ -1147,14 +1147,19 @@ def _process_group_exists(process_group: int) -> bool:
     return True
 
 
-def _stop_group(process: Any) -> None:
+def _stop_group(process: Any, *, grace_seconds: float = 0.25) -> None:
     process_group = process.pid
+    grace = float(grace_seconds)
+    if not math.isfinite(grace) or grace <= 0.0:
+        raise ValidationError(
+            "process termination grace must be a positive finite number"
+        )
 
     try:
         os.killpg(process_group, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
-    deadline = time.monotonic() + 0.25
+    deadline = time.monotonic() + grace
     while _process_group_exists(process_group) and time.monotonic() < deadline:
         process.poll()
         time.sleep(0.01)
@@ -1178,6 +1183,7 @@ def _wait_process_with_heartbeats(
     timeout_seconds: float,
     label: str,
     heartbeat_interval_seconds: float = 30.0,
+    termination_grace_seconds: float = 0.25,
     event_sink=None,
 ) -> tuple[int | None, bool, float, str]:
     """Wait visibly and preserve the existing process-group hard stop."""
@@ -1187,6 +1193,11 @@ def _wait_process_with_heartbeats(
         raise ValidationError("process timeout must be a positive finite number")
     if not math.isfinite(interval) or interval <= 0:
         raise ValidationError("heartbeat interval must be a positive finite number")
+    termination_grace = float(termination_grace_seconds)
+    if not math.isfinite(termination_grace) or termination_grace <= 0:
+        raise ValidationError(
+            "process termination grace must be a positive finite number"
+        )
     task = _identifier(label, "heartbeat label")
 
     def emit(event: Mapping[str, Any]) -> None:
@@ -1203,18 +1214,18 @@ def _wait_process_with_heartbeats(
         remaining = timeout - elapsed
         if remaining <= 0:
             timed_out = True
-            _stop_group(process)
+            _stop_group(process, grace_seconds=termination_grace)
             break
         try:
             process.wait(timeout=min(interval, remaining))
             if _process_group_exists(process.pid):
-                _stop_group(process)
+                _stop_group(process, grace_seconds=termination_grace)
             break
         except subprocess.TimeoutExpired:
             elapsed = max(0.0, time.monotonic() - started)
             if elapsed >= timeout:
                 timed_out = True
-                _stop_group(process)
+                _stop_group(process, grace_seconds=termination_grace)
                 break
             emit(
                 {
@@ -5484,6 +5495,8 @@ def _controlled_spend_seconds(state: Mapping[str, Any]) -> float:
 def _controlled_spend_after_execution(
     state: Mapping[str, Any],
     execution: Mapping[str, Any],
+    *,
+    max_controlled_seconds: float | None = None,
 ) -> float:
     duration = execution.get("duration_seconds")
     if (
@@ -5495,6 +5508,11 @@ def _controlled_spend_after_execution(
     total = _controlled_spend_seconds(state) + float(duration)
     if not math.isfinite(total):
         raise ValidationError("run controlled spend overflowed")
+    if (
+        max_controlled_seconds is not None
+        and total > float(max_controlled_seconds)
+    ):
+        raise ValidationError("evidence execution exceeds controlled authorization")
     return total
 
 
@@ -5537,6 +5555,7 @@ def _diagnostic_investment_inputs(
     return {
         "authorization": {
             "max_seconds": float(grant["max_controlled_seconds"]),
+            "max_risk": grant["max_risk"],
         },
         "spend": {"elapsed_seconds": controlled_spend},
         "wall_elapsed_seconds": wall_elapsed,
@@ -5632,7 +5651,11 @@ def _review_diagnostic_direction(
         },
     )
     _atomic_json(active_root / "request.json", request)
-    remaining = float(state["deadline_epoch"]) - time.time()
+    grant = _load_bound_authorization_grant(run_root, state, control)
+    remaining = (
+        float(grant["max_controlled_seconds"])
+        - _controlled_spend_seconds(state)
+    )
     if remaining < 1:
         aggregate = {
             "status": "unavailable",
@@ -5696,7 +5719,6 @@ def _register_active_diagnosis_proposal_unlocked(
         raise ValidationError("run is not ready for an active diagnosis proposal")
     _active_ledger_append_boundary(run_root, "proposal")
     _load_bound_authorization_grant(run_root, state, normalized)
-    _check_deadline(state)
     (
         context,
         epoch,
@@ -6112,10 +6134,30 @@ def _run_active_evidence_adapter(
     )
     stdout = _BoundedLog(_DEFAULT_LOG_LIMIT)
     stderr = _BoundedLog(_DEFAULT_LOG_LIMIT)
-    timeout = min(
-        float(action["timeout_seconds"]),
-        max(0.001, float(state["deadline_epoch"]) - time.time()),
+    grant = _load_bound_authorization_grant(run_root, state, control)
+    remaining_authorization = (
+        float(grant["max_controlled_seconds"])
+        - _controlled_spend_seconds(state)
     )
+    total_execution_window = min(
+        float(action["timeout_seconds"]),
+        remaining_authorization,
+    )
+    if total_execution_window <= 0.0:
+        raise ValidationError(
+            "evidence action lacks remaining controlled authorization"
+        )
+    termination_reserve = min(0.25, total_execution_window * 0.4)
+    safety_reserve = min(0.05, total_execution_window * 0.2)
+    timeout = (
+        total_execution_window
+        - termination_reserve
+        - safety_reserve
+    )
+    if timeout <= 0.0:
+        raise ValidationError(
+            "evidence action lacks executable controlled authorization"
+        )
     started = time.monotonic()
     exit_code = None
     timed_out = False
@@ -6138,6 +6180,7 @@ def _run_active_evidence_adapter(
     exit_code, timed_out, elapsed, stop_reason = _wait_process_with_heartbeats(
         process,
         timeout_seconds=timeout,
+        termination_grace_seconds=termination_reserve,
         label=f"evidence-{action['action_id']}",
         event_sink=events.append,
     )
@@ -6331,11 +6374,15 @@ def _recover_or_block_active_evidence_attempt(
         or events[-1]["payload_sha256"] != payload_sha
     ):
         raise ValidationError("evidence completion has no matching ledger event")
+    grant = _load_bound_authorization_grant(run_root, state, control)
+    timed_out = execution.get("timed_out") is True
     recovered = copy.deepcopy(dict(state))
     recovered.update(
         {
             "stage": "active_diagnosis",
-            "next_action": "propose_hypotheses",
+            "next_action": (
+                "review_required" if timed_out else "propose_hypotheses"
+            ),
             "updated_at_epoch": time.time(),
             "diagnosis_context_sha256": completion["context_sha256"],
             "last_request_signature": signature,
@@ -6343,9 +6390,12 @@ def _recover_or_block_active_evidence_attempt(
             "controlled_spend_seconds": _controlled_spend_after_execution(
                 state,
                 execution,
+                max_controlled_seconds=grant["max_controlled_seconds"],
             ),
         }
     )
+    if timed_out:
+        recovered["terminal_reason"] = "evidence_action_timeout"
     recovered.update(_active_ledger_binding(events))
     _load_active_diagnosis_context(control, run_root, recovered)
     return _write_state(run_root, recovered)
@@ -6375,7 +6425,7 @@ def _collect_active_diagnosis_evidence_unlocked(
         return state
     if state["next_action"] != "collect_evidence":
         raise ValidationError("run is not ready to collect active diagnosis evidence")
-    _load_bound_authorization_grant(run_root, state, normalized)
+    grant = _load_bound_authorization_grant(run_root, state, normalized)
     decision = _load_bound_diagnostic_artifacts(
         run_root, state, expected_decision="MEASURE"
     )
@@ -6400,7 +6450,6 @@ def _collect_active_diagnosis_evidence_unlocked(
     )
     if recovered is not None:
         return recovered
-    _check_deadline(state)
     if not _verify_readiness_report(normalized, run_root, state):
         report = _run_readiness_gate_checked(normalized, run_root, state)
         refreshed_state = copy.deepcopy(state)
@@ -6573,10 +6622,13 @@ def _collect_active_diagnosis_evidence_unlocked(
         },
     )
     updated = copy.deepcopy(state)
+    timed_out = execution.get("timed_out") is True
     updated.update(
         {
             "stage": "active_diagnosis",
-            "next_action": "propose_hypotheses",
+            "next_action": (
+                "review_required" if timed_out else "propose_hypotheses"
+            ),
             "updated_at_epoch": time.time(),
             "diagnosis_context_sha256": _canonical_digest(refreshed_context),
             "last_request_signature": signature,
@@ -6584,9 +6636,12 @@ def _collect_active_diagnosis_evidence_unlocked(
             "controlled_spend_seconds": _controlled_spend_after_execution(
                 state,
                 execution,
+                max_controlled_seconds=grant["max_controlled_seconds"],
             ),
         }
     )
+    if timed_out:
+        updated["terminal_reason"] = "evidence_action_timeout"
     updated.update(_active_ledger_binding(_verify_active_diagnosis_ledger(run_root)))
     return _write_state(run_root, updated)
 
@@ -8299,10 +8354,7 @@ def _validate_candidate_stage_completion(
         raise ValidationError("candidate stage completion duration is invalid")
     if (
         _controlled_spend_seconds(state) + float(duration)
-        > min(
-            float(intent["authorization"]["max_controlled_seconds"]),
-            float(_BUDGET_RUNTIME[control["budget"]]["hard_ceiling_seconds"]),
-        )
+        > float(intent["authorization"]["max_controlled_seconds"])
     ):
         raise ValidationError(
             "candidate stage completion exceeds controlled authorization"
@@ -8591,12 +8643,9 @@ def _execute_candidate_stage(
         )
     except ValidationError:
         return copy.deepcopy(dict(state)), "frozen_artifact_drift"
-    effective_maximum = min(
-        float(admission["max_controlled_seconds"]),
-        float(_BUDGET_RUNTIME[control["budget"]]["hard_ceiling_seconds"]),
-    )
     remaining_authorization = (
-        effective_maximum - _controlled_spend_seconds(state)
+        float(admission["max_controlled_seconds"])
+        - _controlled_spend_seconds(state)
     )
     if remaining_authorization <= 0.0:
         raise ValidationError(
@@ -8952,17 +9001,27 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         nonlocal workload_attempt
         if evaluation_workload.source_hash != workload.source_hash:
             raise ValidationError("workload changed inside the evaluation stage")
-        deadlines = [float(state["deadline_epoch"])]
-        if controlled_deadline_epoch is not None:
-            deadlines.append(float(controlled_deadline_epoch))
-        remaining = min(deadlines) - time.time()
-        if remaining <= 0.0:
+        remaining = (
+            None
+            if controlled_deadline_epoch is None
+            else float(controlled_deadline_epoch) - time.time()
+        )
+        if remaining is not None and remaining <= 0.0:
             raise _CandidateStageTimeout(
                 "candidate workload exhausted its controlled timeout"
             )
-        effective_timeout = (
-            remaining if timeout is None else min(float(timeout), remaining)
-        )
+        if timeout is None:
+            if remaining is None:
+                raise ValidationError(
+                    "candidate workload requires a controlled timeout"
+                )
+            effective_timeout = remaining
+        else:
+            effective_timeout = (
+                float(timeout)
+                if remaining is None
+                else min(float(timeout), remaining)
+            )
         if workload.kind != "python":
             return _load_workload_module().run_spec_once(
                 workload,
@@ -8987,10 +9046,7 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
         blocks: int,
         timeout_seconds: float,
     ) -> dict:
-        controlled_deadline_epoch = min(
-            float(state["deadline_epoch"]),
-            time.time() + float(timeout_seconds),
-        )
+        controlled_deadline_epoch = time.time() + float(timeout_seconds)
 
         def paired_runner(
             evaluation_workload: Any,
@@ -9087,10 +9143,7 @@ def _evaluate_change_unlocked(run_dir: os.PathLike[str] | str) -> dict:
             selected_profiler,
             control,
             profile_root,
-            deadline_epoch=min(
-                float(state["deadline_epoch"]),
-                time.time() + float(timeout_seconds),
-            ),
+            deadline_epoch=time.time() + float(timeout_seconds),
         )
         result_path = (
             profile_root / "probes" / f"{selected_profiler['id']}.json"

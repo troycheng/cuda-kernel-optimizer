@@ -2631,6 +2631,61 @@ class WorkloadRoundTests(unittest.TestCase):
                 "committed_controlled_execution",
             )
 
+    def test_expired_wall_deadline_does_not_reject_diagnostic_proposal_admission(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            self.controller.start_run(control, run_dir)
+            authorized = self._authorize_active_run(control, run_dir)
+            expired = copy.deepcopy(authorized)
+            expired["deadline_epoch"] = time.time() - 1.0
+            self.controller._write_state(run_dir, expired)
+            hypothesis, request = self._active_proposal(run_dir)
+            evidence_adapter = mock.Mock(
+                side_effect=AssertionError("evidence adapter unexpectedly reached")
+            )
+            candidate_runner = mock.Mock(
+                side_effect=AssertionError("candidate runner unexpectedly reached")
+            )
+
+            with (
+                mock.patch.object(
+                    self.controller,
+                    "_run_active_evidence_adapter",
+                    evidence_adapter,
+                ),
+                mock.patch.object(
+                    self.controller,
+                    "_run_candidate_static_review_bounded",
+                    candidate_runner,
+                ),
+            ):
+                state = self.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    hypothesis,
+                    request,
+                )
+
+            decision = json.loads(
+                (
+                    run_dir / "active_diagnosis" / "decision.json"
+                ).read_text("utf-8")
+            )
+            expected_next_action = {
+                "MEASURE": "collect_evidence",
+                "PURSUE": "register_change",
+                "REVIEW_REQUIRED": "review_required",
+                "STOP": "done",
+            }[decision["decision"]]
+            self.assertEqual(state["next_action"], expected_next_action)
+            evidence_adapter.assert_not_called()
+            candidate_runner.assert_not_called()
+
     def test_active_diagnosis_rejects_adapter_digest_mismatch_before_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -2886,6 +2941,100 @@ class WorkloadRoundTests(unittest.TestCase):
                     after["controlled_spend_seconds"],
                     before["controlled_spend_seconds"],
                 )
+
+    def test_grant_risk_cap_blocks_low_evidence_before_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, project = self._workspace(root)
+            _enable_v2_readiness(
+                control,
+                root,
+                capability_ids=("gpu-execute", "ncu.counter_access"),
+            )
+            _enable_active_diagnosis(control, root)
+            ncu_adapter = project / "collect_ncu_evidence.py"
+            ncu_adapter.write_text(
+                "raise AssertionError('runner unexpectedly reached')\n",
+                encoding="utf-8",
+            )
+            contract_path = Path(control["analysis_contract"])
+            contract = json.loads(contract_path.read_text("utf-8"))
+            contract["actions"].append(
+                {
+                    "action_id": "ncu-targeted-kernel",
+                    "adapter_path": str(ncu_adapter),
+                    "adapter_sha256": hashlib.sha256(
+                        ncu_adapter.read_bytes()
+                    ).hexdigest(),
+                    "argv": [sys.executable, str(ncu_adapter)],
+                    "timeout_seconds": 5,
+                    "cost_bound": {
+                        "p50_seconds": 1.0,
+                        "p90_seconds": 2.0,
+                        "basis": "user_authorized_upper_bound",
+                    },
+                }
+            )
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            self.controller.start_run(control, run_dir)
+            self.controller.authorize_run(
+                control,
+                run_dir,
+                _run_grant(
+                    "grant-no-risk-evidence",
+                    allowed_mutation_scopes=[],
+                    max_risk="none",
+                    max_stage="diagnosis",
+                ),
+            )
+            hypothesis, request = self._active_proposal(run_dir)
+            request["requests"] = [
+                {
+                    "request_id": "req-kernel-risk",
+                    "action_id": "ncu-targeted-kernel",
+                    "question": "Does kernel evidence show a dominant stall?",
+                    "target_hypothesis_ids": ["h-kernel-bound"],
+                    "exclusive_pairs": [],
+                    "outcomes": [
+                        {
+                            "outcome_id": "kernel-present",
+                            "supports": ["h-kernel-bound"],
+                            "opposes": [],
+                        },
+                        {
+                            "outcome_id": "kernel-absent",
+                            "supports": [],
+                            "opposes": ["h-kernel-bound"],
+                        },
+                    ],
+                }
+            ]
+            adapter = mock.Mock(
+                side_effect=AssertionError("evidence adapter unexpectedly reached")
+            )
+
+            with mock.patch.object(
+                self.controller,
+                "_run_active_evidence_adapter",
+                adapter,
+            ):
+                state = self.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    hypothesis,
+                    request,
+                )
+
+            decision = json.loads(
+                (
+                    run_dir / "active_diagnosis" / "decision.json"
+                ).read_text("utf-8")
+            )
+            self.assertEqual(state["next_action"], "review_required")
+            self.assertEqual(decision["decision"], "REVIEW_REQUIRED")
+            self.assertNotEqual(decision["decision"], "STOP")
+            self.assertIn("risk", decision["terminal_reason"])
+            adapter.assert_not_called()
 
     def test_tampered_decision_or_investment_brief_blocks_evidence_execution(self) -> None:
         for artifact_name in ("decision.json", "investment_brief.json"):

@@ -208,11 +208,14 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     }
                 }
             },
-            {"max_seconds": 30.0},
+            {"max_seconds": 30.0, "max_risk": "high"},
             {"elapsed_seconds": 7.0},
         )
 
-        self.assertEqual(authorization, {"max_seconds": 30.0})
+        self.assertEqual(
+            authorization,
+            {"max_seconds": 30.0, "max_risk": "high"},
+        )
         self.assertEqual(spend, {"elapsed_seconds": 7.0})
 
     def _controller_with_two_supported_directions(self, root: Path):
@@ -738,7 +741,10 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     model,
                     hypothesis_result,
                     selection,
-                    authorization={"max_seconds": 100.0},
+                    authorization={
+                        "max_seconds": 100.0,
+                        "max_risk": "high",
+                    },
                 )
 
                 self.assertEqual(decision["decision"], "MEASURE")
@@ -2416,81 +2422,20 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             self.assertEqual(state["next_action"], "refresh_required")
             self.assertEqual(state["candidate_hypothesis_id"], "h-framework-gap")
 
-    def test_candidate_stage_timeout_uses_remaining_grant_and_seals_completion(
+    def test_evidence_timeout_uses_remaining_grant_and_seals_completion(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
-            (
-                helper,
-                control,
-                run_dir,
-                project,
-                hypothesis,
-                request,
-            ) = self._controller_with_two_supported_directions(root)
-            state = helper.controller.read_run_state(run_dir)
-            narrowed_maximum = float(state["controlled_spend_seconds"]) + 0.5
-            helper.controller.authorize_run(
-                control,
-                run_dir,
-                workload_fixtures._run_grant(
-                    "grant-candidate-stage-timeout",
-                    max_controlled_seconds=narrowed_maximum,
-                ),
-            )
-            helper.controller.register_active_diagnosis_proposal(
-                control, run_dir, hypothesis, request
-            )
-            change = helper._change("fast")
-            change["diagnosis_ids"] = ["h-framework-gap"]
-            change["candidate"]["estimated_cost"]["static_review"][
-                "p90_seconds"
-            ] = 0.01
-            change["candidate"]["estimated_cost"]["build_correctness"][
-                "p90_seconds"
-            ] = 0.01
-            helper.controller.seal_active_diagnosis_candidate_proposal(
-                control,
-                run_dir,
-                {
-                    "proposal_id": "proposal-stage-timeout",
-                    "hypothesis_id": "h-framework-gap",
-                    "mutation_scope": "project",
-                    "risk": "low",
-                    "candidate_digest": helper.controller._canonical_digest(
-                        change["candidate"]
-                    ),
-                    "change_set_digest": helper.controller._canonical_digest(
-                        change
-                    ),
-                    "estimated_cost": {
-                        "p50_seconds": 0.01,
-                        "p90_seconds": 0.02,
-                        "basis": "user_authorized_upper_bound",
-                    },
-                    "fresh_until_epoch": time.time() + 600.0,
-                },
-            )
-            helper.controller.register_change(control, run_dir, change)
-            (project / "configs" / "value.json").write_text(
-                '{"workers": 8}\n', encoding="utf-8"
-            )
-            state = helper.controller.read_run_state(run_dir)
-            grant = helper.controller._authorization_grant_artifacts(run_dir)[
-                state["authorization_grant_sha256"]
-            ]
-            remaining_authorization = 0.2
-            state["controlled_spend_seconds"] = (
-                float(grant["max_controlled_seconds"])
-                - remaining_authorization
-            )
-            starting_spend = state["controlled_spend_seconds"]
-            helper.controller._write_state(run_dir, state)
+            helper = workload_fixtures.WorkloadRoundTests()
+            helper.setUp()
+            control, run_dir, project = helper._workspace(root)
+            workload_fixtures._enable_v2_readiness(control, root)
+            workload_fixtures._enable_active_diagnosis(control, root)
 
-            child_pid_path = root / "candidate-timeout-child.pid"
-            stage_script = root / "candidate-timeout-stage.py"
-            stage_script.write_text(
+            child_pid_path = root / "evidence-timeout-child.pid"
+            adapter = project / "collect_framework_evidence.py"
+            adapter.write_text(
                 "import signal, subprocess, sys, time\n"
                 "from pathlib import Path\n"
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
@@ -2500,62 +2445,98 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 "time.sleep(60)\n",
                 encoding="utf-8",
             )
-            observed_timeouts = []
+            contract_path = Path(control["analysis_contract"])
+            contract = json.loads(contract_path.read_text("utf-8"))
+            action = contract["actions"][0]
+            action["adapter_sha256"] = hashlib.sha256(adapter.read_bytes()).hexdigest()
+            action["timeout_seconds"] = 5.0
+            action["cost_bound"] = {
+                "p50_seconds": 0.05,
+                "p90_seconds": 0.1,
+                "basis": "user_authorized_upper_bound",
+            }
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
 
-            def timed_workload(
-                _control,
-                _run_root,
-                *,
-                timeout_seconds,
-                **_kwargs,
-            ):
+            helper.controller.start_run(control, run_dir)
+            state = helper.controller.read_run_state(run_dir)
+            remaining_authorization = 0.2
+            grant_maximum = (
+                float(state["controlled_spend_seconds"])
+                + remaining_authorization
+            )
+            authorized = helper.controller.authorize_run(
+                control,
+                run_dir,
+                workload_fixtures._run_grant(
+                    "grant-evidence-timeout",
+                    max_controlled_seconds=grant_maximum,
+                    allowed_mutation_scopes=[],
+                    max_risk="low",
+                    max_stage="diagnosis",
+                ),
+            )
+            starting_spend = float(authorized["controlled_spend_seconds"])
+            hypothesis, request = helper._active_proposal(run_dir)
+            pending = helper.controller.register_active_diagnosis_proposal(
+                control,
+                run_dir,
+                hypothesis,
+                request,
+            )
+            self.assertEqual(pending["next_action"], "collect_evidence")
+
+            wall_limited = copy.deepcopy(pending)
+            wall_limited["deadline_epoch"] = time.time() + 0.5
+            helper.controller._write_state(run_dir, wall_limited)
+            observed_timeouts = []
+            original_wait = helper.controller._wait_process_with_heartbeats
+
+            def observe_wait(process, *, timeout_seconds, **kwargs):
                 observed_timeouts.append(float(timeout_seconds))
-                if float(timeout_seconds) > remaining_authorization:
-                    raise AssertionError(
-                        "candidate stage timeout exceeded remaining authorization"
-                    )
-                result = helper.controller._load_budget_module().run_budgeted_command(
-                    [sys.executable, str(stage_script)],
+                return original_wait(
+                    process,
                     timeout_seconds=timeout_seconds,
-                    grace_seconds=0.05,
+                    **kwargs,
                 )
-                if result.timed_out:
-                    raise TimeoutError("candidate stage reached its controlled timeout")
-                raise AssertionError("candidate timeout command unexpectedly completed")
 
             try:
                 with mock.patch.object(
                     helper.controller,
-                    "_run_python_workload_once_bounded",
-                    side_effect=timed_workload,
+                    "_wait_process_with_heartbeats",
+                    side_effect=observe_wait,
                 ):
-                    decision = helper.controller.evaluate_change(run_dir)
+                    committed = helper.controller.collect_active_diagnosis_evidence(
+                        control,
+                        run_dir,
+                    )
 
+                signature = committed["last_request_signature"]
+                attempt = (
+                    run_dir / "active_diagnosis" / "evidence" / signature
+                )
+                execution = json.loads(
+                    (attempt / "execution.json").read_text("utf-8")
+                )
+                completion = json.loads(
+                    (attempt / "complete.json").read_text("utf-8")
+                )
                 committed = helper.controller.read_run_state(run_dir)
-                completion = committed["candidate_stage_completions"][
-                    "build_correctness"
-                ]
-                self.assertEqual(decision["status"], "review_required")
-                self.assertEqual(decision["reason"], "candidate_stage_timeout")
-                self.assertEqual(
-                    completion["result"],
-                    {
-                        "status": "review_required",
-                        "reason": "candidate_stage_timeout",
-                        "timed_out": True,
-                    },
+                self.assertEqual(len(observed_timeouts), 1)
+                self.assertGreater(observed_timeouts[0], 0.0)
+                self.assertLessEqual(
+                    observed_timeouts[0],
+                    remaining_authorization,
                 )
+                self.assertTrue(execution["timed_out"])
                 self.assertEqual(
-                    json.loads(
-                        (run_dir / completion["stage_artifact_path"]).read_text(
-                            "utf-8"
-                        )
-                    ),
-                    completion["result"],
+                    completion["execution_sha256"],
+                    helper.controller._canonical_digest(execution),
                 )
-                self.assertGreater(
-                    completion["duration_seconds"],
-                    0.0,
+                self.assertEqual(committed["next_action"], "review_required")
+                self.assertEqual(committed["status"], "active")
+                self.assertEqual(
+                    committed["terminal_reason"],
+                    "evidence_action_timeout",
                 )
                 self.assertGreater(
                     committed["controlled_spend_seconds"],
@@ -2563,13 +2544,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 )
                 self.assertLessEqual(
                     committed["controlled_spend_seconds"],
-                    float(grant["max_controlled_seconds"]),
-                )
-                self.assertEqual(len(observed_timeouts), 1)
-                self.assertGreater(observed_timeouts[0], 0.01)
-                self.assertLessEqual(
-                    observed_timeouts[0],
-                    remaining_authorization,
+                    grant_maximum,
                 )
                 self.assertTrue(child_pid_path.is_file())
                 self.assertTrue(
@@ -2731,7 +2706,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     run_dir
                 )[state["authorization_grant_sha256"]]
                 state["controlled_spend_seconds"] = (
-                    float(grant["max_controlled_seconds"]) - 80.0
+                    float(grant["max_controlled_seconds"]) - 0.5
                 )
                 helper.controller._write_state(run_dir, state)
 

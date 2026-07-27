@@ -455,7 +455,6 @@ class CandidateGate:
             raise ValueError(
                 "authorization.max_controlled_seconds must be non-negative"
             )
-        maximum = min(maximum, self.contract["hard_ceiling_seconds"])
         max_stage = authorization.get("max_stage", last_stage)
         stage_rank = {"diagnosis": -1, **{
             stage: index for index, stage in enumerate(_CANDIDATE_STAGES)

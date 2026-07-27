@@ -85,7 +85,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
             hypotheses,
             selection,
             external_review=external_review,
-            authorization={"max_seconds": 86400.0},
+            authorization={"max_seconds": 86400.0, "max_risk": "high"},
         )
 
     @staticmethod
@@ -139,7 +139,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
             self.model(),
             hypotheses,
             self.selection(hypotheses),
-            authorization={"max_seconds": 100.0},
+            authorization={"max_seconds": 100.0, "max_risk": "high"},
             spend={"elapsed_seconds": 99.0},
         )
 
@@ -229,7 +229,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
                     "freshness": "current",
                 }
             ],
-            authorization={"max_seconds": 20.0},
+            authorization={"max_seconds": 20.0, "max_risk": "high"},
         )
 
         self.assertEqual(result["decision"], "PURSUE")
@@ -336,7 +336,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
                     "freshness": "current",
                 },
             ],
-            authorization={"max_seconds": 100.0},
+            authorization={"max_seconds": 100.0, "max_risk": "high"},
         )
 
         self.assertEqual(result["decision"], "PURSUE")
@@ -394,7 +394,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
                     "freshness": "current",
                 },
             ],
-            authorization={"max_seconds": 100.0},
+            authorization={"max_seconds": 100.0, "max_risk": "high"},
         )
 
         self.assertEqual(
@@ -584,7 +584,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
                     "freshness": "current",
                 },
             ],
-            authorization={"max_seconds": 100.0},
+            authorization={"max_seconds": 100.0, "max_risk": "high"},
         )
 
         self.assertEqual(result["decision"], "PURSUE")
@@ -630,7 +630,7 @@ class DiagnosticDecisionTests(unittest.TestCase):
                 ],
                 "rejections": [],
             },
-            authorization={"max_seconds": 100.0},
+            authorization={"max_seconds": 100.0, "max_risk": "high"},
         )
 
         self.assertEqual(result["decision"], "MEASURE")
