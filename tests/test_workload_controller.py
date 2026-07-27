@@ -2942,6 +2942,74 @@ class WorkloadRoundTests(unittest.TestCase):
                     before["controlled_spend_seconds"],
                 )
 
+    def test_collect_requires_termination_and_accounting_margin_before_intent(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project = self._workspace(root)
+            _enable_v2_readiness(control, root)
+            _enable_active_diagnosis(control, root)
+            contract_path = Path(control["analysis_contract"])
+            contract = json.loads(contract_path.read_text("utf-8"))
+            contract["actions"][0]["cost_bound"] = {
+                "p50_seconds": 0.001,
+                "p90_seconds": 0.002,
+                "basis": "user_authorized_upper_bound",
+            }
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+            self.controller.start_run(control, run_dir)
+            started = self.controller.read_run_state(run_dir)
+            grant_maximum = (
+                float(started["controlled_spend_seconds"]) + 0.05
+            )
+            self.controller.authorize_run(
+                control,
+                run_dir,
+                _run_grant(
+                    "grant-no-evidence-stop-reserve",
+                    max_controlled_seconds=grant_maximum,
+                    allowed_mutation_scopes=[],
+                    max_risk="none",
+                    max_stage="diagnosis",
+                ),
+            )
+            hypothesis, request = self._active_proposal(run_dir)
+            pending = self.controller.register_active_diagnosis_proposal(
+                control,
+                run_dir,
+                hypothesis,
+                request,
+            )
+            self.assertEqual(pending["next_action"], "collect_evidence")
+            signature = pending["selected_request_signature"]
+            attempt_root = (
+                run_dir / "active_diagnosis" / "evidence" / signature
+            )
+            adapter = mock.Mock(
+                side_effect=AssertionError("evidence adapter unexpectedly reached")
+            )
+
+            with mock.patch.object(
+                self.controller,
+                "_run_active_evidence_adapter",
+                adapter,
+            ):
+                reviewed = self.controller.collect_active_diagnosis_evidence(
+                    control,
+                    run_dir,
+                )
+
+            self.assertEqual(reviewed["status"], "active")
+            self.assertEqual(reviewed["next_action"], "review_required")
+            self.assertEqual(
+                reviewed["terminal_reason"],
+                "evidence_action_authorization_insufficient",
+            )
+            adapter.assert_not_called()
+            self.assertFalse((attempt_root / "intent.json").exists())
+            self.assertFalse((attempt_root / "complete.json").exists())
+
     def test_grant_risk_cap_blocks_low_evidence_before_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

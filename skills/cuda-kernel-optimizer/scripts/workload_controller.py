@@ -55,6 +55,8 @@ _LOG_SECRET = re.compile(
 )
 _DEFAULT_LOG_LIMIT = 64 * 1024
 _OUTPUT_LIMIT = 1024 * 1024
+_EVIDENCE_TERMINATION_RESERVE_SECONDS = 0.05
+_EVIDENCE_ACCOUNTING_MARGIN_SECONDS = 0.05
 _SAFE_ENV = {
     "HOME",
     "LANG",
@@ -1147,34 +1149,42 @@ def _process_group_exists(process_group: int) -> bool:
     return True
 
 
-def _stop_group(process: Any, *, grace_seconds: float = 0.25) -> None:
+def _stop_group(process: Any, *, deadline_monotonic: float) -> None:
     process_group = process.pid
-    grace = float(grace_seconds)
-    if not math.isfinite(grace) or grace <= 0.0:
+    deadline = float(deadline_monotonic)
+    if not math.isfinite(deadline):
         raise ValidationError(
-            "process termination grace must be a positive finite number"
+            "process termination deadline must be finite"
         )
 
     try:
         os.killpg(process_group, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
-    deadline = time.monotonic() + grace
-    while _process_group_exists(process_group) and time.monotonic() < deadline:
+    while _process_group_exists(process_group):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            break
         process.poll()
-        time.sleep(0.01)
+        if not _process_group_exists(process_group):
+            break
+        time.sleep(min(0.01, remaining))
     if _process_group_exists(process_group):
         try:
             os.killpg(process_group, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
+    remaining = deadline - time.monotonic()
+    if remaining > 0.0:
         try:
-            process.kill()
-        except ProcessLookupError:
-            pass
+            process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+    else:
+        process.poll()
 
 
 def _wait_process_with_heartbeats(
@@ -1214,18 +1224,27 @@ def _wait_process_with_heartbeats(
         remaining = timeout - elapsed
         if remaining <= 0:
             timed_out = True
-            _stop_group(process, grace_seconds=termination_grace)
+            _stop_group(
+                process,
+                deadline_monotonic=time.monotonic() + termination_grace,
+            )
             break
         try:
             process.wait(timeout=min(interval, remaining))
             if _process_group_exists(process.pid):
-                _stop_group(process, grace_seconds=termination_grace)
+                _stop_group(
+                    process,
+                    deadline_monotonic=time.monotonic() + termination_grace,
+                )
             break
         except subprocess.TimeoutExpired:
             elapsed = max(0.0, time.monotonic() - started)
             if elapsed >= timeout:
                 timed_out = True
-                _stop_group(process, grace_seconds=termination_grace)
+                _stop_group(
+                    process,
+                    deadline_monotonic=time.monotonic() + termination_grace,
+                )
                 break
             emit(
                 {
@@ -6079,6 +6098,49 @@ def _apply_execution_map_node_updates(
     return updated
 
 
+def _active_evidence_execution_budget(
+    state: Mapping[str, Any],
+    action: Mapping[str, Any],
+    grant: Mapping[str, Any],
+) -> dict | None:
+    """Close execution, termination, and accounting jitter inside the grant."""
+    remaining_authorization = (
+        float(grant["max_controlled_seconds"])
+        - _controlled_spend_seconds(state)
+    )
+    cost_bound = _object(
+        action.get("cost_bound"),
+        "evidence action cost_bound",
+    )
+    action_p90 = cost_bound.get("p90_seconds")
+    if (
+        type(action_p90) not in {int, float}
+        or not math.isfinite(float(action_p90))
+        or float(action_p90) <= 0.0
+    ):
+        raise ValidationError("evidence action p90 cost bound is invalid")
+    termination_reserve = _EVIDENCE_TERMINATION_RESERVE_SECONDS
+    accounting_margin = _EVIDENCE_ACCOUNTING_MARGIN_SECONDS
+    required_authorization = (
+        float(action_p90)
+        + termination_reserve
+        + accounting_margin
+    )
+    if required_authorization > remaining_authorization:
+        return None
+    execution_timeout = min(
+        float(action["timeout_seconds"]),
+        remaining_authorization - termination_reserve - accounting_margin,
+    )
+    if execution_timeout <= 0.0:
+        return None
+    return {
+        "execution_timeout_seconds": execution_timeout,
+        "termination_reserve_seconds": termination_reserve,
+        "accounting_margin_seconds": accounting_margin,
+    }
+
+
 def _run_active_evidence_adapter(
     control: Mapping[str, Any],
     run_root: Path,
@@ -6086,6 +6148,7 @@ def _run_active_evidence_adapter(
     action: Mapping[str, Any],
     selected: Mapping[str, Any],
     attempt_root: Path,
+    execution_budget: Mapping[str, Any],
 ) -> tuple[dict, dict]:
     output_path = attempt_root / ".output.json"
     request_path = attempt_root / "request.json"
@@ -6134,29 +6197,31 @@ def _run_active_evidence_adapter(
     )
     stdout = _BoundedLog(_DEFAULT_LOG_LIMIT)
     stderr = _BoundedLog(_DEFAULT_LOG_LIMIT)
-    grant = _load_bound_authorization_grant(run_root, state, control)
-    remaining_authorization = (
-        float(grant["max_controlled_seconds"])
-        - _controlled_spend_seconds(state)
-    )
-    total_execution_window = min(
-        float(action["timeout_seconds"]),
-        remaining_authorization,
-    )
-    if total_execution_window <= 0.0:
+    budget = _object(execution_budget, "evidence execution budget")
+    if set(budget) != {
+        "execution_timeout_seconds",
+        "termination_reserve_seconds",
+        "accounting_margin_seconds",
+    }:
+        raise ValidationError("evidence execution budget fields are invalid")
+    timeout = float(budget["execution_timeout_seconds"])
+    termination_reserve = float(budget["termination_reserve_seconds"])
+    if (
+        not math.isfinite(timeout)
+        or timeout <= 0.0
+        or not math.isfinite(termination_reserve)
+        or termination_reserve <= 0.0
+    ):
         raise ValidationError(
-            "evidence action lacks remaining controlled authorization"
+            "evidence execution budget values are invalid"
         )
-    termination_reserve = min(0.25, total_execution_window * 0.4)
-    safety_reserve = min(0.05, total_execution_window * 0.2)
-    timeout = (
-        total_execution_window
-        - termination_reserve
-        - safety_reserve
-    )
-    if timeout <= 0.0:
+    accounting_margin = float(budget["accounting_margin_seconds"])
+    if (
+        not math.isfinite(accounting_margin)
+        or accounting_margin <= 0.0
+    ):
         raise ValidationError(
-            "evidence action lacks executable controlled authorization"
+            "evidence execution accounting margin is invalid"
         )
     started = time.monotonic()
     exit_code = None
@@ -6484,6 +6549,25 @@ def _collect_active_diagnosis_evidence_unlocked(
     action = action_by_id.get(selected["action_id"])
     if action is None:
         raise ValidationError("selected evidence action has no frozen adapter")
+    execution_budget = _active_evidence_execution_budget(
+        state,
+        action,
+        grant,
+    )
+    if execution_budget is None:
+        updated = copy.deepcopy(state)
+        updated.update(
+            {
+                "status": "active",
+                "stage": "active_diagnosis",
+                "next_action": "review_required",
+                "updated_at_epoch": time.time(),
+                "terminal_reason": (
+                    "evidence_action_authorization_insufficient"
+                ),
+            }
+        )
+        return _write_state(run_root, updated)
     required = set(selected["controller_action"]["required_capability_ids"])
     readiness_report = _load_readiness_gate_module()._load_prior_report(
         run_root / "readiness"
@@ -6527,7 +6611,13 @@ def _collect_active_diagnosis_evidence_unlocked(
     }
     _atomic_json(intent_path, intent)
     result, execution = _run_active_evidence_adapter(
-        normalized, run_root, state, action, selected, attempt_root
+        normalized,
+        run_root,
+        state,
+        action,
+        selected,
+        attempt_root,
+        execution_budget,
     )
     evidence_id = None
     if result["status"] == "observed":
