@@ -298,6 +298,7 @@ def _change_set() -> dict:
         "hypothesis": "data wait dominates GPU idle time",
         "diagnosis_ids": ["cpu_data:data_wait"],
         "scope": "project",
+        "risk": "low",
         "candidate": _candidate_declaration("dataloader-workers-8", "worktree"),
         "paths": ["configs/serve.json"],
         "commands": [],
@@ -1506,26 +1507,6 @@ class WorkloadRoundTests(unittest.TestCase):
         )
         return control, run_dir, project
 
-    def _legacy_review_run(self, root: Path) -> tuple[dict, Path, dict]:
-        control, run_dir, project = self._workspace(root)
-        self.controller.start_run(control, run_dir)
-        self.controller.register_change(control, run_dir, self._change())
-        (project / "configs" / "value.json").write_text(
-            '{"workers": 8}\n', encoding="utf-8"
-        )
-        state = self.controller.read_run_state(run_dir)
-        state["controlled_spend_seconds"] = 2580.1
-        self.controller._write_state(run_dir, state)
-        self.controller.evaluate_change(run_dir)
-        legacy = json.loads((run_dir / "decision.json").read_text("utf-8"))
-        legacy.pop("replay_identity")
-        (run_dir / "decision.json").write_text(
-            json.dumps(legacy), encoding="utf-8"
-        )
-        legacy_state = self.controller.read_run_state(run_dir)
-        legacy_state["decision_digest"] = self.controller._canonical_digest(legacy)
-        self.controller._write_state(run_dir, legacy_state)
-        return control, run_dir, legacy
 
     def _active_proposal(self, run_dir: Path) -> tuple[dict, dict]:
         active = run_dir / "active_diagnosis"
@@ -1635,6 +1616,86 @@ class WorkloadRoundTests(unittest.TestCase):
             run_dir,
             _run_grant(grant_id),
         )
+
+    def _register_supported_active_direction(
+        self,
+        control: dict,
+        run_dir: Path,
+    ) -> dict:
+        hypothesis, request = self._active_proposal(run_dir)
+        real_module = self.controller._load_diagnostic_decision_module()
+
+        def supported_direction(*args, **kwargs):
+            decision = real_module.decide_next_step(*args, **kwargs)
+            primary = decision["primary_diagnosis"]
+            decision.update(
+                {
+                    "decision": "PURSUE",
+                    "terminal_reason": "direction_supported",
+                    "next_action": {
+                        "action_id": "implement-candidate",
+                        "hypothesis_id": primary["hypothesis_id"],
+                        "mechanism": primary["mechanism"],
+                        "claim_layer": primary["claim_layer"],
+                    },
+                    "next_checkpoint": "after_candidate_screen",
+                }
+            )
+            brief = decision["investment_brief"]
+            for key in (
+                "decision",
+                "terminal_reason",
+                "next_action",
+                "next_checkpoint",
+            ):
+                brief[key] = copy.deepcopy(decision[key])
+            return decision
+
+        decision_module = mock.Mock()
+        decision_module.decide_next_step.side_effect = supported_direction
+        with mock.patch.object(
+            self.controller,
+            "_load_diagnostic_decision_module",
+            return_value=decision_module,
+        ):
+            return self.controller.register_active_diagnosis_proposal(
+                control,
+                run_dir,
+                hypothesis,
+                request,
+            )
+
+    def _paused_active_candidate(
+        self,
+        root: Path,
+    ) -> tuple[dict, Path, Path, Path, dict]:
+        control, run_dir, project = self._workspace(root)
+        _enable_v2_readiness(control, root)
+        _enable_active_diagnosis(control, root)
+        started = self.controller.start_run(control, run_dir)
+        self.controller.authorize_run(
+            control,
+            run_dir,
+            _run_grant(
+                "grant-candidate-static-only",
+                max_controlled_seconds=(
+                    float(started["controlled_spend_seconds"]) + 2.0
+                ),
+            ),
+        )
+        ready = self._register_supported_active_direction(control, run_dir)
+        decision = json.loads(
+            (run_dir / "active_diagnosis" / "decision.json").read_text("utf-8")
+        )
+        change = self._change()
+        change["diagnosis_ids"] = [
+            decision["next_action"]["hypothesis_id"]
+        ]
+        self.controller.register_change(control, run_dir, change)
+        config = project / "configs" / "value.json"
+        config.write_text('{"workers": 8}\n', encoding="utf-8")
+        paused = self.controller.evaluate_change(run_dir)
+        return control, run_dir, project, config, paused
 
     def _invalidate_active_run_grant(
         self,
@@ -6003,6 +6064,59 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertNotIn("candidate_stage_complete_digests", state)
             self.assertGreater(state["controlled_spend_seconds"], 0.0)
 
+    def test_registration_rejects_unauthorized_scope_or_risk_before_snapshot(
+        self,
+    ) -> None:
+        for field, grant_overrides in (
+            ("scope", {"allowed_mutation_scopes": []}),
+            ("risk", {"max_risk": "none"}),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                control, run_dir, _project = self._workspace(root)
+                _enable_v2_readiness(control, root)
+                _enable_active_diagnosis(control, root)
+                self.controller.start_run(control, run_dir)
+                self.controller.authorize_run(
+                    control,
+                    run_dir,
+                    _run_grant(
+                        f"grant-registration-{field}",
+                        **grant_overrides,
+                    ),
+                )
+                ready = self._register_supported_active_direction(
+                    control,
+                    run_dir,
+                )
+                self.assertEqual(ready["next_action"], "register_change")
+                hypothesis_id = json.loads(
+                    (
+                        run_dir / "active_diagnosis" / "decision.json"
+                    ).read_text("utf-8")
+                )["next_action"]["hypothesis_id"]
+                change = self._change()
+                change["diagnosis_ids"] = [hypothesis_id]
+
+                with mock.patch.object(
+                    self.controller,
+                    "_snapshot_scope",
+                    side_effect=AssertionError("snapshot unexpectedly created"),
+                ) as snapshot:
+                    reviewed = self.controller.register_change(
+                        control,
+                        run_dir,
+                        change,
+                    )
+
+                snapshot.assert_not_called()
+                self.assertEqual(reviewed["status"], "active")
+                self.assertEqual(reviewed["next_action"], "review_required")
+                self.assertIn(field, reviewed["terminal_reason"])
+                self.assertFalse((run_dir / "registration_pending.json").exists())
+                self.assertFalse((run_dir / "snapshot").exists())
+                self.assertFalse((run_dir / "change_set.json").exists())
+
     def test_registration_rejects_candidate_below_workload_threshold_before_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -6087,7 +6201,6 @@ class WorkloadRoundTests(unittest.TestCase):
             change["candidate"]["estimated_cost"].pop("profiler")
             self.controller.register_change(control, run_dir, change)
             config = project / "configs" / "value.json"
-            original = config.read_text("utf-8")
             config.write_text('{"workers": 8}\n', encoding="utf-8")
             evaluator = mock.Mock()
             evaluator.evaluate_pairs.return_value = {
@@ -6126,7 +6239,9 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertEqual(first["blocked_action"]["action_id"], "profiler")
             self.assertIsNone(first["blocked_action"]["p90_seconds"])
             self.assertIsNone(first["projected_spend"]["p90_seconds"])
-            self.assertEqual(config.read_text("utf-8"), original)
+            self.assertFalse(first["rolled_back"])
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 8}\n')
+            self.assertTrue((run_dir / "snapshot" / "project").is_dir())
             self.assertTrue((run_dir / "time_gate.json").is_file())
             self.assertTrue((run_dir / "decision.json").is_file())
             self.assertIn("candidate_binding.json", first["evidence"])
@@ -6550,369 +6665,227 @@ class WorkloadRoundTests(unittest.TestCase):
                     if _pid_exists(child_pid):
                         os.kill(child_pid, signal.SIGKILL)
 
-    def test_review_required_replay_revalidates_all_bound_artifacts_and_snapshot(self) -> None:
-        for target in (
-            "candidate_diff",
-            "time_gate",
-            "evidence",
-            "workspace",
-            "project_surface",
-            "environment",
-            "workload_source",
-        ):
-            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp).resolve()
-                control, run_dir, project = self._workspace(root)
-                self.controller.start_run(control, run_dir)
-                self.controller.register_change(control, run_dir, self._change())
-                config = project / "configs" / "value.json"
-                config.write_text('{"workers": 8}\n', encoding="utf-8")
-                state = self.controller.read_run_state(run_dir)
-                state["controlled_spend_seconds"] = 2580.1
-                self.controller._write_state(run_dir, state)
-                evaluator = mock.Mock()
-                evaluator.evaluate_pairs.return_value = {
-                    "status": "evaluated",
-                    "primary": {
-                        "status": "inconclusive",
-                        "estimate_pct": 1.0,
-                        "ci_low_pct": 0.5,
-                        "ci_high_pct": 1.5,
-                    },
-                    "constraints": [],
-                }
-                with mock.patch.object(
-                    self.controller, "_load_evaluate_module", return_value=evaluator
-                ):
-                    decision = self.controller.evaluate_change(run_dir)
-                self.assertEqual(decision["status"], "review_required")
-
-                if target == "candidate_diff":
-                    with (run_dir / "candidate.diff").open("a", encoding="utf-8") as stream:
-                        stream.write("tampered\n")
-                elif target == "time_gate":
-                    path = run_dir / "time_gate.json"
-                    payload = json.loads(path.read_text("utf-8"))
-                    payload["elapsed_seconds"] += 1.0
-                    path.write_text(json.dumps(payload), encoding="utf-8")
-                elif target == "evidence":
-                    path = run_dir / "short_paired_evaluation.json"
-                    payload = json.loads(path.read_text("utf-8"))
-                    payload["tampered"] = True
-                    path.write_text(json.dumps(payload), encoding="utf-8")
-                elif target == "workspace":
-                    config.write_text('{"workers": 77}\n', encoding="utf-8")
-                elif target == "project_surface":
-                    (project / "outside-mutation-surface.txt").write_text(
-                        "drift\n", encoding="utf-8"
-                    )
-                elif target == "environment":
-                    environment = Path(control["mutation"]["environment_root"])
-                    environment.mkdir(parents=True, exist_ok=True)
-                    (environment / "external.txt").write_text(
-                        "drift\n", encoding="utf-8"
-                    )
-                else:
-                    workload_source = project / "adapter.py"
-                    workload_source.write_text(
-                        workload_source.read_text("utf-8") + "\n# drift\n",
-                        encoding="utf-8",
-                    )
-
-                with self.assertRaisesRegex(ValueError, "review-required"):
-                    self.controller.evaluate_change(run_dir)
-
-    def test_legacy_review_required_without_replay_identity_migrates_idempotently(self) -> None:
+    def test_authorization_pause_preserves_candidate_and_resumes_from_recorded_stage(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
-            control, run_dir, project = self._workspace(root)
-            self.controller.start_run(control, run_dir)
-            self.controller.register_change(control, run_dir, self._change())
-            config = project / "configs" / "value.json"
-            config.write_text('{"workers": 8}\n', encoding="utf-8")
-            state = self.controller.read_run_state(run_dir)
-            state["controlled_spend_seconds"] = 2580.1
-            self.controller._write_state(run_dir, state)
-            self.controller.evaluate_change(run_dir)
-
-            legacy = json.loads((run_dir / "decision.json").read_text("utf-8"))
-            legacy.pop("replay_identity")
-            (run_dir / "decision.json").write_text(
-                json.dumps(legacy), encoding="utf-8"
+            control, run_dir, _project, config, decision = (
+                self._paused_active_candidate(root)
             )
-            legacy_state = self.controller.read_run_state(run_dir)
-            legacy_state["decision_digest"] = self.controller._canonical_digest(legacy)
-            self.controller._write_state(run_dir, legacy_state)
+            paused = self.controller.read_run_state(run_dir)
+            static_completion = copy.deepcopy(
+                paused["candidate_stage_completions"]["static_review"]
+            )
 
-            first = self.controller.resume_run(run_dir)
-            second = self.controller.resume_run(run_dir)
-            migrated = json.loads((run_dir / "decision.json").read_text("utf-8"))
+            self.assertEqual(decision["status"], "review_required")
+            self.assertFalse(decision["rolled_back"])
+            self.assertEqual(paused["status"], "active")
+            self.assertEqual(paused["next_action"], "review_required")
+            self.assertEqual(paused["candidate_stage"], "build_correctness")
+            self.assertEqual(
+                paused["candidate_pause_authorization_sha256"],
+                paused["authorization_grant_sha256"],
+            )
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 8}\n')
+            self.assertTrue((run_dir / "snapshot" / "project").is_dir())
+
+            with mock.patch.object(
+                self.controller,
+                "_evaluate_change_unlocked",
+                side_effect=AssertionError("same grant resumed candidate"),
+            ) as evaluator:
+                replayed = self.controller.resume_run(run_dir)
+
+            evaluator.assert_not_called()
+            self.assertEqual(replayed, paused)
+
+            self.controller.authorize_run(
+                control,
+                run_dir,
+                _run_grant(
+                    "grant-candidate-complete",
+                    max_controlled_seconds=3600.0,
+                ),
+            )
+            with mock.patch.object(
+                self.controller,
+                "_run_candidate_static_review_bounded",
+                side_effect=AssertionError("static stage reran"),
+            ) as static_review:
+                resumed = self.controller.resume_run(run_dir)
+
+            static_review.assert_not_called()
+            self.assertEqual(resumed["status"], "promoted")
+            completed = self.controller.read_run_state(run_dir)
+            self.assertEqual(
+                completed["candidate_stage_completions"]["static_review"],
+                static_completion,
+            )
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["next_action"], "done")
+
+    def test_abandon_is_the_only_idempotent_candidate_rollback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control, run_dir, _project, config, paused = (
+                self._paused_active_candidate(root)
+            )
+            self.assertEqual(paused["status"], "review_required")
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 8}\n')
+
+            first = self.controller.abandon(run_dir)
+            decision_bytes = (run_dir / "decision.json").read_bytes()
+            state = self.controller.read_run_state(run_dir)
+            second = self.controller.abandon(run_dir)
 
             self.assertEqual(first, second)
-            self.assertEqual(first["next_action"], "refresh_required")
-            self.assertEqual(
-                first["terminal_reason"],
-                "legacy_replay_identity_unavailable",
-            )
-            self.assertEqual(migrated["status"], "review_required")
-            self.assertEqual(
-                migrated["reason"], "legacy_replay_identity_unavailable"
-            )
-            self.assertEqual(
-                migrated["recovery_action"], "refresh_from_current_identity"
-            )
-            self.assertNotIn("replay_identity", migrated)
+            self.assertEqual((run_dir / "decision.json").read_bytes(), decision_bytes)
+            self.assertEqual(first["status"], "abandoned")
+            self.assertTrue(first["rolled_back"])
+            self.assertEqual(state["status"], "completed")
+            self.assertEqual(state["next_action"], "done")
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 4}\n')
 
-    def test_legacy_review_migration_rejects_self_attested_replacement(self) -> None:
+    def test_paused_candidate_identity_drift_requires_manual_recovery(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            _control, run_dir, legacy = self._legacy_review_run(Path(tmp).resolve())
-            state = self.controller.read_run_state(run_dir)
-            source_digest = state["decision_digest"]
-            forged = copy.deepcopy(legacy)
-            forged.update(
-                {
-                    "status": "review_required",
-                    "reason": "legacy_replay_identity_unavailable",
-                    "recovery_action": "refresh_from_current_identity",
-                    "legacy_decision_sha256": source_digest,
-                    "migration_kind": "legacy-review-refresh-v1",
-                    "migration_id": "legacy-review-" + source_digest[:16],
-                    "migration_epoch": state["updated_at_epoch"],
-                    "attacker_payload": {"accepted": True},
-                }
+            root = Path(tmp).resolve()
+            control, run_dir, _project, config, _paused = (
+                self._paused_active_candidate(root)
             )
-            (run_dir / "decision.json").write_text(
-                json.dumps(forged), encoding="utf-8"
+            config.write_text('{"workers": 9}\n', encoding="utf-8")
+            self.controller.authorize_run(
+                control,
+                run_dir,
+                _run_grant(
+                    "grant-after-paused-drift",
+                    max_controlled_seconds=3600.0,
+                ),
             )
-            before_state_digest = self.controller._canonical_digest(state)
+            runner = mock.Mock(
+                side_effect=AssertionError("drifted paused candidate reached runner")
+            )
 
-            with self.assertRaisesRegex(
-                ValueError, "review-required|migration|corrupt|manual recovery"
+            with mock.patch.object(
+                self.controller,
+                "_execute_candidate_stage",
+                runner,
             ):
-                self.controller.resume_run(run_dir)
-
-            after = self.controller.read_run_state(run_dir)
-            self.assertEqual(
-                self.controller._canonical_digest(after), before_state_digest
-            )
-            self.assertEqual(after["decision_digest"], source_digest)
-            self.assertEqual(
-                json.loads((run_dir / "decision.json").read_text("utf-8")),
-                forged,
-            )
-
-    def test_legacy_review_migration_recovers_each_prepared_transaction_write(self) -> None:
-        for target in (
-            "prepared_state_commit",
-            "target_decision_write",
-            "final_state_commit",
-        ):
-            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
-                _control, run_dir, _legacy = self._legacy_review_run(
-                    Path(tmp).resolve()
-                )
-                original_atomic = self.controller._atomic_json
-                interrupted = False
-
-                def interrupt(path, value):
-                    nonlocal interrupted
-                    path = Path(path)
-                    phase = None
-                    if path.name == "state_commit.json":
-                        generation_path = (
-                            path.parent
-                            / "state_generations"
-                            / f"{value['state_digest']}.json"
-                        )
-                        generation = json.loads(generation_path.read_text("utf-8"))
-                        if "legacy_review_pending_migration" in generation:
-                            phase = "prepared_state_commit"
-                        elif generation.get("next_action") == "refresh_required":
-                            phase = "final_state_commit"
-                    elif (
-                        path == run_dir / "decision.json"
-                        and value.get("migration_kind")
-                        == "legacy-review-refresh-v1"
-                    ):
-                        phase = "target_decision_write"
-                    if phase == target and not interrupted:
-                        interrupted = True
-                        raise OSError(f"interrupt legacy migration at {target}")
-                    return original_atomic(path, value)
-
-                with mock.patch.object(
-                    self.controller, "_atomic_json", side_effect=interrupt
-                ):
-                    with self.assertRaisesRegex(OSError, "interrupt legacy"):
-                        self.controller.resume_run(run_dir)
-
                 recovered = self.controller.resume_run(run_dir)
-                decision = json.loads((run_dir / "decision.json").read_text("utf-8"))
-                generation_paths = set((run_dir / "state_generations").glob("*.json"))
-                ledger_paths = set(
-                    (run_dir / "active_diagnosis" / "ledger").glob("*.json")
-                )
-                repeated = self.controller.resume_run(run_dir)
 
-                self.assertTrue(interrupted)
-                self.assertEqual(recovered, repeated)
-                self.assertEqual(recovered["next_action"], "refresh_required")
-                self.assertNotIn("legacy_review_pending_migration", recovered)
-                self.assertEqual(
-                    recovered["decision_digest"],
-                    self.controller._canonical_digest(decision),
-                )
-                self.assertEqual(
-                    decision["migration_kind"], "legacy-review-refresh-v1"
-                )
-                self.assertRegex(decision["migration_id"], r"^legacy-review-[a-f0-9]{16}$")
-                self.assertEqual(
-                    set((run_dir / "state_generations").glob("*.json")),
-                    generation_paths,
-                )
-                self.assertEqual(
-                    set((run_dir / "active_diagnosis" / "ledger").glob("*.json")),
-                    ledger_paths,
-                )
-                self.assertEqual(
-                    len(recovered["completed_stages"]),
-                    len(set(recovered["completed_stages"])),
-                )
+            runner.assert_not_called()
+            self.assertEqual(
+                (
+                    recovered["status"],
+                    recovered["next_action"],
+                    recovered["manual_recovery_reason"],
+                ),
+                (
+                    "manual_recovery_required",
+                    "manual_recovery",
+                    "candidate_identity_drift",
+                ),
+            )
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 9}\n')
 
-    def test_legacy_review_migration_fails_closed_on_prepared_or_decision_tamper(self) -> None:
-        for mode in (
-            "prepared_binding",
-            "prepared_route",
-            "target_binding",
-            "decision_neither_source_nor_target",
-        ):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
-                _control, run_dir, legacy = self._legacy_review_run(
-                    Path(tmp).resolve()
-                )
-                original_atomic = self.controller._atomic_json
-                stop_at = (
-                    "final_state_commit"
-                    if mode == "target_binding"
-                    else "target_decision_write"
-                )
-                interrupted = False
-
-                def interrupt(path, value):
-                    nonlocal interrupted
-                    path = Path(path)
-                    phase = None
-                    if (
-                        path == run_dir / "decision.json"
-                        and value.get("migration_kind")
-                        == "legacy-review-refresh-v1"
-                    ):
-                        phase = "target_decision_write"
-                    elif path.name == "state_commit.json":
-                        generation = json.loads(
-                            (
-                                path.parent
-                                / "state_generations"
-                                / f"{value['state_digest']}.json"
-                            ).read_text("utf-8")
-                        )
-                        if generation.get("next_action") == "refresh_required":
-                            phase = "final_state_commit"
-                    if phase == stop_at and not interrupted:
-                        interrupted = True
-                        raise OSError(f"interrupt legacy migration at {stop_at}")
-                    return original_atomic(path, value)
-
-                with mock.patch.object(
-                    self.controller, "_atomic_json", side_effect=interrupt
-                ):
-                    with self.assertRaisesRegex(OSError, "interrupt legacy"):
-                        self.controller.resume_run(run_dir)
-
-                prepared = self.controller.read_run_state(run_dir)
-                self.assertIn("legacy_review_pending_migration", prepared)
-                if mode == "decision_neither_source_nor_target":
-                    corrupt = copy.deepcopy(legacy)
-                    corrupt["attacker_payload"] = {"accepted": True}
-                    (run_dir / "decision.json").write_text(
-                        json.dumps(corrupt), encoding="utf-8"
+    def test_legacy_unfinished_run_entry_matrix_is_read_only_except_abandon(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            control, run_dir, _project, config, _paused = (
+                self._paused_active_candidate(root)
+            )
+            legacy = self.controller.read_run_state(run_dir)
+            legacy.pop("investment_control_version")
+            self.controller._write_state(run_dir, legacy)
+            hypothesis, request = self._active_proposal(run_dir)
+            change = self._change()
+            before_files = {
+                path.relative_to(run_dir).as_posix(): path.read_bytes()
+                for path in run_dir.rglob("*")
+                if path.is_file()
+            }
+            runner = mock.Mock(
+                side_effect=AssertionError("legacy run reached a runner")
+            )
+            entries = {
+                "start_run": lambda: self.controller.start_run(control, run_dir),
+                "register_diagnosis": lambda: (
+                    self.controller.register_active_diagnosis_proposal(
+                        control,
+                        run_dir,
+                        hypothesis,
+                        request,
                     )
-                else:
-                    tampered = copy.deepcopy(prepared)
-                    binding = tampered["legacy_review_pending_migration"]
-                    if mode == "prepared_binding":
-                        binding["migration_id"] = "legacy-review-0000000000000000"
-                    elif mode == "prepared_route":
-                        tampered["next_action"] = "done"
-                    else:
-                        binding["target_decision_sha256"] = "f" * 64
-                    self.controller._write_state(run_dir, tampered)
-                before = self.controller.read_run_state(run_dir)
-                before_digest = self.controller._canonical_digest(before)
-                decision_before = (run_dir / "decision.json").read_bytes()
+                ),
+                "collect_evidence": lambda: (
+                    self.controller.collect_active_diagnosis_evidence(
+                        control,
+                        run_dir,
+                    )
+                ),
+                "register_change": lambda: self.controller.register_change(
+                    control,
+                    run_dir,
+                    change,
+                ),
+                "evaluate": lambda: self.controller.evaluate_change(run_dir),
+                "resume": lambda: self.controller.resume_run(run_dir),
+            }
+            with (
+                mock.patch.object(
+                    self.controller,
+                    "_run_active_evidence_adapter",
+                    runner,
+                ),
+                mock.patch.object(
+                    self.controller,
+                    "_execute_candidate_stage",
+                    runner,
+                ),
+            ):
+                for entry, call in entries.items():
+                    with self.subTest(entry=entry), self.assertRaisesRegex(
+                        self.controller.ValidationError,
+                        "legacy investment control requires restart",
+                    ):
+                        call()
+                    self.assertEqual(
+                        {
+                            path.relative_to(run_dir).as_posix(): path.read_bytes()
+                            for path in run_dir.rglob("*")
+                            if path.is_file()
+                        },
+                        before_files,
+                    )
 
-                with self.assertRaisesRegex(
-                    ValueError, "legacy review migration|binding|corrupt|manual recovery"
-                ):
-                    self.controller.resume_run(run_dir)
+            runner.assert_not_called()
+            self.assertEqual(self.controller.read_run_state(run_dir), legacy)
+            abandoned = self.controller.abandon(run_dir)
+            self.assertEqual(abandoned["status"], "abandoned")
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 4}\n')
 
-                after = self.controller.read_run_state(run_dir)
-                self.assertEqual(self.controller._canonical_digest(after), before_digest)
-                self.assertEqual((run_dir / "decision.json").read_bytes(), decision_before)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            _control, run_dir, _project, config, _paused = (
+                self._paused_active_candidate(root)
+            )
+            legacy = self.controller.read_run_state(run_dir)
+            legacy.pop("investment_control_version")
+            self.controller._write_state(run_dir, legacy)
+            snapshot_file = run_dir / "snapshot" / "project" / "configs" / "value.json"
+            snapshot_file.unlink()
 
-    def test_legacy_review_migration_recovers_interrupted_state_commit(self) -> None:
-        for target in ("state_generation", "state_commit.json"):
-            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp).resolve()
-                control, run_dir, project = self._workspace(root)
-                self.controller.start_run(control, run_dir)
-                self.controller.register_change(control, run_dir, self._change())
-                (project / "configs" / "value.json").write_text(
-                    '{"workers": 8}\n', encoding="utf-8"
-                )
-                state = self.controller.read_run_state(run_dir)
-                state["controlled_spend_seconds"] = 2580.1
-                self.controller._write_state(run_dir, state)
-                self.controller.evaluate_change(run_dir)
-                legacy = json.loads((run_dir / "decision.json").read_text("utf-8"))
-                legacy.pop("replay_identity")
-                (run_dir / "decision.json").write_text(
-                    json.dumps(legacy), encoding="utf-8"
-                )
-                legacy_state = self.controller.read_run_state(run_dir)
-                legacy_state["decision_digest"] = self.controller._canonical_digest(
-                    legacy
-                )
-                self.controller._write_state(run_dir, legacy_state)
-                original_atomic = self.controller._atomic_json
-                interrupted = False
+            manual = self.controller.abandon(run_dir)
 
-                def interrupt(path, value):
-                    nonlocal interrupted
-                    path = Path(path)
-                    matches = (
-                        target == "state_generation"
-                        and path.parent.name == "state_generations"
-                    ) or path.name == target
-                    if matches and not interrupted:
-                        interrupted = True
-                        raise OSError(f"interrupt legacy migration at {target}")
-                    return original_atomic(path, value)
-
-                with mock.patch.object(
-                    self.controller, "_atomic_json", side_effect=interrupt
-                ):
-                    with self.assertRaisesRegex(OSError, "interrupt legacy"):
-                        self.controller.resume_run(run_dir)
-
-                recovered = self.controller.resume_run(run_dir)
-                repeated = self.controller.resume_run(run_dir)
-                self.assertEqual(recovered, repeated)
-                self.assertEqual(recovered["next_action"], "refresh_required")
-                self.assertEqual(
-                    recovered["terminal_reason"],
-                    "legacy_replay_identity_unavailable",
-                )
+            self.assertEqual(manual["status"], "manual_recovery_required")
+            self.assertFalse(manual["rolled_back"])
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 8}\n')
 
     def test_external_final_review_timeout_cannot_overturn_confirmed_local_win(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7275,12 +7248,14 @@ class WorkloadRoundTests(unittest.TestCase):
             "run",
             "status",
             "register-diagnosis",
-            "seal-candidate-proposal",
+            "authorize-run",
             "register-change",
             "evaluate",
+            "abandon",
             "resume",
         ):
             self.assertIn(command, result.stdout)
+        self.assertNotIn("seal-candidate-proposal", result.stdout)
 
     def test_isolated_environment_change_is_evaluated_without_host_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7333,19 +7308,6 @@ class WorkloadRoundTests(unittest.TestCase):
                         "exist before baseline|drifted after baseline",
                     ):
                         self.controller.register_change(control, run_dir, change)
-
-    def test_deadline_is_enforced_before_change_registration(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp).resolve()
-            control, run_dir, _project = self._workspace(root)
-            self.controller.start_run(control, run_dir)
-            state = self.controller.read_run_state(run_dir)
-            state["deadline_epoch"] = time.time() - 1
-            self.controller._write_state(run_dir, state)
-
-            with self.assertRaisesRegex(self.controller.ValidationError, "deadline"):
-                self.controller.register_change(control, run_dir, self._change())
-            self.assertFalse((run_dir / "snapshot").exists())
 
     def test_workload_identity_drift_is_rejected_before_candidate_measurement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7508,50 +7470,9 @@ class WorkloadRoundTests(unittest.TestCase):
                 decision["reason"], "authorization_insufficient_for_next_action"
             )
             self.assertEqual(decision["blocked_action"]["action_id"], "static_review")
-            self.assertEqual(config.read_text("utf-8"), original)
-
-    def test_committed_stage_spend_can_block_the_next_stage_for_review(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp).resolve()
-            control, run_dir, project = self._workspace(root)
-            self.controller.start_run(control, run_dir)
-            self.controller.register_change(control, run_dir, self._change())
-            config = project / "configs" / "value.json"
-            original = config.read_text("utf-8")
-            config.write_text('{"workers": 8}\n', encoding="utf-8")
-            state = self.controller.read_run_state(run_dir)
-            state["controlled_spend_seconds"] = 2580.1
-            self.controller._write_state(run_dir, state)
-            evaluator = mock.Mock()
-            evaluator.evaluate_pairs.return_value = {
-                "status": "evaluated",
-                "primary": {
-                    "status": "confirmed_win",
-                    "estimate_pct": 5.0,
-                    "ci_low_pct": 4.0,
-                    "ci_high_pct": 6.0,
-                },
-                "constraints": [],
-            }
-
-            with mock.patch.object(
-                self.controller,
-                "_load_evaluate_module",
-                return_value=evaluator,
-            ):
-                decision = self.controller.evaluate_change(run_dir)
-
-            self.assertEqual(evaluator.evaluate_pairs.call_count, 1)
-            self.assertEqual(decision["status"], "review_required")
-            self.assertEqual(
-                decision["reason"], "authorization_insufficient_for_next_action"
-            )
-            self.assertEqual(
-                decision["blocked_action"]["action_id"],
-                "formal_paired",
-            )
-            self.assertNotEqual(decision["reason"], "budget_expired")
-            self.assertEqual(config.read_text("utf-8"), original)
+            self.assertFalse(decision["rolled_back"])
+            self.assertEqual(config.read_text("utf-8"), '{"workers": 8}\n')
+            self.assertTrue((run_dir / "snapshot" / "project").is_dir())
 
     def test_rollback_failure_requires_manual_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

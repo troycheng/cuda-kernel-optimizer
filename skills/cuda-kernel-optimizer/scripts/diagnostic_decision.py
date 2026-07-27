@@ -347,58 +347,6 @@ def _history_records(value: Sequence[Mapping[str, Any]] | None) -> list[dict]:
     return records
 
 
-def _proposal_records(
-    value: Sequence[Mapping[str, Any]] | None,
-    *,
-    identity_digest: str,
-) -> list[dict]:
-    if value is None:
-        return []
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise ValidationError("candidate_proposals must be a sequence")
-    records = []
-    seen = set()
-    for index, raw in enumerate(value):
-        if not isinstance(raw, Mapping):
-            raise ValidationError(f"candidate_proposals[{index}] must be an object")
-        proposal = copy.deepcopy(dict(raw))
-        proposal_id = proposal.get("proposal_id")
-        hypothesis_id = proposal.get("hypothesis_id")
-        action_id = proposal.get("action_id")
-        if not all(type(item) is str and item for item in (proposal_id, hypothesis_id, action_id)):
-            raise ValidationError("candidate proposal ids must be non-empty strings")
-        if proposal_id in seen:
-            raise ValidationError("candidate proposal ids must be unique")
-        seen.add(proposal_id)
-        if action_id != f"implement-{hypothesis_id}":
-            raise ValidationError("candidate proposal action does not match hypothesis")
-        if proposal.get("identity_digest") != identity_digest:
-            continue
-        if proposal.get("freshness") != "current":
-            continue
-        if proposal.get("basis") not in {
-            "identity_matched_candidate_history",
-            "user_authorized_upper_bound",
-        }:
-            raise ValidationError("candidate proposal cost basis is unsupported")
-        p50 = _number(
-            proposal.get("p50_seconds"),
-            f"candidate_proposals[{index}].p50_seconds",
-            positive=True,
-        )
-        p90 = _number(
-            proposal.get("p90_seconds"),
-            f"candidate_proposals[{index}].p90_seconds",
-            positive=True,
-        )
-        if p50 > p90:
-            raise ValidationError("candidate proposal P50 must not exceed P90")
-        proposal["p50_seconds"] = p50
-        proposal["p90_seconds"] = p90
-        records.append(proposal)
-    return records
-
-
 def _matching_history(records: list[dict], *, hypothesis_id=None, action_id=None) -> dict:
     matches = [
         item
@@ -466,11 +414,13 @@ def _direction_portfolio(
         record = _matching_history(history, hypothesis_id=item["hypothesis_id"])
         bound_identity = record.get("identity_digest", identity)
         stale = type(bound_identity) is str and bound_identity != identity
+        failed_for_identity = (
+            record.get("implementation_status", record.get("status")) == "failed"
+            and not stale
+        )
         status = (
             "falsified"
-            if record.get("status") == "falsified"
-            else "stale"
-            if stale
+            if record.get("status") == "falsified" or failed_for_identity
             else "supported"
             if item["confidence"] == "direction_supported"
             else "candidate"
@@ -563,80 +513,12 @@ def _adaptive_actions(
     selection: Mapping[str, Any],
     model: Mapping[str, Any],
     history: list[dict],
-    proposals: list[dict],
     action_bounds: Mapping[str, Any],
 ) -> tuple[list[dict], dict[str, dict], list[dict]]:
     actions = []
     metadata = {}
     unbounded = []
-    by_id = {item["direction_id"]: item for item in directions}
     if selection.get("status") == "sufficient":
-        proposal_by_hypothesis = {
-            item["hypothesis_id"]: item for item in proposals
-        }
-        candidate_order = sorted(
-            ranked,
-            key=lambda item: (
-                -item["benefit_ceiling_us"],
-                proposal_by_hypothesis.get(item["hypothesis_id"], {}).get(
-                    "p90_seconds", float("inf")
-                ),
-                item["hypothesis_id"],
-            ),
-        )
-        for hypothesis in candidate_order:
-            direction_id = hypothesis["hypothesis_id"]
-            if hypothesis["confidence"] != "direction_supported":
-                continue
-            stale = by_id[direction_id]["status"] == "stale"
-            action_id = (
-                f"refresh-{direction_id}" if stale else f"implement-{direction_id}"
-            )
-            record = _matching_history(history, hypothesis_id=direction_id)
-            failed = (
-                record.get("implementation_status", record.get("status")) == "failed"
-                and record.get("identity_digest") == _identity_digest(model)
-            )
-            if failed and not stale:
-                continue
-            proposal = proposal_by_hypothesis.get(direction_id, {})
-            if proposal.get("action_id") != action_id:
-                proposal = {}
-            candidate_cost = [proposal] if proposal else []
-            action, bounded = _investment_action(
-                action_id,
-                mechanism=(
-                    f"refresh:{hypothesis['mechanism']}"
-                    if stale
-                    else f"candidate:{hypothesis['mechanism']}"
-                ),
-                targets=[direction_id],
-                outcomes=_action_outcomes(action_id, [direction_id]),
-                controller_action=None,
-                model=model,
-                history=candidate_cost,
-                action_bounds=action_bounds,
-                allow_generic_bounds=False,
-                kind="refresh" if stale else "check",
-            )
-            if stale:
-                # A stale candidate bound cannot authorize a synthetic command.
-                # Refresh must be represented by an executable catalog action.
-                bounded = False
-                action["p90_seconds"] = None
-                action["implementation_status"] = "available"
-                action["reason"] = "refresh_action_unavailable"
-            elif not bounded:
-                action["reason"] = "cost_unavailable"
-            (actions if bounded else unbounded).append(action)
-            metadata[action_id] = {
-                "purpose": "refresh" if stale else "candidate",
-                "hypothesis_id": direction_id,
-                "proposal": copy.deepcopy(proposal) if proposal else None,
-            }
-            # Candidate implementation follows V1.1 benefit ordering. P90 and
-            # stable identity only break an exact benefit-ceiling tie.
-            break
         return actions, metadata, unbounded
 
     selected = selection.get("selected_request")
@@ -704,7 +586,6 @@ def decide_next_step(
     spend: Mapping[str, Any] | None = None,
     wall_elapsed_seconds: float | None = None,
     candidate_history: Sequence[Mapping[str, Any]] | None = None,
-    candidate_proposals: Sequence[Mapping[str, Any]] | None = None,
     knowledge_adaptation: Mapping[str, Any] | None = None,
     action_bounds: Mapping[str, Any] | None = None,
 ) -> dict:
@@ -720,10 +601,9 @@ def decide_next_step(
     maximum_ceiling = max((item["benefit_ceiling_us"] for item in ranked), default=0.0)
     history = _history_records(candidate_history)
     directions, identity = _direction_portfolio(ranked, model, history, threshold)
-    proposals = _proposal_records(candidate_proposals, identity_digest=identity)
     bounds = {} if action_bounds is None else _object(action_bounds, "action_bounds")
     adaptive_actions, action_metadata, unbounded_actions = _adaptive_actions(
-        ranked, directions, selection, model, history, proposals, bounds
+        ranked, directions, selection, model, history, bounds
     )
     adaptive_authorization, adaptive_spend = _investment_inputs(
         model, authorization, spend
@@ -769,13 +649,38 @@ def decide_next_step(
     elif status == "sufficient" and all(
         item["confidence"] == "direction_supported" for item in active
     ):
-        decision, reason, checkpoint = "PURSUE", "direction_supported", "after_candidate_screen"
-        next_action = {
-            "action_id": "implement-candidate",
-            "hypothesis_id": primary["hypothesis_id"],
-            "mechanism": primary["mechanism"],
-            "claim_layer": primary["claim_layer"],
+        supported_ids = {
+            item["direction_id"]
+            for item in directions
+            if item["status"] == "supported"
         }
+        primary = next(
+            (
+                item
+                for item in ranked
+                if item["hypothesis_id"] in supported_ids
+            ),
+            None,
+        )
+        if primary is None:
+            decision, reason, checkpoint = (
+                "STOP",
+                "no_admissible_new_direction",
+                "terminal",
+            )
+            next_action = None
+        else:
+            decision, reason, checkpoint = (
+                "PURSUE",
+                "direction_supported",
+                "after_candidate_screen",
+            )
+            next_action = {
+                "action_id": "implement-candidate",
+                "hypothesis_id": primary["hypothesis_id"],
+                "mechanism": primary["mechanism"],
+                "claim_layer": primary["claim_layer"],
+            }
     elif status == "evidence_gap":
         blocked, action = _blocked_authorized_action(selection)
         gap_reason = selection.get("gap_reason")
@@ -804,7 +709,7 @@ def decide_next_step(
     local_decision = decision
     effective_selected_action = adaptive.get("selected_action")
     suppressed_action_ids = []
-    if local_decision in {"MEASURE", "PURSUE"}:
+    if local_decision == "MEASURE":
         selected_investment = effective_selected_action
         blocked_investment = adaptive.get("blocked_action")
         unavailable = next(
@@ -912,14 +817,6 @@ def decide_next_step(
                     "mechanism": chosen["mechanism"],
                     "claim_layer": chosen["claim_layer"],
                 }
-                proposal = action_info.get("proposal")
-                if isinstance(proposal, Mapping):
-                    next_action.update(
-                        {
-                            "proposal_id": proposal["proposal_id"],
-                            "proposal_digest": proposal.get("proposal_digest"),
-                        }
-                    )
             elif action_info["purpose"] == "refresh":
                 decision, reason, checkpoint = (
                     "MEASURE",
@@ -960,16 +857,7 @@ def decide_next_step(
     )
     result_cost = _cost_for_action(model, action)
     if isinstance(effective_selected_action, Mapping):
-        selected_info = action_metadata.get(effective_selected_action["action_id"], {})
-        proposal = selected_info.get("proposal")
-        if isinstance(proposal, Mapping):
-            result_cost = {
-                "class": effective_selected_action.get("cost"),
-                "p50_seconds": proposal["p50_seconds"],
-                "p90_seconds": proposal["p90_seconds"],
-                "basis": proposal["basis"],
-            }
-        elif result_cost["p90_seconds"] is None:
+        if result_cost["p90_seconds"] is None:
             bound = bounds.get(effective_selected_action["action_id"])
             if isinstance(bound, Mapping) and bound.get("basis") in {
                 "identity_matched_history",
@@ -1061,12 +949,6 @@ def decide_next_step(
             }
             | set(suppressed_action_ids)
             | {
-                item["action_id"]
-                for item in proposals
-                if not isinstance(effective_selected_action, Mapping)
-                or item["action_id"] != effective_selected_action["action_id"]
-            }
-            | {
                 item.get("action_id", f"implement-{item.get('hypothesis_id')}")
                 for item in history
                 if item.get("implementation_status", item.get("status")) == "failed"
@@ -1079,11 +961,7 @@ def decide_next_step(
             "benefit": "local_execution_map_timing_upper_bound",
             "knowledge_authority": "none",
         },
-        "next_feedback_point": (
-            result["next_checkpoint"]
-            if result["decision"] == "REVIEW_REQUIRED"
-            else adaptive.get("next_checkpoint")
-        ),
+        "next_feedback_point": result["next_checkpoint"],
         "knowledge_adaptation": _knowledge_summary(knowledge_adaptation),
     }
     return result

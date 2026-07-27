@@ -1576,6 +1576,7 @@ class Sm120AcceptanceTests(unittest.TestCase):
             "hypothesis": "Two redundant launches dominate this fixture workload.",
             "diagnosis_ids": diagnosis["diagnosis_ids"] or ["kernel:fixture"],
             "scope": "project",
+            "risk": "low",
             "candidate": {
                 "name": "single-launch",
                 "revision": "fixture-fast",
