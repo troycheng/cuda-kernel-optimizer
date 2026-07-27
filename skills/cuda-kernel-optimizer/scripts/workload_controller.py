@@ -1393,13 +1393,14 @@ def run_probe(
     if len(matching) != 1 or matching[0] != probe:
         raise ValidationError("probe must exactly match one validated control probe")
     selected = matching[0]
+    run_root = Path(run_dir).expanduser().resolve(strict=False)
+    _require_run_grant_investment_control(read_run_state(run_root))
     actual_timeout = float(selected["timeout_seconds"])
     if deadline_epoch is not None:
         remaining = float(deadline_epoch) - time.time()
         if remaining <= 0:
             raise ValidationError("workload optimization budget deadline has expired")
         actual_timeout = min(actual_timeout, remaining)
-    run_root = Path(run_dir).expanduser().resolve(strict=False)
     probes_dir = run_root / "probes"
     probes_dir.mkdir(parents=True, exist_ok=True)
     output_path = probes_dir / f".{selected['id']}.output.json"
@@ -1566,11 +1567,13 @@ def run_probes(
     deadline_epoch: float | None = None,
 ) -> list[dict]:
     normalized = validate_control_manifest(control)
+    run_root = Path(run_dir).expanduser().resolve(strict=False)
+    _require_run_grant_investment_control(read_run_state(run_root))
     return [
         run_probe(
             probe,
             normalized,
-            run_dir,
+            run_root,
             deadline_epoch=deadline_epoch,
         )
         for probe in normalized["probes"]
@@ -1579,6 +1582,7 @@ def run_probes(
 
 def diagnose_run(run_dir: os.PathLike[str] | str) -> dict:
     run_root = Path(run_dir).expanduser().resolve(strict=False)
+    _require_run_grant_investment_control(read_run_state(run_root))
     probes_dir = run_root / "probes"
     values = []
     for path in sorted(probes_dir.glob("*.json")):
@@ -1617,6 +1621,7 @@ def review_change(
     normalized = validate_control_manifest(control)
     change = validate_change_set(change_set, normalized)
     run_root = Path(run_dir).expanduser().resolve(strict=False)
+    _require_run_grant_investment_control(read_run_state(run_root))
     reviewer = _load_reviewer_module()
     request = _final_review_request(
         run_root,
@@ -5064,12 +5069,25 @@ def _load_review_call_evidence(
         raise ValidationError(f"{review_kind} review marker must be regular")
     intent = load_json_object(intent_path) if intent_path.is_file() else None
     complete = load_json_object(complete_path) if complete_path.is_file() else None
+    binding = state.get("review_call_intent_sha256")
+    if binding is not None:
+        binding = _sha256(binding, "state review intent")
     if intent is None and complete is not None:
         intent = _review_generation(
             root,
             "intent",
             _sha256(complete.get("intent_sha256"), "review complete intent"),
         )
+    if intent is None and binding is not None:
+        generation_path = (
+            root / "generations" / "intents" / f"{binding}.json"
+        )
+        if generation_path.is_file() and not generation_path.is_symlink():
+            intent = _review_generation(
+                root,
+                "intent",
+                _sha256(binding, "state review intent"),
+            )
     if intent is None:
         return None, None, None
     intent = _validate_review_call_intent(review_kind, intent)
@@ -5087,6 +5105,33 @@ def _load_review_call_evidence(
             complete = _review_generation(
                 root, "complete", _sha256(digest, "state review completion")
             )
+    if complete is None and binding == intent_digest:
+        matches = []
+        generation_root = root / "generations" / "completions"
+        if generation_root.exists() or generation_root.is_symlink():
+            if generation_root.is_symlink() or not generation_root.is_dir():
+                raise ValidationError(
+                    f"{review_kind} review completion generations are invalid"
+                )
+            for path in sorted(generation_root.glob("*.json")):
+                if path.is_symlink() or not path.is_file():
+                    raise ValidationError(
+                        f"{review_kind} review completion generation is invalid"
+                    )
+                candidate = load_json_object(path)
+                if candidate.get("intent_sha256") != intent_digest:
+                    continue
+                if path.stem != _canonical_digest(candidate):
+                    raise ValidationError(
+                        f"{review_kind} review completion generation drifted"
+                    )
+                matches.append(candidate)
+        if len(matches) > 1:
+            raise ValidationError(
+                f"{review_kind} review has conflicting completions"
+            )
+        if matches:
+            complete = matches[0]
     if complete is None:
         return intent, None, None
     aggregate = _review_generation(
@@ -5173,11 +5218,44 @@ def _recover_reviewer_checkpoint(
     state: Mapping[str, Any],
     review_kind: str,
 ) -> tuple[dict, str, dict | None]:
+    if (
+        state.get("status") == "completed"
+        and state.get("terminal_reason") == "candidate_abandoned"
+    ):
+        return copy.deepcopy(dict(state)), "abandoned", None
     root = _review_call_root(run_root, review_kind)
-    if not any(
+    markers_exist = any(
         path.exists() or path.is_symlink()
         for path in (root / "intent.json", root / "complete.json")
+    )
+    binding = state.get("review_call_intent_sha256")
+    if binding is not None and (
+        type(binding) is not str
+        or re.fullmatch(r"[a-f0-9]{64}", binding) is None
     ):
+        blocked = _persist_task6_manual_recovery(
+            run_root,
+            state,
+            reason="review_intent_binding_invalid",
+        )
+        return blocked, "manual", None
+    bound_generation = (
+        root / "generations" / "intents" / f"{binding}.json"
+        if binding is not None
+        else None
+    )
+    if not markers_exist and (
+        bound_generation is None
+        or not bound_generation.is_file()
+        or bound_generation.is_symlink()
+    ):
+        if binding is not None and review_kind == "final":
+            blocked = _persist_task6_manual_recovery(
+                run_root,
+                state,
+                reason="review_intent_binding_unresolved",
+            )
+            return blocked, "manual", None
         return copy.deepcopy(dict(state)), "none", None
     try:
         intent, complete, aggregate = _load_review_call_evidence(
@@ -5346,21 +5424,13 @@ def _managed_review_call(
             safe_request["request_digest"], trigger, "skipped", maximum_wait
         )
     else:
-        try:
-            aggregate = reviewer.run_prioritized_reviewers(
-                configs,
-                safe_request,
-                review_root / "provider",
-                trigger=trigger,
-                total_timeout_seconds=maximum_wait,
-            )
-        except (OSError, RuntimeError, ValueError):
-            aggregate = _empty_review_aggregate(
-                safe_request["request_digest"],
-                trigger,
-                "unavailable",
-                maximum_wait,
-            )
+        aggregate = reviewer.run_prioritized_reviewers(
+            configs,
+            safe_request,
+            review_root / "provider",
+            trigger=trigger,
+            total_timeout_seconds=maximum_wait,
+        )
     aggregate = _validate_review_aggregate(intent, aggregate, configs)
     aggregate_digest = _canonical_digest(aggregate)
     _review_generation(
@@ -5663,6 +5733,30 @@ def _validate_diagnosis_publish_intent(
         direction_complete, direction_aggregate = (
             _direction_review_generation(run_root, base, complete_digest)
         )
+        direction_root = _review_call_root(run_root, "direction")
+        direction_intent = _validate_review_call_intent(
+            "direction",
+            _review_generation(
+                direction_root,
+                "intent",
+                _sha256(
+                    direction_complete.get("intent_sha256"),
+                    "direction review intent",
+                ),
+            ),
+        )
+        proposal_hashes = direction_intent["request"]["review_summary"][
+            "artifact_hashes"
+        ]
+        if (
+            proposal_hashes.get("request_set.json")
+            != _canonical_digest(intent["request_set"])
+            or proposal_hashes.get("knowledge_adaptation.json")
+            != _canonical_digest(intent["knowledge_adaptation"])
+        ):
+            raise ValidationError(
+                "diagnosis direction review proposal binding drifted"
+            )
     elif base.get("review_call_intent_sha256") is not None:
         raise ValidationError(
             "diagnosis publish omitted a pending direction review"
@@ -5690,17 +5784,16 @@ def _materialize_diagnosis_publish(
 ) -> None:
     active_root = run_root / "active_diagnosis"
     generation = intent["hypothesis_generation"]
+    generation_path = (
+        active_root
+        / "hypothesis_generations"
+        / f"{generation['hypothesis_set_sha256']}.json"
+    )
     fixed_artifacts = (
         (run_root / "diagnosis_context.json", intent["diagnosis_context"]),
         (
             active_root / "knowledge_adaptation.json",
             intent["knowledge_adaptation"],
-        ),
-        (
-            active_root
-            / "hypothesis_generations"
-            / f"{generation['hypothesis_set_sha256']}.json",
-            generation,
         ),
         (active_root / "hypothesis_result.json", intent["hypothesis_result"]),
         (active_root / "request_set.json", intent["request_set"]),
@@ -5714,6 +5807,17 @@ def _materialize_diagnosis_publish(
             intent["investment_brief"],
         ),
     )
+    if generation_path.exists() or generation_path.is_symlink():
+        if (
+            generation_path.is_symlink()
+            or not generation_path.is_file()
+            or load_json_object(generation_path) != generation
+        ):
+            raise ValidationError(
+                "diagnosis immutable hypothesis generation conflicts"
+            )
+    else:
+        _atomic_json(generation_path, generation)
     for path, artifact in fixed_artifacts:
         _atomic_json(path, artifact)
     events = _verify_active_diagnosis_ledger(run_root)
@@ -5725,7 +5829,10 @@ def _materialize_diagnosis_publish(
         raise ValidationError(
             "diagnosis publish found a foreign proposal ledger tail"
         )
-    for path, artifact in fixed_artifacts:
+    for path, artifact in (
+        (generation_path, generation),
+        *fixed_artifacts,
+    ):
         if (
             path.is_symlink()
             or not path.is_file()
@@ -5841,6 +5948,15 @@ def _recover_diagnosis_publish(
         run_root / "active_diagnosis" / "diagnosis_publish_intent.json"
     )
     if not intent_path.exists() and not intent_path.is_symlink():
+        if state.get("diagnosis_publish_intent_sha256") is not None:
+            return (
+                _persist_task6_manual_recovery(
+                    run_root,
+                    state,
+                    reason="diagnosis_publish_intent_missing",
+                ),
+                "manual",
+            )
         return copy.deepcopy(dict(state)), "none"
     try:
         if intent_path.is_symlink() or not intent_path.is_file():
@@ -5958,6 +6074,8 @@ def _review_diagnostic_direction(
     state: Mapping[str, Any],
     performance_model: Mapping[str, Any],
     hypothesis_result: Mapping[str, Any],
+    request_set: Mapping[str, Any],
+    knowledge_adaptation: Mapping[str, Any],
     selection: Mapping[str, Any],
 ) -> dict | None:
     """Run an optional state-bound direction challenge."""
@@ -6002,6 +6120,10 @@ def _review_diagnostic_direction(
             "performance_model.json": _canonical_digest(performance_model),
             "hypothesis_result.json": _canonical_digest(hypothesis_result),
             "evidence_selection.json": _canonical_digest(selection),
+            "request_set.json": _canonical_digest(request_set),
+            "knowledge_adaptation.json": _canonical_digest(
+                knowledge_adaptation
+            ),
         },
     )
     _managed_state, aggregate = _managed_review_call(
@@ -6055,6 +6177,15 @@ def _register_active_diagnosis_proposal_unlocked(
         return state
     if review_recovery not in {"none", "waiting"}:
         return state
+    if (
+        review_recovery == "none"
+        and state.get("review_call_intent_sha256") is not None
+    ):
+        return _persist_task6_manual_recovery(
+            run_root,
+            state,
+            reason="review_intent_binding_unresolved",
+        )
     if state["next_action"] != "propose_hypotheses":
         raise ValidationError("run is not ready for an active diagnosis proposal")
     _active_ledger_append_boundary(run_root, "proposal")
@@ -6143,17 +6274,29 @@ def _register_active_diagnosis_proposal_unlocked(
             state,
             performance_model,
             hypothesis_result,
+            adapted_request_set,
+            knowledge_adaptation,
             selection,
         )
         state = read_run_state(run_root)
         if state.get("next_action") == "manual_recovery":
             return state
+        decision_state = state
+        direction_complete, _direction_aggregate = (
+            _direction_review_for_diagnosis_publish(run_root, state)
+        )
+        if direction_complete is not None:
+            decision_state = copy.deepcopy(dict(state))
+            decision_state["controlled_spend_seconds"] = (
+                _controlled_spend_seconds(state)
+                + float(direction_complete["total_wait_seconds"])
+            )
         decision_context = copy.deepcopy(context)
         decision_context["knowledge_adaptation"] = copy.deepcopy(
             knowledge_adaptation
         )
         investment_inputs = _diagnostic_investment_inputs(
-            run_root, state, decision_context
+            run_root, decision_state, decision_context
         )
         decision = _load_diagnostic_decision_module().decide_next_step(
             performance_model,
@@ -9842,7 +9985,19 @@ def abandon(run_dir: os.PathLike[str] | str) -> dict:
             )
         if recovered_failure_decision is not None:
             return recovered_failure_decision
-        if state.get("next_action") == "manual_recovery":
+        reviewer_manual_reasons = {
+            "direction_review_outcome_unknown",
+            "direction_review_recovery_invalid",
+            "final_review_outcome_unknown",
+            "final_review_recovery_invalid",
+            "review_intent_binding_unresolved",
+            "review_intent_binding_invalid",
+        }
+        if (
+            state.get("next_action") == "manual_recovery"
+            and state.get("manual_recovery_reason")
+            not in reviewer_manual_reasons
+        ):
             return state
         if state.get("status") == "completed":
             decision = load_json_object(decision_path)
@@ -9940,6 +10095,7 @@ def abandon(run_dir: os.PathLike[str] | str) -> dict:
         abandoned.pop("candidate_pause_authorization_sha256", None)
         abandoned.pop("candidate_stage_intent_sha256", None)
         abandoned.pop("candidate_stage_intent_stage", None)
+        abandoned.pop("manual_recovery_reason", None)
         _write_state(run_root, abandoned)
         _cleanup_candidate_stage_markers(run_root)
         return decision

@@ -1508,7 +1508,13 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 )
 
     def test_diagnosis_publish_recovers_one_complete_bundle(self) -> None:
-        for mode in ("middle-artifact", "cleanup", "ledger-drift"):
+        for mode in (
+            "middle-artifact",
+            "cleanup",
+            "ledger-drift",
+            "missing-intent-marker",
+            "immutable-conflict",
+        ):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp).resolve()
                 helper = workload_fixtures.WorkloadRoundTests()
@@ -1612,6 +1618,40 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                         ("manual_recovery_required", "manual_recovery"),
                     )
                     self.assertTrue(intent_path.is_file())
+                    continue
+                if mode == "missing-intent-marker":
+                    intent_path.unlink()
+                    recovered = helper.controller.resume_run(run_dir)
+                    self.assertEqual(
+                        (recovered["status"], recovered["next_action"]),
+                        ("manual_recovery_required", "manual_recovery"),
+                    )
+                    continue
+                if mode == "immutable-conflict":
+                    generation_path = (
+                        active
+                        / "hypothesis_generations"
+                        / (
+                            intent["hypothesis_generation"][
+                                "hypothesis_set_sha256"
+                            ]
+                            + ".json"
+                        )
+                    )
+                    conflict = {"immutable": "foreign"}
+                    helper.controller._atomic_json(
+                        generation_path,
+                        conflict,
+                    )
+                    recovered = helper.controller.resume_run(run_dir)
+                    self.assertEqual(
+                        (recovered["status"], recovered["next_action"]),
+                        ("manual_recovery_required", "manual_recovery"),
+                    )
+                    self.assertEqual(
+                        json.loads(generation_path.read_text("utf-8")),
+                        conflict,
+                    )
                     continue
 
                 with mock.patch.object(
@@ -1896,6 +1936,31 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                         complete_path.read_text("utf-8")
                     )
                     if kind == "direction" and boundary == "after-call":
+                        diagnosis_intent = json.loads(
+                            (
+                                run_dir
+                                / "active_diagnosis"
+                                / "diagnosis_publish_intent.json"
+                            ).read_text("utf-8")
+                        )
+                        review_intent = json.loads(
+                            (review_root / "intent.json").read_text("utf-8")
+                        )
+                        proposal_hashes = review_intent["request"][
+                            "review_summary"
+                        ]["artifact_hashes"]
+                        self.assertEqual(
+                            proposal_hashes["request_set.json"],
+                            helper.controller._canonical_digest(
+                                diagnosis_intent["request_set"]
+                            ),
+                        )
+                        self.assertEqual(
+                            proposal_hashes["knowledge_adaptation.json"],
+                            helper.controller._canonical_digest(
+                                diagnosis_intent["knowledge_adaptation"]
+                            ),
+                        )
                         waiting = helper.controller.resume_run(run_dir)
                         self.assertEqual(
                             waiting["next_action"],
@@ -1969,6 +2034,19 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                             result["next_action"],
                             "collect_evidence",
                         )
+                        brief = json.loads(
+                            (
+                                run_dir
+                                / "active_diagnosis"
+                                / "investment_brief.json"
+                            ).read_text("utf-8")
+                        )
+                        self.assertAlmostEqual(
+                            brief["cumulative_investment"][
+                                "elapsed_seconds"
+                            ],
+                            committed["controlled_spend_seconds"],
+                        )
                     else:
                         self.assertEqual(result["status"], "promoted")
 
@@ -1980,17 +2058,21 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             hypothesis, request = helper._active_proposal(run_dir)
             reviewer = helper.controller._load_reviewer_module()
             before = helper.controller.read_run_state(run_dir)
+            review_root = (
+                run_dir / "active_diagnosis" / "direction_review"
+            )
             with mock.patch.object(
                 reviewer,
                 "run_prioritized_reviewers",
-                side_effect=KeyboardInterrupt(),
-            ), self.assertRaises(KeyboardInterrupt):
+                side_effect=OSError("provider outcome unknown"),
+            ), self.assertRaisesRegex(OSError, "provider outcome unknown"):
                 helper.controller.register_active_diagnosis_proposal(
                     control,
                     run_dir,
                     hypothesis,
                     request,
                 )
+            (review_root / "intent.json").unlink()
             with mock.patch.object(
                 reviewer,
                 "run_prioritized_reviewers",
@@ -2041,6 +2123,90 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             self.assertFalse(
                 (run_dir / "final_review" / "complete.json").exists()
             )
+            stable = helper.controller.resume_run(run_dir)
+            self.assertEqual(
+                (stable["status"], stable["terminal_reason"]),
+                ("completed", "candidate_abandoned"),
+            )
+
+        with self.subTest(kind="final", boundary="unknown-resume-abandon"), (
+            tempfile.TemporaryDirectory()
+        ) as tmp:
+            root = Path(tmp).resolve()
+            helper, _control, run_dir, _project = final_setup(root)
+            reviewer = helper.controller._load_reviewer_module()
+            with mock.patch.object(
+                reviewer,
+                "run_prioritized_reviewers",
+                side_effect=KeyboardInterrupt(),
+            ), self.assertRaises(KeyboardInterrupt):
+                helper.controller.evaluate_change(run_dir)
+            manual = helper.controller.resume_run(run_dir)
+            self.assertEqual(
+                (manual["status"], manual["next_action"]),
+                ("manual_recovery_required", "manual_recovery"),
+            )
+            abandoned = helper.controller.abandon(run_dir)
+            self.assertEqual(abandoned["status"], "abandoned")
+            self.assertEqual(
+                helper.controller.read_run_state(run_dir)[
+                    "controlled_spend_seconds"
+                ],
+                manual["controlled_spend_seconds"],
+            )
+
+        with self.subTest(
+            kind="direction",
+            boundary="generation-only-complete",
+        ), tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            helper, control, run_dir, _project = active_setup(root)
+            hypothesis, request = helper._active_proposal(run_dir)
+            reviewer = helper.controller._load_reviewer_module()
+            active = run_dir / "active_diagnosis"
+            review_root = active / "direction_review"
+            original_atomic = helper.controller._atomic_json
+
+            def interrupt_before_publish(path, value):
+                if Path(path) == active / "diagnosis_publish_intent.json":
+                    raise OSError("interrupted before diagnosis intent")
+                return original_atomic(path, value)
+
+            with mock.patch.object(
+                reviewer,
+                "run_prioritized_reviewers",
+                side_effect=unavailable_aggregate,
+            ), mock.patch.object(
+                helper.controller,
+                "_atomic_json",
+                side_effect=interrupt_before_publish,
+            ), self.assertRaisesRegex(
+                OSError,
+                "interrupted before diagnosis intent",
+            ):
+                helper.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    hypothesis,
+                    request,
+                )
+            (review_root / "intent.json").unlink()
+            (review_root / "complete.json").unlink()
+            with mock.patch.object(
+                reviewer,
+                "run_prioritized_reviewers",
+                side_effect=AssertionError("completed review reran"),
+            ) as panel:
+                recovered = (
+                    helper.controller.register_active_diagnosis_proposal(
+                        control,
+                        run_dir,
+                        hypothesis,
+                        request,
+                    )
+                )
+            panel.assert_not_called()
+            self.assertEqual(recovered["next_action"], "collect_evidence")
 
         with self.subTest(kind="final", boundary="standalone-skipped"), (
             tempfile.TemporaryDirectory()

@@ -11,6 +11,7 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -663,6 +664,59 @@ class ReviewerProcessTests(unittest.TestCase):
                 self.assertEqual(
                     [item["provider"] for item in selected], providers
                 )
+
+        custom = [
+            {
+                "provider": provider,
+                "argv": [provider],
+                "timeout_seconds": 5,
+            }
+            for provider in ("team-reviewer", "local-reviewer", "google-ai-mode")
+        ]
+        self.assertEqual(
+            [
+                item["provider"]
+                for item in self.reviewer.select_reviewer_configs(custom, "final")
+            ],
+            ["google-ai-mode", "team-reviewer", "local-reviewer"],
+        )
+
+        for provider in ("team-reviewer", "local-reviewer"):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+
+                def completed(batch, request, *_args, **_kwargs):
+                    return {
+                        "reviews": [
+                            {
+                                "provider": batch[0]["provider"],
+                                "underlying_model": "unknown",
+                                "status": "completed",
+                                "response": _response(request["request_digest"]),
+                                "failure": None,
+                                "duration_seconds": 0.01,
+                            }
+                        ]
+                    }
+
+                with mock.patch.object(
+                    self.reviewer,
+                    "run_reviewers",
+                    side_effect=completed,
+                ) as runner:
+                    artifact = self.reviewer.run_prioritized_reviewers(
+                        [{
+                            "provider": provider,
+                            "argv": [provider],
+                            "timeout_seconds": 5,
+                        }],
+                        _request(self.reviewer),
+                        root,
+                        trigger="ordinary",
+                        total_timeout_seconds=5,
+                    )
+                self.assertEqual(runner.call_count, 1)
+                self.assertEqual(artifact["providers_completed"], [provider])
 
     def test_copilot_is_second_in_provider_priority(self) -> None:
         configs = [

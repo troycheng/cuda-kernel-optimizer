@@ -71,7 +71,8 @@ _CONSTRAINT_STATUSES = {"passed", "failed", "skipped", "unknown"}
 _DIRECTION_SELECTION_STATUSES = {"selected", "evidence_gap", "blocked", "skipped", "unknown"}
 _ARTIFACT_HASH_NAMES = {
     "performance_model.json", "hypothesis_result.json", "evidence_selection.json",
-    "diagnosis.json", "change_set.json", "candidate.diff",
+    "request_set.json", "knowledge_adaptation.json", "diagnosis.json",
+    "change_set.json", "candidate.diff",
 }
 _SAFE_ENV = {
     "HOME",
@@ -927,9 +928,10 @@ def _ordered_reviewer_configs(
         provider = _string(config["provider"], f"reviewers[{index}].provider", 64)
         if _PROVIDER.fullmatch(provider) is None:
             raise ReviewerError(f"reviewers[{index}].provider is invalid")
-        canonical = _PROVIDER_ALIASES.get(provider.lower())
-        if canonical is None:
-            continue
+        canonical = _PROVIDER_ALIASES.get(
+            provider.lower(),
+            provider.lower(),
+        )
         underlying_model = config.get("underlying_model", "unknown")
         underlying_model = _string(
             underlying_model, f"reviewers[{index}].underlying_model", 64
@@ -961,7 +963,10 @@ def _ordered_reviewer_configs(
             }
         )
     normalized.sort(
-        key=lambda item: (priority[item["canonical_provider"]], item["provider"])
+        key=lambda item: priority.get(
+            item["canonical_provider"],
+            len(priority),
+        )
     )
     distinct = []
     run_keys = set()

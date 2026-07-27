@@ -7091,6 +7091,16 @@ class WorkloadRoundTests(unittest.TestCase):
                         run_dir,
                     )
                 ),
+                "run_probes": lambda: self.controller.run_probes(
+                    control,
+                    run_dir,
+                ),
+                "diagnose_run": lambda: self.controller.diagnose_run(run_dir),
+                "review_change": lambda: self.controller.review_change(
+                    control,
+                    run_dir,
+                    change,
+                ),
                 "register_change": lambda: self.controller.register_change(
                     control,
                     run_dir,
@@ -7108,6 +7118,11 @@ class WorkloadRoundTests(unittest.TestCase):
                 mock.patch.object(
                     self.controller,
                     "_execute_candidate_stage",
+                    runner,
+                ),
+                mock.patch.object(
+                    self.controller,
+                    "run_probe",
                     runner,
                 ),
             ):
