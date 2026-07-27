@@ -6610,6 +6610,8 @@ def _commit_candidate_failure(
 def _recover_candidate_failure(
     run_root: Path,
     control: Mapping[str, Any],
+    *,
+    discard_unbound: bool,
 ) -> dict | object | None:
     pending_path = run_root / "candidate_failure_pending.json"
     if not pending_path.exists() and not pending_path.is_symlink():
@@ -6624,7 +6626,8 @@ def _recover_candidate_failure(
             "candidate failure pending base state",
         )
         if _canonical_digest(state) == base_digest:
-            pending_path.unlink()
+            if discard_unbound:
+                pending_path.unlink()
             return _UNBOUND_CANDIDATE_FAILURE
     return _apply_candidate_failure_pending(
         run_root,
@@ -7564,7 +7567,11 @@ def _candidate_recovery_preflight(
     control: Mapping[str, Any],
 ) -> tuple[dict, dict | None, bool]:
     try:
-        recovered_failure = _recover_candidate_failure(run_root, control)
+        recovered_failure = _recover_candidate_failure(
+            run_root,
+            control,
+            discard_unbound=False,
+        )
     except (KeyError, OSError, ValidationError):
         return (
             _persist_candidate_manual_recovery(
@@ -8762,7 +8769,11 @@ def resume_run(run_dir: os.PathLike[str] | str) -> dict:
 def _resume_run_unlocked(run_root: Path) -> dict:
     state = read_run_state(run_root)
     control = _load_frozen_control(run_root, state)
-    recovered = _recover_candidate_failure(run_root, control)
+    recovered = _recover_candidate_failure(
+        run_root,
+        control,
+        discard_unbound=True,
+    )
     if recovered is _UNBOUND_CANDIDATE_FAILURE:
         state = read_run_state(run_root)
     elif recovered is not None:

@@ -1352,10 +1352,54 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 )
 
                 if tamper == "unbound":
+                    pending_bytes = pending.read_bytes()
+                    grant_root = (
+                        run_dir
+                        / "active_diagnosis"
+                        / "authorization_grants"
+                    )
+                    base_grants = sorted(
+                        path.name for path in grant_root.glob("*.json")
+                    )
                     self.assertNotIn(
                         "candidate_failure_pending_sha256",
                         base_state,
                     )
+                    refusals = (
+                        lambda: helper.controller.authorize_run(
+                            control,
+                            run_dir,
+                            workload_fixtures._run_grant(
+                                "grant-during-unbound-failure"
+                            ),
+                        ),
+                        lambda: helper.controller.abandon(run_dir),
+                    )
+                    for invoke in refusals:
+                        for _attempt in range(2):
+                            with self.assertRaisesRegex(
+                                helper.controller.ValidationError,
+                                "resume the unbound candidate failure",
+                            ):
+                                invoke()
+                        self.assertEqual(pending.read_bytes(), pending_bytes)
+                        self.assertEqual(
+                            helper.controller.read_run_state(run_dir),
+                            base_state,
+                        )
+                        self.assertEqual(
+                            helper.controller._verify_active_diagnosis_ledger(
+                                run_dir
+                            ),
+                            base_ledger,
+                        )
+                        self.assertEqual(
+                            sorted(
+                                path.name
+                                for path in grant_root.glob("*.json")
+                            ),
+                            base_grants,
+                        )
                     with mock.patch.object(
                         helper.controller,
                         "_execute_candidate_stage",
