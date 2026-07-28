@@ -44,6 +44,7 @@ def _case(
     outcome_text: str,
     *,
     scoring_group: str = "triton",
+    archive_case_directory: str | None = None,
 ) -> dict:
     input_refs = _references(directory, inputs)
     label_refs = _references(directory, labels)
@@ -58,7 +59,7 @@ def _case(
         "input_snapshot": {
             "archive_identity_facts": {
                 "status": "incomplete",
-                "archive_case_directory": directory.name,
+                "archive_case_directory": archive_case_directory or directory.name,
                 "source_manifest_sha256": canonical_sha256(input_refs),
                 "unknown_fields": [
                     "knowledge_identity",
@@ -128,7 +129,14 @@ def _extract_r02(root: Path) -> dict:
         "R02",
         root / "iter_173_pdl_gap_audit",
         ("analysis.json", "run_nsys_v3.sh", "run_correctness_v3.sh"),
-        ("DECISION.md",),
+        (
+            "correctness_v3.semantic_vs_iter161.json",
+            "nsys_v3/gap_analysis.json",
+            "correctness_v4.semantic_vs_iter161.json",
+            "nsys_v4/gap_analysis.json",
+            "correctness_v5.semantic_vs_iter161.json",
+            "nsys_v5/gap_analysis.json",
+        ),
         [
             "aggregate_timing_only",
             "missing_execution_window",
@@ -136,7 +144,7 @@ def _extract_r02(root: Path) -> dict:
             "missing_execution_topology",
         ],
         "Archive has no extracted runtime diagnosis.",
-        "Decision text remains historical-only.",
+        "Variant correctness and gap results remain historical-only.",
     )
 
 
@@ -169,7 +177,11 @@ def _extract_r04(root: Path) -> dict:
         "R04",
         root / "iter_184_fastsort_map_fused",
         ("DESIGN.md", "run_candidate_correctness.sh", "run_nsys_mechanism_gate.sh"),
-        ("analysis.json", "DECISION.md", "closure.sha256"),
+        (
+            "nsys_fastsort_map_1000/analysis.json",
+            "DECISION.md",
+            "closure.sha256",
+        ),
         [
             "aggregate_timing_only",
             "missing_execution_window",
@@ -233,6 +245,156 @@ def _extract_r06(root: Path) -> dict:
     )
 
 
+_POST_AUDIT_REASON_CODES = [
+    "missing_controller_epoch",
+    "missing_knowledge_identity",
+    "missing_controller_execution_map",
+    "missing_controller_performance_model",
+    "label_not_machine_mapped",
+]
+
+
+def _post_audit_partial_cases(root: Path) -> list[dict]:
+    """Retain useful evidence found on 5090 without inventing Controller state."""
+    specs = (
+        (
+            "R07",
+            (
+                "run_manifest.json",
+                "preflight_check.json",
+                "iter_149_decode_into_nms/nsys_candidate_1000/candidate.sqlite",
+                "iter_149_decode_into_nms/nsys_candidate_1000/inputs.sha256",
+                "iter_149_decode_into_nms/nsys_candidate_1000/evidence.sha256",
+                "iter_156_nms_fp32_output/build/sources.sha256",
+                "iter_156_nms_fp32_output/correctness_output_invariants.json",
+                "iter_156_nms_fp32_output/correctness_semantic_iter149_vs_candidate.json",
+                "iter_156_nms_fp32_output/correctness.sha256",
+                "iter_156_nms_fp32_output/run_timing_vs_iter135.sh",
+            ),
+            (
+                "iter_156_nms_fp32_output/timing_vs_iter149/analysis.json",
+                "iter_156_nms_fp32_output/timing_confirmation_vs_iter149/analysis.json",
+            ),
+            "Iter149 and Iter156 artifacts contain useful kernel evidence but no Controller-sealed diagnosis.",
+            "The Iter156 paired result remains historical-only.",
+        ),
+        (
+            "R08",
+            (
+                "run_manifest.json",
+                "preflight_check.json",
+                "iter_156_nms_fp32_output/nsys_fp32_output_1000/candidate.sqlite",
+                "iter_156_nms_fp32_output/nsys_fp32_output_1000/inputs.sha256",
+                "iter_156_nms_fp32_output/nsys_fp32_output_1000/evidence.sha256",
+                "iter_160_fastsort_store4/build/sources.sha256",
+                "iter_160_fastsort_store4/correctness_output_invariants.json",
+                "iter_160_fastsort_store4/correctness_semantic_iter156_vs_candidate.json",
+                "iter_160_fastsort_store4/correctness.sha256",
+                "iter_160_fastsort_store4/run_timing_vs_iter156.sh",
+            ),
+            (
+                "iter_160_fastsort_store4/timing_vs_iter156/analysis.json",
+                "iter_160_fastsort_store4/timing_confirmation_vs_iter156/analysis.json",
+            ),
+            "Iter156 and Iter160 artifacts contain useful kernel evidence but no Controller-sealed diagnosis.",
+            "The Iter160 paired result remains historical-only.",
+        ),
+        (
+            "R09",
+            (
+                "run_manifest.json",
+                "preflight_check.json",
+                "iter_160_fastsort_store4/nsys_fastsort_store4_1000/candidate.sqlite",
+                "iter_160_fastsort_store4/nsys_fastsort_store4_1000/inputs.sha256",
+                "iter_160_fastsort_store4/nsys_fastsort_store4_1000/evidence.sha256",
+                "iter_161_group_reserve4/build/sources.sha256",
+                "iter_161_group_reserve4/correctness_output_invariants.json",
+                "iter_161_group_reserve4/correctness_semantic_iter160_vs_candidate.json",
+                "iter_161_group_reserve4/correctness.sha256",
+                "iter_161_group_reserve4/run_timing_vs_iter156.sh",
+            ),
+            (
+                "iter_161_group_reserve4/timing_vs_iter160/analysis.json",
+                "iter_161_group_reserve4/timing_confirmation_vs_iter160/analysis.json",
+            ),
+            "Iter160 and Iter161 artifacts contain useful kernel evidence but no Controller-sealed diagnosis.",
+            "The Iter161 paired result remains historical-only.",
+        ),
+        (
+            "R10",
+            (
+                "run_manifest.json",
+                "preflight_check.json",
+                "iter_169_aux_stream_build_gate/candidate.sha256",
+                "iter_169_aux_stream_build_gate/analysis.json",
+                "iter_169_aux_stream_build_gate/run_nsys_gate.sh",
+                "iter_169_aux_stream_build_gate/nsys_overlap_gate/inputs.sha256",
+                "iter_169_aux_stream_build_gate/nsys_overlap_gate/candidate/candidate.sqlite",
+                "iter_169_aux_stream_build_gate/nsys_overlap_gate/analysis.json",
+                "iter_169_aux_stream_build_gate/nsys_overlap_gate/evidence.sha256",
+            ),
+            ("iter_169_aux_stream_build_gate/DECISION.md",),
+            "Iter169 contains a real overlap gate but no Controller-sealed diagnosis or execution map.",
+            "The closed-direction decision remains historical-only.",
+        ),
+        (
+            "R11",
+            (
+                "run_manifest.json",
+                "preflight_check.json",
+                "iter_181_persistent_counters/build_candidate/sources.sha256",
+                "iter_181_persistent_counters/correctness.sha256",
+                "iter_181_persistent_counters/correctness_repeat1/evidence.sha256",
+                "iter_181_persistent_counters/nsys_paired_gate/02_B/profile.sqlite",
+                "iter_181_persistent_counters/nsys_paired_gate/analysis.json",
+                "iter_181_persistent_counters/nsys_paired_gate/inputs.sha256",
+                "iter_181_persistent_counters/nsys_paired_gate/evidence.sha256",
+                "iter_181_persistent_counters/run_timing_vs_iter161.sh",
+            ),
+            (
+                "iter_181_persistent_counters/timing_vs_iter161/analysis.json",
+                "iter_181_persistent_counters/RUN_RESULT.md",
+                "iter_181_persistent_counters/closure.sha256",
+            ),
+            "Iter181 contains correctness and paired Nsys evidence but no Controller-sealed diagnosis.",
+            "The formal timing and closure remain historical-only.",
+        ),
+        (
+            "R12",
+            (
+                "run_manifest.json",
+                "preflight_check.json",
+                "iter_184_fastsort_map_fused/DESIGN.md",
+                "iter_184_fastsort_map_fused/build_candidate/sources.sha256",
+                "iter_184_fastsort_map_fused/correctness.sha256",
+                "iter_184_fastsort_map_fused/correctness_repeat1/evidence.sha256",
+                "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/candidate.sqlite",
+                "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/analysis.json",
+                "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/evidence.sha256",
+            ),
+            (
+                "iter_184_fastsort_map_fused/DECISION.md",
+                "iter_184_fastsort_map_fused/closure.sha256",
+            ),
+            "Iter184 contains correctness and Nsys evidence but no Controller-sealed diagnosis.",
+            "The sub-threshold closure remains historical-only.",
+        ),
+    )
+    return [
+        _case(
+            case_id,
+            root,
+            inputs,
+            labels,
+            list(_POST_AUDIT_REASON_CODES),
+            diagnosis_text,
+            outcome_text,
+            archive_case_directory="loop30",
+        )
+        for case_id, inputs, labels, diagnosis_text, outcome_text in specs
+    ]
+
+
 def _extract_x01(root: Path) -> dict:
     return _case(
         "X01",
@@ -273,6 +435,7 @@ def build_suite(root: Path) -> dict:
             _extract_r06,
         )
     ]
+    cases.extend(_post_audit_partial_cases(root))
     for case_id, relative_path, digest in (
         (
             "K01",

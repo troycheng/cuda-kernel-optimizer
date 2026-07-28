@@ -5,10 +5,9 @@ predict the speedup of a new workload.
 
 ## Automated checks
 
-Release validation on 2026-07-27 covered 1,299 tests: 1,289 passed and
-10 physical RTX 5090 opt-in tests were skipped. The complete discovery run passed
-all code checks and found one stale documentation-count gate; after this page
-was corrected, that gate passed separately. The suite covers input validation, state recovery,
+Current branch validation on 2026-07-28 covered 1,334 tests: 1,323 passed and
+11 physical RTX 5090 opt-in tests were skipped. Ten require a GPU; the remaining
+read-only replay test requires the 5090 archive to be mounted locally. The suite covers input validation, state recovery,
 evidence binding, shared-host guards, timeouts, restoration, capability retrieval,
 stability calibration, audit cadence, performance-model accounting, bounded
 hypothesis admission, targeted evidence selection, and deterministic decision logic. Pre-V1

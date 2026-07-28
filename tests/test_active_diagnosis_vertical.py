@@ -2552,6 +2552,61 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 {item["reason"] for item in adaptation["rejections"]},
             )
 
+            epoch = json.loads((active / "epoch.json").read_text("utf-8"))
+            execution_map = json.loads(
+                (active / "execution_map.json").read_text("utf-8")
+            )
+            evidence_catalog = json.loads(
+                (active / "evidence_catalog.json").read_text("utf-8")
+            )
+            hypothesis_result = (
+                helper.controller._load_hypothesis_space_module()
+                .validate_hypothesis_set(
+                    augmented_hypotheses,
+                    epoch=epoch,
+                    execution_map=execution_map,
+                    evidence_catalog=evidence_catalog,
+                )
+            )
+            augmented_requests["hypothesis_set_sha256"] = hypothesis_result[
+                "hypothesis_set_sha256"
+            ]
+            evidence_selection = (
+                helper.controller._load_evidence_selector_module()
+                .select_evidence_request(
+                    augmented_requests,
+                    epoch=epoch,
+                    execution_map=execution_map,
+                    hypothesis_result=hypothesis_result,
+                    evidence_catalog=evidence_catalog,
+                    action_catalog=action_catalog,
+                    policy=selection_policy,
+                    request_history=[],
+                )
+            )
+            contract = helper.controller._load_frozen_analysis_contract(
+                run_dir, state
+            )
+            decision = (
+                helper.controller._load_diagnostic_decision_module()
+                .decide_next_step(
+                    json.loads(
+                        (active / "performance_model.json").read_text("utf-8")
+                    ),
+                    hypothesis_result,
+                    evidence_selection,
+                    authorization={"max_seconds": 60.0, "max_risk": "high"},
+                    spend={"elapsed_seconds": 0.0},
+                    knowledge_adaptation=adaptation,
+                    action_bounds={
+                        item["action_id"]: item["cost_bound"]
+                        for item in contract["actions"]
+                        if "cost_bound" in item
+                    },
+                )
+            )
+            self.assertEqual(decision["decision"], "MEASURE")
+
             no_ready_policy = copy.deepcopy(selection_policy)
             no_ready_policy["available_capability_ids"] = []
             empty_local_context = copy.deepcopy(context["knowledge_context"])

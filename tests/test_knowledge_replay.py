@@ -44,6 +44,16 @@ EXPECTED_PARTIAL_REASONS = {
         "missing_execution_window",
         "missing_execution_topology",
     },
+    **{
+        f"R{index:02d}": {
+            "missing_controller_epoch",
+            "missing_knowledge_identity",
+            "missing_controller_execution_map",
+            "missing_controller_performance_model",
+            "label_not_machine_mapped",
+        }
+        for index in range(7, 13)
+    },
 }
 
 
@@ -72,7 +82,7 @@ class KnowledgeReplayTest(unittest.TestCase):
         baseline = json.loads(baseline_path.read_text())["cases"]
         self.assertEqual(
             set(baseline),
-            {"R01", "R02", "R03", "R04", "R05", "R06"},
+            {f"R{index:02d}" for index in range(1, 13)},
         )
 
     def test_frozen_inputs_do_not_contain_future_labels(self):
@@ -89,7 +99,14 @@ class KnowledgeReplayTest(unittest.TestCase):
 
     def test_frozen_suite_has_required_scoring_groups_and_rejections(self):
         cases = {case["case_id"]: case for case in self.suite["cases"]}
-        self.assertEqual({key for key, case in cases.items() if case["scoring_group"] == "triton"}, {"R01", "R02", "R03", "R04", "R05", "R06"})
+        self.assertEqual(
+            {
+                key
+                for key, case in cases.items()
+                if case["scoring_group"] == "triton"
+            },
+            {f"R{index:02d}" for index in range(1, 13)},
+        )
         self.assertEqual({key for key, case in cases.items() if case["scoring_group"] == "public_kernel"}, {"K01", "K02"})
         self.assertTrue(all(cases[key]["label"]["label_status"] == "protocol_only" for key in ("K01", "K02")))
         self.assertEqual({key for key in cases if key.startswith("counterexample-")}, {"counterexample-version-mismatch", "counterexample-missing-evidence", "counterexample-duplicate-mechanism", "counterexample-unstable-benchmark"})
@@ -117,6 +134,46 @@ class KnowledgeReplayTest(unittest.TestCase):
                 self.assertIn("evidence_summaries", case["input_snapshot"])
                 self.assertEqual(case["input_snapshot"]["diagnosis"]["authority"], "none")
                 self.assertEqual(case["label"]["historical_outcome"]["authority"], "archived_only")
+
+    def test_remote_archive_review_does_not_upgrade_missing_controller_contracts(self):
+        cases = {case["case_id"]: case for case in self.suite["cases"]}
+        runtime_fields = {
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model",
+        }
+        for case_id in {f"R{index:02d}" for index in range(7, 13)}:
+            with self.subTest(case_id=case_id):
+                case = cases[case_id]
+                self.assertEqual(case["replay_eligibility"]["status"], "partial")
+                self.assertTrue(
+                    runtime_fields.isdisjoint(case["input_snapshot"])
+                )
+                self.assertNotIn(
+                    "accepted_mechanism_keys",
+                    case["label"],
+                )
+
+    def test_post_audit_cases_use_a_mount_independent_archive_identity(self):
+        cases = {case["case_id"]: case for case in self.suite["cases"]}
+        for case_id in {f"R{index:02d}" for index in range(7, 13)}:
+            with self.subTest(case_id=case_id):
+                self.assertEqual(
+                    cases[case_id]["input_snapshot"]["archive_identity_facts"][
+                        "archive_case_directory"
+                    ],
+                    "loop30",
+                )
+
+    def test_no_triton_case_is_scoreable_without_controller_sealed_artifacts(self):
+        self.assertFalse(
+            any(
+                case["scoring_group"] == "triton"
+                and case["replay_eligibility"]["status"] == "scoreable"
+                for case in self.suite["cases"]
+            )
+        )
 
     def test_unavailable_baseline_has_no_route_claims(self):
         forbidden = {"route_output_sha256", "ranked_card_ids", "action_sequence", "cost", "profiler_required", "terminal_decision", "scoring_denominator"}

@@ -222,16 +222,41 @@
       "label": {
         "historical_outcome": {
           "authority": "archived_only",
-          "note": "Decision text remains historical-only.",
+          "note": "Variant correctness and gap results remain historical-only.",
           "source_refs": [
             {
               "locator": "whole_file",
-              "relative_path": "DECISION.md",
-              "sha256": "5f98769fdbd96b4e356b94eddc7ba6216b83810ff14f9447feb3a7ace3f8ff53"
+              "relative_path": "correctness_v3.semantic_vs_iter161.json",
+              "sha256": "ef78dab331f771fb6f0386b1755f076fe783569f4e0a8822937359fbba401894"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "nsys_v3/gap_analysis.json",
+              "sha256": "d1d9e736e38e626535249da5041953b56f5b7f1a04c6c727754a85226e802d45"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "correctness_v4.semantic_vs_iter161.json",
+              "sha256": "5478359961c1645d691eb62d9a3b9af59371ae06dcc651d361980c92208b8eee"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "nsys_v4/gap_analysis.json",
+              "sha256": "5891fe65f4b537b0c832bda9874a537d10a43213b557c4c841335b4abb60c66c"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "correctness_v5.semantic_vs_iter161.json",
+              "sha256": "2f4ab44d415b2dd75272f3962638050ffa4c020c2d570a3efe0fa0ab04ac571c"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "nsys_v5/gap_analysis.json",
+              "sha256": "e9d66f3f17c570b79df703fdcbff963d0930aeabd8a3c47fe2d8f5e3362842ec"
             }
           ]
         },
-        "label_source_sha256": "8105d07ed5a5d6a52693f1a1d9e17fd8e21a014ac108efa1e9bdf1674fcac804"
+        "label_source_sha256": "0e36c8531071fb0619542c4fd2f2d2676f01cc37cd87ac091e7030f20189f76d"
       },
       "replay_eligibility": {
         "reason_codes": [
@@ -450,7 +475,7 @@
           "source_refs": [
             {
               "locator": "whole_file",
-              "relative_path": "analysis.json",
+              "relative_path": "nsys_fastsort_map_1000/analysis.json",
               "sha256": "ef09c710dc83342257a614a209db4846d73794bab4c4ee4c9f9b76e0b0246ee1"
             },
             {
@@ -465,7 +490,7 @@
             }
           ]
         },
-        "label_source_sha256": "dd0d7ee144e4185256881aa0c5ac46543d9cd6b0d4b11ffb9f42b8ad68cb5501"
+        "label_source_sha256": "f3582ddb2666af1d2fd4e78f5e33aa90aa6cf67c52872e7091079e86843f18cc"
       },
       "replay_eligibility": {
         "reason_codes": [
@@ -754,6 +779,1272 @@
       "scoring_group": "triton"
     },
     {
+      "case_id": "R07",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "loop30",
+          "source_manifest_sha256": "873a4d16c404fba5a152bc04c95e812f3610110700572a420f5b01cdb5bc1066",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Iter149 and Iter156 artifacts contain useful kernel evidence but no Controller-sealed diagnosis.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "run_manifest.json",
+              "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "preflight_check.json",
+              "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_149_decode_into_nms/nsys_candidate_1000/candidate.sqlite",
+              "sha256": "07bc8340da28ab4b71c45544da1e374aed66f868716f6f9422b81f571b24ba2a"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_149_decode_into_nms/nsys_candidate_1000/inputs.sha256",
+              "sha256": "f4259496d372330d3aab1805234d75427a3c55be3e5f23f71ee1af4031d99210"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_149_decode_into_nms/nsys_candidate_1000/evidence.sha256",
+              "sha256": "db4d0cb8dd67ec93891bc54a7dafc63578028ab031f0592b98042c11ffa15f7d"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_156_nms_fp32_output/build/sources.sha256",
+              "sha256": "be9efca4fd62c4a5bef34cee3841c733ebd5e11d5e599c29b9ba2c1055f0e313"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_156_nms_fp32_output/correctness_output_invariants.json",
+              "sha256": "1a714fbef2e103bda54687fc14f1e52e8d38958b447ea89097018ec5c5e1129a"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_156_nms_fp32_output/correctness_semantic_iter149_vs_candidate.json",
+              "sha256": "165ded1ad937bd66206e5f165d7456c7b0e86c4ad7eb337ce21047e2e044a6b6"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_156_nms_fp32_output/correctness.sha256",
+              "sha256": "0882d062c47268aa1c60d10ecfac740f13b02edd440af06b35ed1fea1d9a7c79"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_156_nms_fp32_output/run_timing_vs_iter135.sh",
+              "sha256": "8bf46026cd40307fae2466c55cd05b5ea227821730c9384b90d075ae6ed00fce"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "run_manifest.json",
+            "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "preflight_check.json",
+            "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_149_decode_into_nms/nsys_candidate_1000/candidate.sqlite",
+            "sha256": "07bc8340da28ab4b71c45544da1e374aed66f868716f6f9422b81f571b24ba2a"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_149_decode_into_nms/nsys_candidate_1000/inputs.sha256",
+            "sha256": "f4259496d372330d3aab1805234d75427a3c55be3e5f23f71ee1af4031d99210"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_149_decode_into_nms/nsys_candidate_1000/evidence.sha256",
+            "sha256": "db4d0cb8dd67ec93891bc54a7dafc63578028ab031f0592b98042c11ffa15f7d"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_156_nms_fp32_output/build/sources.sha256",
+            "sha256": "be9efca4fd62c4a5bef34cee3841c733ebd5e11d5e599c29b9ba2c1055f0e313"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_156_nms_fp32_output/correctness_output_invariants.json",
+            "sha256": "1a714fbef2e103bda54687fc14f1e52e8d38958b447ea89097018ec5c5e1129a"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_156_nms_fp32_output/correctness_semantic_iter149_vs_candidate.json",
+            "sha256": "165ded1ad937bd66206e5f165d7456c7b0e86c4ad7eb337ce21047e2e044a6b6"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_156_nms_fp32_output/correctness.sha256",
+            "sha256": "0882d062c47268aa1c60d10ecfac740f13b02edd440af06b35ed1fea1d9a7c79"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_156_nms_fp32_output/run_timing_vs_iter135.sh",
+            "sha256": "8bf46026cd40307fae2466c55cd05b5ea227821730c9384b90d075ae6ed00fce"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r07",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "run_manifest.json",
+                "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "preflight_check.json",
+                "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_149_decode_into_nms/nsys_candidate_1000/candidate.sqlite",
+                "sha256": "07bc8340da28ab4b71c45544da1e374aed66f868716f6f9422b81f571b24ba2a"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_149_decode_into_nms/nsys_candidate_1000/inputs.sha256",
+                "sha256": "f4259496d372330d3aab1805234d75427a3c55be3e5f23f71ee1af4031d99210"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_149_decode_into_nms/nsys_candidate_1000/evidence.sha256",
+                "sha256": "db4d0cb8dd67ec93891bc54a7dafc63578028ab031f0592b98042c11ffa15f7d"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_156_nms_fp32_output/build/sources.sha256",
+                "sha256": "be9efca4fd62c4a5bef34cee3841c733ebd5e11d5e599c29b9ba2c1055f0e313"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_156_nms_fp32_output/correctness_output_invariants.json",
+                "sha256": "1a714fbef2e103bda54687fc14f1e52e8d38958b447ea89097018ec5c5e1129a"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_156_nms_fp32_output/correctness_semantic_iter149_vs_candidate.json",
+                "sha256": "165ded1ad937bd66206e5f165d7456c7b0e86c4ad7eb337ce21047e2e044a6b6"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_156_nms_fp32_output/correctness.sha256",
+                "sha256": "0882d062c47268aa1c60d10ecfac740f13b02edd440af06b35ed1fea1d9a7c79"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_156_nms_fp32_output/run_timing_vs_iter135.sh",
+                "sha256": "8bf46026cd40307fae2466c55cd05b5ea227821730c9384b90d075ae6ed00fce"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "The Iter156 paired result remains historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_156_nms_fp32_output/timing_vs_iter149/analysis.json",
+              "sha256": "bfb1d9435516bc32348f8a95302e97e513604281f59a96c88659ab0599144a59"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_156_nms_fp32_output/timing_confirmation_vs_iter149/analysis.json",
+              "sha256": "a8792322d8a999b76cd96b1bf0d4e61889ed4988cd87bf3bc2820c0f43a4278e"
+            }
+          ]
+        },
+        "label_source_sha256": "afe4d64cc48679248a08b022e104228141db335d586bb87366154859d451b642"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "missing_controller_epoch",
+          "missing_knowledge_identity",
+          "missing_controller_execution_map",
+          "missing_controller_performance_model",
+          "label_not_machine_mapped"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
+      "case_id": "R08",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "loop30",
+          "source_manifest_sha256": "5f799fa8ddd2be538b16a96128c060711a3015108600bbd5e3c853e294d16a01",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Iter156 and Iter160 artifacts contain useful kernel evidence but no Controller-sealed diagnosis.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "run_manifest.json",
+              "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "preflight_check.json",
+              "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_156_nms_fp32_output/nsys_fp32_output_1000/candidate.sqlite",
+              "sha256": "ca9ea92007843b90b73090ca1dcd7d081a2769f628b51eab6ed886a241464d37"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_156_nms_fp32_output/nsys_fp32_output_1000/inputs.sha256",
+              "sha256": "d843deb0c53e5994ab661f26d705b355d2505efbe7c65bb4b5589d092fa9b9ee"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_156_nms_fp32_output/nsys_fp32_output_1000/evidence.sha256",
+              "sha256": "7232f36ffd7bf8445e9ea00415a7c3e707647b9f129d3f3aebd570b2837cf675"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_160_fastsort_store4/build/sources.sha256",
+              "sha256": "1b0f0cbf79739290c5d75212a50452caad2c2d1e68605bbf139e6a03d3ab8fea"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_160_fastsort_store4/correctness_output_invariants.json",
+              "sha256": "f164c9b65e4d042d2f5b0f721c8464e233834e7df860382d380f7c5191bb5278"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_160_fastsort_store4/correctness_semantic_iter156_vs_candidate.json",
+              "sha256": "efa9cd7796935dad318abba5ac5e673fdd49997b1a6d148cbfdb7d560970494e"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_160_fastsort_store4/correctness.sha256",
+              "sha256": "302673fbbc9300b7f4616d382ea11d8a07f86f1ae6c870a80a57cc4d52120db3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_160_fastsort_store4/run_timing_vs_iter156.sh",
+              "sha256": "b1c7261fbf55e671a372a386243b473d5bfe5a056ff965eefc05f0b475a8847e"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "run_manifest.json",
+            "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "preflight_check.json",
+            "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_156_nms_fp32_output/nsys_fp32_output_1000/candidate.sqlite",
+            "sha256": "ca9ea92007843b90b73090ca1dcd7d081a2769f628b51eab6ed886a241464d37"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_156_nms_fp32_output/nsys_fp32_output_1000/inputs.sha256",
+            "sha256": "d843deb0c53e5994ab661f26d705b355d2505efbe7c65bb4b5589d092fa9b9ee"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_156_nms_fp32_output/nsys_fp32_output_1000/evidence.sha256",
+            "sha256": "7232f36ffd7bf8445e9ea00415a7c3e707647b9f129d3f3aebd570b2837cf675"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_160_fastsort_store4/build/sources.sha256",
+            "sha256": "1b0f0cbf79739290c5d75212a50452caad2c2d1e68605bbf139e6a03d3ab8fea"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_160_fastsort_store4/correctness_output_invariants.json",
+            "sha256": "f164c9b65e4d042d2f5b0f721c8464e233834e7df860382d380f7c5191bb5278"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_160_fastsort_store4/correctness_semantic_iter156_vs_candidate.json",
+            "sha256": "efa9cd7796935dad318abba5ac5e673fdd49997b1a6d148cbfdb7d560970494e"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_160_fastsort_store4/correctness.sha256",
+            "sha256": "302673fbbc9300b7f4616d382ea11d8a07f86f1ae6c870a80a57cc4d52120db3"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_160_fastsort_store4/run_timing_vs_iter156.sh",
+            "sha256": "b1c7261fbf55e671a372a386243b473d5bfe5a056ff965eefc05f0b475a8847e"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r08",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "run_manifest.json",
+                "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "preflight_check.json",
+                "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_156_nms_fp32_output/nsys_fp32_output_1000/candidate.sqlite",
+                "sha256": "ca9ea92007843b90b73090ca1dcd7d081a2769f628b51eab6ed886a241464d37"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_156_nms_fp32_output/nsys_fp32_output_1000/inputs.sha256",
+                "sha256": "d843deb0c53e5994ab661f26d705b355d2505efbe7c65bb4b5589d092fa9b9ee"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_156_nms_fp32_output/nsys_fp32_output_1000/evidence.sha256",
+                "sha256": "7232f36ffd7bf8445e9ea00415a7c3e707647b9f129d3f3aebd570b2837cf675"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_160_fastsort_store4/build/sources.sha256",
+                "sha256": "1b0f0cbf79739290c5d75212a50452caad2c2d1e68605bbf139e6a03d3ab8fea"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_160_fastsort_store4/correctness_output_invariants.json",
+                "sha256": "f164c9b65e4d042d2f5b0f721c8464e233834e7df860382d380f7c5191bb5278"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_160_fastsort_store4/correctness_semantic_iter156_vs_candidate.json",
+                "sha256": "efa9cd7796935dad318abba5ac5e673fdd49997b1a6d148cbfdb7d560970494e"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_160_fastsort_store4/correctness.sha256",
+                "sha256": "302673fbbc9300b7f4616d382ea11d8a07f86f1ae6c870a80a57cc4d52120db3"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_160_fastsort_store4/run_timing_vs_iter156.sh",
+                "sha256": "b1c7261fbf55e671a372a386243b473d5bfe5a056ff965eefc05f0b475a8847e"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "The Iter160 paired result remains historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_160_fastsort_store4/timing_vs_iter156/analysis.json",
+              "sha256": "c70105cd2857c745a0a4586c08c21959e2a458556621b91aeb8b10dc01531372"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_160_fastsort_store4/timing_confirmation_vs_iter156/analysis.json",
+              "sha256": "361a62aadd8f1a7316b0f9dad39fc848f1d0fc07df3f86c7a13dfc8e5db6d763"
+            }
+          ]
+        },
+        "label_source_sha256": "7f6f58d6897c99cdcf12765b0c89d51026e1433d2d8446187b32c75c86b6f6fa"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "missing_controller_epoch",
+          "missing_knowledge_identity",
+          "missing_controller_execution_map",
+          "missing_controller_performance_model",
+          "label_not_machine_mapped"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
+      "case_id": "R09",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "loop30",
+          "source_manifest_sha256": "f67f5d9898e7a1700a69f23b34dcb50f04df9eb03da84c9d3363454a49cd73a3",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Iter160 and Iter161 artifacts contain useful kernel evidence but no Controller-sealed diagnosis.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "run_manifest.json",
+              "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "preflight_check.json",
+              "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_160_fastsort_store4/nsys_fastsort_store4_1000/candidate.sqlite",
+              "sha256": "adc651fe8ff2eca63d326a18bd2eb68e72122414907b2304521049e8e5eade90"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_160_fastsort_store4/nsys_fastsort_store4_1000/inputs.sha256",
+              "sha256": "740f5dd68f422cafb0ab8792f51c628c4b14f6f6a70d502a7f8fdab8f66ae523"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_160_fastsort_store4/nsys_fastsort_store4_1000/evidence.sha256",
+              "sha256": "cafe2f6b8047918a0f0a473d5fba181424d0f445a96919441fea970480ec33ab"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_161_group_reserve4/build/sources.sha256",
+              "sha256": "83564b706463d4261009ec38592fb86cb627d2aa6780f6417aea73e5d772450d"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_161_group_reserve4/correctness_output_invariants.json",
+              "sha256": "b65f5c509878010b014131ca2d657e3137449d9a47f66eb3ae995aa1fcff3e04"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_161_group_reserve4/correctness_semantic_iter160_vs_candidate.json",
+              "sha256": "0027f9b684a3e5fffc22870746f61f856a83be57f76e9e71e7c51400c435ca61"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_161_group_reserve4/correctness.sha256",
+              "sha256": "54c38d2889dd7ea4bb214df2adcf8c009c9eabf6d187a7216a6408889c36f481"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_161_group_reserve4/run_timing_vs_iter156.sh",
+              "sha256": "242c0357d7329c3d78082f6267297e220117143397b7d230f31135432b00b1d8"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "run_manifest.json",
+            "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "preflight_check.json",
+            "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_160_fastsort_store4/nsys_fastsort_store4_1000/candidate.sqlite",
+            "sha256": "adc651fe8ff2eca63d326a18bd2eb68e72122414907b2304521049e8e5eade90"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_160_fastsort_store4/nsys_fastsort_store4_1000/inputs.sha256",
+            "sha256": "740f5dd68f422cafb0ab8792f51c628c4b14f6f6a70d502a7f8fdab8f66ae523"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_160_fastsort_store4/nsys_fastsort_store4_1000/evidence.sha256",
+            "sha256": "cafe2f6b8047918a0f0a473d5fba181424d0f445a96919441fea970480ec33ab"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_161_group_reserve4/build/sources.sha256",
+            "sha256": "83564b706463d4261009ec38592fb86cb627d2aa6780f6417aea73e5d772450d"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_161_group_reserve4/correctness_output_invariants.json",
+            "sha256": "b65f5c509878010b014131ca2d657e3137449d9a47f66eb3ae995aa1fcff3e04"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_161_group_reserve4/correctness_semantic_iter160_vs_candidate.json",
+            "sha256": "0027f9b684a3e5fffc22870746f61f856a83be57f76e9e71e7c51400c435ca61"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_161_group_reserve4/correctness.sha256",
+            "sha256": "54c38d2889dd7ea4bb214df2adcf8c009c9eabf6d187a7216a6408889c36f481"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_161_group_reserve4/run_timing_vs_iter156.sh",
+            "sha256": "242c0357d7329c3d78082f6267297e220117143397b7d230f31135432b00b1d8"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r09",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "run_manifest.json",
+                "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "preflight_check.json",
+                "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_160_fastsort_store4/nsys_fastsort_store4_1000/candidate.sqlite",
+                "sha256": "adc651fe8ff2eca63d326a18bd2eb68e72122414907b2304521049e8e5eade90"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_160_fastsort_store4/nsys_fastsort_store4_1000/inputs.sha256",
+                "sha256": "740f5dd68f422cafb0ab8792f51c628c4b14f6f6a70d502a7f8fdab8f66ae523"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_160_fastsort_store4/nsys_fastsort_store4_1000/evidence.sha256",
+                "sha256": "cafe2f6b8047918a0f0a473d5fba181424d0f445a96919441fea970480ec33ab"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_161_group_reserve4/build/sources.sha256",
+                "sha256": "83564b706463d4261009ec38592fb86cb627d2aa6780f6417aea73e5d772450d"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_161_group_reserve4/correctness_output_invariants.json",
+                "sha256": "b65f5c509878010b014131ca2d657e3137449d9a47f66eb3ae995aa1fcff3e04"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_161_group_reserve4/correctness_semantic_iter160_vs_candidate.json",
+                "sha256": "0027f9b684a3e5fffc22870746f61f856a83be57f76e9e71e7c51400c435ca61"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_161_group_reserve4/correctness.sha256",
+                "sha256": "54c38d2889dd7ea4bb214df2adcf8c009c9eabf6d187a7216a6408889c36f481"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_161_group_reserve4/run_timing_vs_iter156.sh",
+                "sha256": "242c0357d7329c3d78082f6267297e220117143397b7d230f31135432b00b1d8"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "The Iter161 paired result remains historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_161_group_reserve4/timing_vs_iter160/analysis.json",
+              "sha256": "19f7fac9d8d274a765b12ad07f3593eed5ca5fc8a1eba13334e57e6b2b957f8c"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_161_group_reserve4/timing_confirmation_vs_iter160/analysis.json",
+              "sha256": "968c75d79ac7aa70929a917e5b3a31a74ab5e2793fe52c101489686dd64c88dc"
+            }
+          ]
+        },
+        "label_source_sha256": "b75ac10c40ec5fb02f56782e33837fbc66b6234b6e15481be5403b79816f0564"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "missing_controller_epoch",
+          "missing_knowledge_identity",
+          "missing_controller_execution_map",
+          "missing_controller_performance_model",
+          "label_not_machine_mapped"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
+      "case_id": "R10",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "loop30",
+          "source_manifest_sha256": "0953ffcb5161503f47fafc311ca3c7166b7f9e20d76dfc3d672c5853d8c1243b",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Iter169 contains a real overlap gate but no Controller-sealed diagnosis or execution map.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "run_manifest.json",
+              "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "preflight_check.json",
+              "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_169_aux_stream_build_gate/candidate.sha256",
+              "sha256": "43829cd4d7d83cda12d8e723da52e248b08f93249b7a9a91a0c75b65b6055ecd"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_169_aux_stream_build_gate/analysis.json",
+              "sha256": "3795dfb009747f406add31b1b07408ec87fc1160c07a78b26ccfea792dfa6235"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_169_aux_stream_build_gate/run_nsys_gate.sh",
+              "sha256": "a270dfa33cef07b094850f5523558671bb11cda34b52a7bc57a861c452d6c950"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/inputs.sha256",
+              "sha256": "b910f81a5dc5bd26344774a0620d3600365b0da6321a96f209ff6aa5c0bd259f"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/candidate/candidate.sqlite",
+              "sha256": "76371d1debd869513919b439bc669d9d1d637914847f1a023de24287c27b19db"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/analysis.json",
+              "sha256": "0bde8ddbc5e7d54c9f09e76d97b18b80deef33579599301641ab38c1e9634fca"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/evidence.sha256",
+              "sha256": "33207e7355722ba35fbc0ebc99e516f949030efea1318d8bd38248b85bdec2d6"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "run_manifest.json",
+            "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "preflight_check.json",
+            "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_169_aux_stream_build_gate/candidate.sha256",
+            "sha256": "43829cd4d7d83cda12d8e723da52e248b08f93249b7a9a91a0c75b65b6055ecd"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_169_aux_stream_build_gate/analysis.json",
+            "sha256": "3795dfb009747f406add31b1b07408ec87fc1160c07a78b26ccfea792dfa6235"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_169_aux_stream_build_gate/run_nsys_gate.sh",
+            "sha256": "a270dfa33cef07b094850f5523558671bb11cda34b52a7bc57a861c452d6c950"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/inputs.sha256",
+            "sha256": "b910f81a5dc5bd26344774a0620d3600365b0da6321a96f209ff6aa5c0bd259f"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/candidate/candidate.sqlite",
+            "sha256": "76371d1debd869513919b439bc669d9d1d637914847f1a023de24287c27b19db"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/analysis.json",
+            "sha256": "0bde8ddbc5e7d54c9f09e76d97b18b80deef33579599301641ab38c1e9634fca"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/evidence.sha256",
+            "sha256": "33207e7355722ba35fbc0ebc99e516f949030efea1318d8bd38248b85bdec2d6"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r10",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "run_manifest.json",
+                "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "preflight_check.json",
+                "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_169_aux_stream_build_gate/candidate.sha256",
+                "sha256": "43829cd4d7d83cda12d8e723da52e248b08f93249b7a9a91a0c75b65b6055ecd"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_169_aux_stream_build_gate/analysis.json",
+                "sha256": "3795dfb009747f406add31b1b07408ec87fc1160c07a78b26ccfea792dfa6235"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_169_aux_stream_build_gate/run_nsys_gate.sh",
+                "sha256": "a270dfa33cef07b094850f5523558671bb11cda34b52a7bc57a861c452d6c950"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/inputs.sha256",
+                "sha256": "b910f81a5dc5bd26344774a0620d3600365b0da6321a96f209ff6aa5c0bd259f"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/candidate/candidate.sqlite",
+                "sha256": "76371d1debd869513919b439bc669d9d1d637914847f1a023de24287c27b19db"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/analysis.json",
+                "sha256": "0bde8ddbc5e7d54c9f09e76d97b18b80deef33579599301641ab38c1e9634fca"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_169_aux_stream_build_gate/nsys_overlap_gate/evidence.sha256",
+                "sha256": "33207e7355722ba35fbc0ebc99e516f949030efea1318d8bd38248b85bdec2d6"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "The closed-direction decision remains historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_169_aux_stream_build_gate/DECISION.md",
+              "sha256": "d9ff224a656f48b1871b2f2b9764e279819824f079b1adcc2b50e944e2dd1183"
+            }
+          ]
+        },
+        "label_source_sha256": "83d2bccc5770b3634527b6691d60ca90efd141d081cbc0b61cfab4a1cd0ddd57"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "missing_controller_epoch",
+          "missing_knowledge_identity",
+          "missing_controller_execution_map",
+          "missing_controller_performance_model",
+          "label_not_machine_mapped"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
+      "case_id": "R11",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "loop30",
+          "source_manifest_sha256": "992555b2510818713204419817deeb0036cbfd844ff30092af1b4ff06ac33520",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Iter181 contains correctness and paired Nsys evidence but no Controller-sealed diagnosis.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "run_manifest.json",
+              "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "preflight_check.json",
+              "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_181_persistent_counters/build_candidate/sources.sha256",
+              "sha256": "76e7d0b1f519e7a57ce093f74c308d4ac1febbdbb6c962f39ab1490bc63bebc8"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_181_persistent_counters/correctness.sha256",
+              "sha256": "e9e829a779aef18b77b58e2cf6e9c4d5cee414d2a55891092f49698db6ceb070"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_181_persistent_counters/correctness_repeat1/evidence.sha256",
+              "sha256": "6ed0193b3413f1910123238847a89cc31319dcff6f29a493192c05b284491f0b"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_181_persistent_counters/nsys_paired_gate/02_B/profile.sqlite",
+              "sha256": "b2689e1ed940018fee668f6d462441ebb1815f663c6130501fde406b2ad1c1c0"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_181_persistent_counters/nsys_paired_gate/analysis.json",
+              "sha256": "4fabb7bfabf73d65dac78f21232e56653769f87591cf4048589dfa2867aa088c"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_181_persistent_counters/nsys_paired_gate/inputs.sha256",
+              "sha256": "8e1ef7593ddf47259fff9c966e4b7b86e952ee5a683b5d3b16dd9dadcf9f7d49"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_181_persistent_counters/nsys_paired_gate/evidence.sha256",
+              "sha256": "3e64dfc8e6e64b5adb6c26c4c31b301f97047d466bb2a17e6590345929f9347c"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_181_persistent_counters/run_timing_vs_iter161.sh",
+              "sha256": "f314cbe00b87a2c076b97ee1db8a48abf0f53800276fe1854c27e33a14e3dc14"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "run_manifest.json",
+            "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "preflight_check.json",
+            "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_181_persistent_counters/build_candidate/sources.sha256",
+            "sha256": "76e7d0b1f519e7a57ce093f74c308d4ac1febbdbb6c962f39ab1490bc63bebc8"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_181_persistent_counters/correctness.sha256",
+            "sha256": "e9e829a779aef18b77b58e2cf6e9c4d5cee414d2a55891092f49698db6ceb070"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_181_persistent_counters/correctness_repeat1/evidence.sha256",
+            "sha256": "6ed0193b3413f1910123238847a89cc31319dcff6f29a493192c05b284491f0b"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_181_persistent_counters/nsys_paired_gate/02_B/profile.sqlite",
+            "sha256": "b2689e1ed940018fee668f6d462441ebb1815f663c6130501fde406b2ad1c1c0"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_181_persistent_counters/nsys_paired_gate/analysis.json",
+            "sha256": "4fabb7bfabf73d65dac78f21232e56653769f87591cf4048589dfa2867aa088c"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_181_persistent_counters/nsys_paired_gate/inputs.sha256",
+            "sha256": "8e1ef7593ddf47259fff9c966e4b7b86e952ee5a683b5d3b16dd9dadcf9f7d49"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_181_persistent_counters/nsys_paired_gate/evidence.sha256",
+            "sha256": "3e64dfc8e6e64b5adb6c26c4c31b301f97047d466bb2a17e6590345929f9347c"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_181_persistent_counters/run_timing_vs_iter161.sh",
+            "sha256": "f314cbe00b87a2c076b97ee1db8a48abf0f53800276fe1854c27e33a14e3dc14"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r11",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "run_manifest.json",
+                "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "preflight_check.json",
+                "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_181_persistent_counters/build_candidate/sources.sha256",
+                "sha256": "76e7d0b1f519e7a57ce093f74c308d4ac1febbdbb6c962f39ab1490bc63bebc8"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_181_persistent_counters/correctness.sha256",
+                "sha256": "e9e829a779aef18b77b58e2cf6e9c4d5cee414d2a55891092f49698db6ceb070"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_181_persistent_counters/correctness_repeat1/evidence.sha256",
+                "sha256": "6ed0193b3413f1910123238847a89cc31319dcff6f29a493192c05b284491f0b"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_181_persistent_counters/nsys_paired_gate/02_B/profile.sqlite",
+                "sha256": "b2689e1ed940018fee668f6d462441ebb1815f663c6130501fde406b2ad1c1c0"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_181_persistent_counters/nsys_paired_gate/analysis.json",
+                "sha256": "4fabb7bfabf73d65dac78f21232e56653769f87591cf4048589dfa2867aa088c"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_181_persistent_counters/nsys_paired_gate/inputs.sha256",
+                "sha256": "8e1ef7593ddf47259fff9c966e4b7b86e952ee5a683b5d3b16dd9dadcf9f7d49"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_181_persistent_counters/nsys_paired_gate/evidence.sha256",
+                "sha256": "3e64dfc8e6e64b5adb6c26c4c31b301f97047d466bb2a17e6590345929f9347c"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_181_persistent_counters/run_timing_vs_iter161.sh",
+                "sha256": "f314cbe00b87a2c076b97ee1db8a48abf0f53800276fe1854c27e33a14e3dc14"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "The formal timing and closure remain historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_181_persistent_counters/timing_vs_iter161/analysis.json",
+              "sha256": "9fcb2911a9847673505159d442453014c10c09cef8df9864f2c00921f4f737b2"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_181_persistent_counters/RUN_RESULT.md",
+              "sha256": "4ccafd52adec4238c9f24cf60ef320bcf34c9dfe0e31d017a5a5f519c9dc5907"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_181_persistent_counters/closure.sha256",
+              "sha256": "cafd713727d64284ae02384359482ced51ab6381e6330e7ad2f6020181c621dd"
+            }
+          ]
+        },
+        "label_source_sha256": "83ed913467d3c355d029aaf63b647976a3044d27ca3bbb15a25d9c18686eca8e"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "missing_controller_epoch",
+          "missing_knowledge_identity",
+          "missing_controller_execution_map",
+          "missing_controller_performance_model",
+          "label_not_machine_mapped"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
+      "case_id": "R12",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "loop30",
+          "source_manifest_sha256": "e36910627a55ee2919950225aec09e6641d98d580a2dad69efa452f0d2c7c182",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Iter184 contains correctness and Nsys evidence but no Controller-sealed diagnosis.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "run_manifest.json",
+              "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "preflight_check.json",
+              "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_184_fastsort_map_fused/DESIGN.md",
+              "sha256": "ae7e9f2814ed3df542353a47a3a2a8cb5f73d0c9e3bd77c155321727ea4e1124"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_184_fastsort_map_fused/build_candidate/sources.sha256",
+              "sha256": "c06529bb419b89051a316aa77d386a48b7fade7e03b70c8a7cdfad835d42d555"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_184_fastsort_map_fused/correctness.sha256",
+              "sha256": "3666d306b81f6c9bf684122c1d241beca44e76454cb6fb9b79944601c1e8cbc2"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_184_fastsort_map_fused/correctness_repeat1/evidence.sha256",
+              "sha256": "fb7cb778b8841b2888970b33686b2dca5b121449c42b4d1ebb6ede5aeb2f8b25"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/candidate.sqlite",
+              "sha256": "439ee77e9d9ff9a8fd5bf1df4639def354ebe827c5194ec83bce6ca38f3711b0"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/analysis.json",
+              "sha256": "ef09c710dc83342257a614a209db4846d73794bab4c4ee4c9f9b76e0b0246ee1"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/evidence.sha256",
+              "sha256": "e28f636ef91ffc86af2429a6f228a37b60423659d4ef2b2397811e556f72bc99"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "run_manifest.json",
+            "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "preflight_check.json",
+            "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_184_fastsort_map_fused/DESIGN.md",
+            "sha256": "ae7e9f2814ed3df542353a47a3a2a8cb5f73d0c9e3bd77c155321727ea4e1124"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_184_fastsort_map_fused/build_candidate/sources.sha256",
+            "sha256": "c06529bb419b89051a316aa77d386a48b7fade7e03b70c8a7cdfad835d42d555"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_184_fastsort_map_fused/correctness.sha256",
+            "sha256": "3666d306b81f6c9bf684122c1d241beca44e76454cb6fb9b79944601c1e8cbc2"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_184_fastsort_map_fused/correctness_repeat1/evidence.sha256",
+            "sha256": "fb7cb778b8841b2888970b33686b2dca5b121449c42b4d1ebb6ede5aeb2f8b25"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/candidate.sqlite",
+            "sha256": "439ee77e9d9ff9a8fd5bf1df4639def354ebe827c5194ec83bce6ca38f3711b0"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/analysis.json",
+            "sha256": "ef09c710dc83342257a614a209db4846d73794bab4c4ee4c9f9b76e0b0246ee1"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/evidence.sha256",
+            "sha256": "e28f636ef91ffc86af2429a6f228a37b60423659d4ef2b2397811e556f72bc99"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r12",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "run_manifest.json",
+                "sha256": "b82919383fdc9f9fbaa9cedd412b576c5a07cdd750f255d73e9c1b712d2395b3"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "preflight_check.json",
+                "sha256": "18d290ec7357b7231ea2d218c0a472c239438adeffdff78632104447026bd9dc"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_184_fastsort_map_fused/DESIGN.md",
+                "sha256": "ae7e9f2814ed3df542353a47a3a2a8cb5f73d0c9e3bd77c155321727ea4e1124"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_184_fastsort_map_fused/build_candidate/sources.sha256",
+                "sha256": "c06529bb419b89051a316aa77d386a48b7fade7e03b70c8a7cdfad835d42d555"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_184_fastsort_map_fused/correctness.sha256",
+                "sha256": "3666d306b81f6c9bf684122c1d241beca44e76454cb6fb9b79944601c1e8cbc2"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_184_fastsort_map_fused/correctness_repeat1/evidence.sha256",
+                "sha256": "fb7cb778b8841b2888970b33686b2dca5b121449c42b4d1ebb6ede5aeb2f8b25"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/candidate.sqlite",
+                "sha256": "439ee77e9d9ff9a8fd5bf1df4639def354ebe827c5194ec83bce6ca38f3711b0"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/analysis.json",
+                "sha256": "ef09c710dc83342257a614a209db4846d73794bab4c4ee4c9f9b76e0b0246ee1"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "iter_184_fastsort_map_fused/nsys_fastsort_map_1000/evidence.sha256",
+                "sha256": "e28f636ef91ffc86af2429a6f228a37b60423659d4ef2b2397811e556f72bc99"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "The sub-threshold closure remains historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_184_fastsort_map_fused/DECISION.md",
+              "sha256": "ac26fc4aa33a72df68201a0adbe11a822e590acfd917f1afa7d70d9fabf821b7"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "iter_184_fastsort_map_fused/closure.sha256",
+              "sha256": "d56d6233ce3e152782908f447a14f74d0ad10205745305b7ba221cb73dc46939"
+            }
+          ]
+        },
+        "label_source_sha256": "840cb0c90b4a0a1a0a08a6d847a0fe8c4e939d74b8dbb2fd51f2f1aeb93a79b0"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "missing_controller_epoch",
+          "missing_knowledge_identity",
+          "missing_controller_execution_map",
+          "missing_controller_performance_model",
+          "label_not_machine_mapped"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
       "case_id": "K01",
       "input_snapshot": {
         "commit": "423217d9fda91e0c2d67e4a43bf62f96f6d104f1",
@@ -1010,6 +2301,6 @@
       "scoring_group": "rejection_only"
     }
   ],
-  "cases_sha256": "fdda0e70c08377f29f4817a82130da1c825bd45edb8057dc0efe92e1fdbf9df3",
+  "cases_sha256": "997cd0099a1e617958cad0a51689a6dfc7800a99a52d9963fe84b156b9589869",
   "schema_version": "cuda-optimizer/knowledge-replay-v1"
 }
