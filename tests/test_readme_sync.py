@@ -29,7 +29,7 @@ def claims_v1_3_release(text: str) -> bool:
     english = r"(?:released|published|current\s+release)"
     chinese = r"(?:已发布|正式发布|当前版本)"
     return bool(
-        re.search(rf"(?m)^#+\s+{version}\b", text)
+        re.search(r"(?m)^#+\s+V1\.3\.\d+(?:\.\d+)*\b", text)
         or re.search(rf"(?is)\b{version}\b.{{0,80}}\b{english}\b", text)
         or re.search(rf"(?is)\b{english}\b.{{0,80}}\b{version}\b", text)
         or re.search(rf"(?s){version}.{{0,80}}{chinese}", text)
@@ -103,6 +103,7 @@ class ReadmeSyncTests(unittest.TestCase):
                 "### Start formal optimization",
                 "### How optimization directions are formed",
                 "### How candidate changes advance",
+                "### V1.3 (in development)",
                 "### V1.2.0",
                 "### V1.1.0",
                 "### V1.0.1",
@@ -292,27 +293,33 @@ class ReadmeSyncTests(unittest.TestCase):
         ):
             self.assertIn(marker, english)
 
-    def test_readmes_publish_the_same_v1_release_line(self) -> None:
-        for text in (self.chinese, self.english):
+    def test_readmes_publish_v1_2_and_mark_v1_3_as_development(self) -> None:
+        development_headings = (
+            (self.chinese, "### V1.3（开发中）"),
+            (self.english, "### V1.3 (in development)"),
+        )
+        for text, heading in development_headings:
+            self.assertEqual(text.count(heading), 1)
+            self.assertNotIn("### V1.3.0", text)
             self.assertEqual(text.count("### V1.2.0"), 1)
             self.assertEqual(text.count("### V1.1.0"), 1)
             self.assertEqual(text.count("### V1.0.1"), 1)
             self.assertEqual(text.count("### V1.0.0"), 1)
             self.assertNotRegex(text, r"(?m)^### V(?:2|3)\.")
 
-    def test_v1_3_release_claim_requires_six_scoreable_triton_replays(self) -> None:
+    def test_v1_3_release_requires_independent_post_freeze_replays(self) -> None:
         suite = json.loads(
             (
                 ROOT
                 / "tests"
                 / "fixtures"
                 / "knowledge_replay"
-                / "decision_points.json"
+                / "fresh_controller_cases.json"
             ).read_text(encoding="utf-8")
         )
-        scoreable = sum(
+        package_regressions = sum(
             case["scoring_group"] == "triton"
-            and case["replay_eligibility"]["status"] == "scoreable"
+            and case["replay_eligibility"]["status"] == "package_regression"
             for case in suite["cases"]
         )
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -336,12 +343,29 @@ class ReadmeSyncTests(unittest.TestCase):
             claims_v1_3_release(path.read_text(encoding="utf-8"))
             for path in public_paths
         )
-        if v1_3_release_claimed:
-            self.assertGreaterEqual(
-                scoreable,
-                6,
-                "V1.3 cannot be released without six scoreable Triton replays",
-            )
+        self.assertEqual(package_regressions, 6)
+        self.assertEqual(version, "1.2.0")
+        self.assertFalse(
+            v1_3_release_claimed,
+            "the six package seeds are not an independent V1.3 release gate",
+        )
+
+    def test_readmes_explain_v1_3_evidence_bound_knowledge(self) -> None:
+        for marker in (
+            "当前 workload 的封存证据",
+            "最多三个可证伪方向",
+            "历史收益数字",
+            "active_diagnosis/knowledge_context.json",
+        ):
+            self.assertIn(marker, self.chinese)
+        english = " ".join(self.english.split())
+        for marker in (
+            "sealed evidence from the current workload",
+            "at most three falsifiable directions",
+            "historical speedup numbers",
+            "active_diagnosis/knowledge_context.json",
+        ):
+            self.assertIn(marker, english)
 
     def test_v1_3_release_claim_detection_covers_public_wording(self) -> None:
         for claim in (

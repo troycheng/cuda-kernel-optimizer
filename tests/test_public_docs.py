@@ -215,6 +215,34 @@ class PublicDocsTests(unittest.TestCase):
         ):
             self.assertIn(marker, text)
 
+    def test_validation_records_v1_3_seed_replay_limits(self) -> None:
+        text = (ROOT / "docs/validation.md").read_text(encoding="utf-8")
+        for marker in (
+            "six Triton decision points",
+            "not an independent",
+            "All six Controller diagnosis traces ended in",
+            "accepted four candidate mechanisms",
+            "rejected two at the 1 us threshold",
+            "V1.3 remains unreleased",
+            "six new Controller decision points",
+            "does not test mechanism",
+        ):
+            self.assertIn(marker, text)
+
+    def test_knowledge_page_explains_v1_3_runtime_authority(self) -> None:
+        text = (ROOT / "docs/knowledge-and-research.md").read_text(
+            encoding="utf-8"
+        ).lower()
+        for marker in (
+            "knowledge_context.json",
+            "semantic observations",
+            "promotion_authority",
+            "historical speedup",
+            "exact identity",
+            "fail closed",
+        ):
+            self.assertIn(marker, text)
+
     def test_public_docs_distinguish_release_and_protocol_versions(self) -> None:
         getting_started = (ROOT / "docs/getting-started.md").read_text("utf-8")
         self.assertIn("troycheng/cuda-kernel-optimizer", getting_started)

@@ -4288,6 +4288,7 @@ def _adapt_controller_knowledge(
     architecture = knowledge_identity.get("gpu_architecture", {})
     runtime = knowledge_identity.get("cuda_runtime_version", {})
     if architecture.get("status") != "verified" or runtime.get("status") != "verified":
+        local_candidates = []
         raw_adaptation = {
             "knowledge_support": "unavailable",
             "candidates": [],
@@ -6178,6 +6179,11 @@ def _materialize_diagnosis_publish(
         / "hypothesis_generations"
         / f"{generation['hypothesis_set_sha256']}.json"
     )
+    proposal_path = (
+        active_root
+        / "proposal_generations"
+        / f"{intent['proposal_ledger_event']['payload_sha256']}.json"
+    )
     fixed_artifacts = (
         (run_root / "diagnosis_context.json", intent["diagnosis_context"]),
         (
@@ -6200,17 +6206,28 @@ def _materialize_diagnosis_publish(
             intent["investment_brief"],
         ),
     )
-    if generation_path.exists() or generation_path.is_symlink():
-        if (
-            generation_path.is_symlink()
-            or not generation_path.is_file()
-            or load_json_object(generation_path) != generation
-        ):
-            raise ValidationError(
-                "diagnosis immutable hypothesis generation conflicts"
-            )
-    else:
-        _atomic_json(generation_path, generation)
+    immutable_artifacts = (
+        (
+            generation_path,
+            generation,
+            "diagnosis immutable hypothesis generation conflicts",
+        ),
+        (
+            proposal_path,
+            intent,
+            "diagnosis immutable proposal generation conflicts",
+        ),
+    )
+    for path, artifact, conflict_message in immutable_artifacts:
+        if path.exists() or path.is_symlink():
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or load_json_object(path) != artifact
+            ):
+                raise ValidationError(conflict_message)
+        else:
+            _atomic_json(path, artifact)
     for path, artifact in fixed_artifacts:
         _atomic_json(path, artifact)
     events = _verify_active_diagnosis_ledger(run_root)
@@ -6224,6 +6241,7 @@ def _materialize_diagnosis_publish(
         )
     for path, artifact in (
         (generation_path, generation),
+        (proposal_path, intent),
         *fixed_artifacts,
     ):
         if (

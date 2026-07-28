@@ -313,6 +313,336 @@
       "source_ids": ["nvidia-nsight-systems"],
       "case_ids": [],
       "last_reviewed": "2026-07-28"
+    },
+    {
+      "id": "diagnostic.triton.nms-fp32-output-store",
+      "mechanism_key": "nms.fp32-output-store",
+      "status": "routing_only",
+      "content_status": "locally_measured",
+      "requested_claims": ["workload"],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "mechanism.nms_fp32_output_store",
+          "statuses": ["present"],
+          "scope_all": ["kernel", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "mechanism.nms_fp32_output_store",
+          "statuses": ["absent"],
+          "scope_all": ["kernel", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu"],
+      "priority": 1,
+      "match_terms": ["triton", "nms", "fp32", "output store"],
+      "applies_when": ["generated code shows the measured NMS output path writes FP32 directly"],
+      "mechanism": "Direct FP32 NMS output stores can remove conversion work from the critical kernel path.",
+      "competing_explanations": ["general instruction scheduling", "measurement noise"],
+      "distinguishing_question": "Does generated code isolate the FP32 output-store change on the measured NMS path?",
+      "preferred_actions": ["compiler-sass-inspection"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Compare the generated output-store path before requesting counter replay."
+      },
+      "required_evidence": ["identity-bound NMS timing", "generated-code evidence for the FP32 store path"],
+      "positive_signals": ["the FP32 output-store mechanism is present in sealed generated-code evidence"],
+      "counter_signals": ["the generated output path is unchanged"],
+      "invalidators": ["engine or plugin identity changed"],
+      "source_ids": ["nvidia-cuda-best-practices", "nvidia-nsight-systems"],
+      "case_ids": ["R07-fresh-20260728"],
+      "last_reviewed": "2026-07-28"
+    },
+    {
+      "id": "diagnostic.triton.fastsort-store-path",
+      "mechanism_key": "fastsort.store-path",
+      "status": "routing_only",
+      "content_status": "locally_measured",
+      "requested_claims": ["workload"],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "mechanism.fastsort_store_path",
+          "statuses": ["present"],
+          "scope_all": ["kernel", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "mechanism.fastsort_store_path",
+          "statuses": ["absent"],
+          "scope_all": ["kernel", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu"],
+      "priority": 1,
+      "match_terms": ["triton", "nms", "fastsort", "wide store"],
+      "applies_when": ["generated code shows a wider FastSort result-store path in the measured NMS kernel"],
+      "mechanism": "A wider FastSort store path can reduce output traffic in the measured NMS kernel.",
+      "competing_explanations": ["general kernel scheduling", "unrelated plugin changes"],
+      "distinguishing_question": "Does generated code isolate a wider FastSort store path?",
+      "preferred_actions": ["compiler-sass-inspection"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Check the store instructions before requesting profiler replay."
+      },
+      "required_evidence": ["identity-bound FastSort NMS timing", "generated-code evidence for the store path"],
+      "positive_signals": ["the wider FastSort store path is present in sealed generated-code evidence"],
+      "counter_signals": ["the generated store path is unchanged"],
+      "invalidators": ["engine or plugin identity changed"],
+      "source_ids": ["nvidia-cuda-best-practices", "nvidia-nsight-systems"],
+      "case_ids": ["R08-fresh-20260728"],
+      "last_reviewed": "2026-07-28"
+    },
+    {
+      "id": "diagnostic.triton.group-reserve-path",
+      "mechanism_key": "group.reserve-path",
+      "status": "routing_only",
+      "content_status": "locally_measured",
+      "requested_claims": ["workload"],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "mechanism.group_reserve_path",
+          "statuses": ["present"],
+          "scope_all": ["kernel", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "mechanism.group_reserve_path",
+          "statuses": ["absent"],
+          "scope_all": ["kernel", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu"],
+      "priority": 1,
+      "match_terms": ["triton", "nms", "group reserve", "reduction"],
+      "applies_when": ["generated code shows less reserve-path reduction work in the measured FastSort NMS kernel"],
+      "mechanism": "A smaller group-reserve path can remove reduction work from FastSort NMS.",
+      "competing_explanations": ["store-path changes", "general instruction scheduling"],
+      "distinguishing_question": "Does generated code isolate the reserve-path reduction change?",
+      "preferred_actions": ["compiler-sass-inspection"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Check reduction instructions before running counter replay."
+      },
+      "required_evidence": ["identity-bound FastSort NMS timing", "generated-code evidence for the reserve path"],
+      "positive_signals": ["the smaller group-reserve mechanism is present in sealed generated-code evidence"],
+      "counter_signals": ["the generated reduction path is unchanged"],
+      "invalidators": ["engine or plugin identity changed"],
+      "source_ids": ["nvidia-cuda-best-practices", "nvidia-nsight-systems"],
+      "case_ids": ["R09-fresh-20260728"],
+      "last_reviewed": "2026-07-28"
+    },
+    {
+      "id": "diagnostic.triton.aux-stream-overlap",
+      "mechanism_key": "aux-stream.overlap",
+      "status": "routing_only",
+      "content_status": "locally_measured",
+      "requested_claims": ["workload"],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "mechanism.aux_stream_overlap",
+          "statuses": ["present"],
+          "scope_all": ["runtime", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "mechanism.aux_stream_overlap",
+          "statuses": ["absent"],
+          "scope_all": ["runtime", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu"],
+      "priority": 1,
+      "match_terms": ["tensorrt", "aux stream", "overlap", "runtime"],
+      "applies_when": ["a candidate runtime trace shows actual cross-stream GPU overlap"],
+      "mechanism": "TensorRT auxiliary streams can overlap independent GPU work on the critical path.",
+      "competing_explanations": ["event overhead", "lower loaded clocks", "non-critical overlap"],
+      "distinguishing_question": "Does a candidate trace show cross-stream overlap that reduces the complete measured path?",
+      "preferred_actions": ["nsys-global-timeline"],
+      "cheapest_falsifier": {
+        "action_id": "nsys-global-timeline",
+        "rationale": "A correlated CUDA timeline is required to distinguish real overlap from extra event work."
+      },
+      "required_evidence": ["baseline and candidate timelines", "paired complete-path timing"],
+      "positive_signals": ["cross-stream overlap is present in a sealed candidate trace"],
+      "counter_signals": ["overlap is absent or outside the critical path"],
+      "invalidators": ["trace windows or engine identities differ"],
+      "source_ids": ["nvidia-nsight-systems"],
+      "case_ids": ["R10-fresh-20260728"],
+      "last_reviewed": "2026-07-28"
+    },
+    {
+      "id": "diagnostic.triton.persistent-counters",
+      "mechanism_key": "persistent.counters",
+      "status": "routing_only",
+      "content_status": "locally_measured",
+      "requested_claims": ["workload"],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "mechanism.persistent_counters",
+          "statuses": ["present"],
+          "scope_all": ["kernel", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "mechanism.persistent_counters",
+          "statuses": ["absent"],
+          "scope_all": ["kernel", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu"],
+      "priority": 1,
+      "match_terms": ["triton", "nms", "persistent counters"],
+      "applies_when": ["generated code shows persistent counter state on the measured NMS path"],
+      "mechanism": "Persistent counters can replace repeated transient counter traffic in NMS.",
+      "competing_explanations": ["added control flow", "sub-threshold savings"],
+      "distinguishing_question": "Does the persistent-counter path clear the configured complete-path effect floor?",
+      "preferred_actions": ["compiler-sass-inspection"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Verify the counter-state code path before any profiler replay."
+      },
+      "required_evidence": ["generated-code evidence", "paired complete-path timing against the local threshold"],
+      "positive_signals": ["persistent-counter code is present in sealed generated-code evidence"],
+      "counter_signals": ["the code path is absent or the measured benefit is below threshold"],
+      "invalidators": ["engine or plugin identity changed"],
+      "source_ids": ["nvidia-cuda-best-practices", "nvidia-nsight-systems"],
+      "case_ids": ["R11-fresh-20260728"],
+      "last_reviewed": "2026-07-28"
+    },
+    {
+      "id": "diagnostic.triton.fastsort-map-fusion",
+      "mechanism_key": "fastsort.map-fusion",
+      "status": "routing_only",
+      "content_status": "locally_measured",
+      "requested_claims": ["workload"],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "mechanism.fastsort_map_fusion",
+          "statuses": ["present"],
+          "scope_all": ["kernel", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "mechanism.fastsort_map_fusion",
+          "statuses": ["absent"],
+          "scope_all": ["kernel", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu"],
+      "priority": 1,
+      "match_terms": ["triton", "nms", "fastsort", "map fusion"],
+      "applies_when": ["generated code shows the common FastSort-to-Map path is fused"],
+      "mechanism": "Fusing FastSort and Map can remove a launch, but only if the fused span clears the local effect floor.",
+      "competing_explanations": ["tail-launch overhead", "larger fused kernel", "sub-threshold launch savings"],
+      "distinguishing_question": "Does the fused common path reduce complete-path time by at least the configured minimum effect?",
+      "preferred_actions": ["compiler-sass-inspection"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Confirm the fused code path before requesting a timing or profiler gate."
+      },
+      "required_evidence": ["generated-code evidence", "paired complete-path timing against the local threshold"],
+      "positive_signals": ["the fused FastSort-to-Map path is present in sealed generated-code evidence"],
+      "counter_signals": ["the fused path is absent or slower than the baseline"],
+      "invalidators": ["engine or plugin identity changed"],
+      "source_ids": ["nvidia-cuda-best-practices", "nvidia-nsight-systems"],
+      "case_ids": ["R12-fresh-20260728"],
+      "last_reviewed": "2026-07-28"
     }
   ]
 }

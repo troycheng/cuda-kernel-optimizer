@@ -21,7 +21,6 @@ REFERENCE_DIR = CARDS_PATH.parent
 _MAX_REFERENCE_BYTES = 2 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
-_CASE_IDS = {"R01", "R02", "R03", "R04", "R05", "R06", "X01", "K01", "K02"}
 _LAYERS = {
     "cpu",
     "gpu",
@@ -870,6 +869,11 @@ def build_knowledge_context(
     identity = _validate_knowledge_identity(
         frozen_inputs["knowledge_identity"], epoch
     )
+    unverified_core_identity_fields = [
+        field
+        for field in ("gpu_architecture", "cuda_runtime_version")
+        if identity[field]["status"] != "verified"
+    ]
     identity_sha = _canonical_sha256(identity)
     validated_map = map_module.validate_execution_map(
         frozen_inputs["execution_map"],
@@ -1032,6 +1036,8 @@ def build_knowledge_context(
         "closed_mechanism": 0,
         "execution_layer_unobserved": 0,
         "invalidator_observed": 0,
+        "positive_observation_missing": 0,
+        "exact_case_rejection": 0,
         "content_status": 0,
         "read_only_action_unavailable": 0,
         "below_minimum_effect": 0,
@@ -1068,6 +1074,16 @@ def build_knowledge_context(
                 }
             )
             filtered_counts["task_mismatch"] += 1
+            continue
+        if unverified_core_identity_fields:
+            explanations.append(
+                {
+                    **base,
+                    "reason": "identity_unverified",
+                    "details": copy.deepcopy(unverified_core_identity_fields),
+                }
+            )
+            filtered_counts["identity_unverified"] += 1
             continue
         identity_status, identity_details = _identity_constraint_result(
             card["identity_constraints"], identity
@@ -1119,6 +1135,26 @@ def build_knowledge_context(
             )
             filtered_counts["invalidator_observed"] += 1
             continue
+        card_cases = [cases[case_id] for case_id in card["case_ids"]]
+        exact_rejection_ids = sorted(
+            item["id"]
+            for item in card_cases
+            if item["identity_match"] == "exact"
+            and item["knowledge_identity_sha256"] == identity_sha
+            and item["content_status"] == "locally_measured"
+            and item["outcome_type"] == "rejection"
+        )
+        if exact_rejection_ids:
+            rejections.append(
+                {
+                    **base,
+                    "reason": "exact_case_rejection",
+                    "details": exact_rejection_ids,
+                }
+            )
+            filtered_counts["exact_case_rejection"] += 1
+            continue
+
         action_id = card["cheapest_falsifier"]["action_id"]
         action = actions[action_id]
         action_available = (
@@ -1130,6 +1166,12 @@ def build_knowledge_context(
             record_kind = "explanation"
             explanation_reason = "content_status"
             explanation_details = [card["content_status"]]
+        elif card["observation_rules"]["positive"] and not positive:
+            record_kind = "explanation"
+            explanation_reason = "positive_observation_missing"
+            explanation_details = sorted(
+                item["semantic_id"] for item in missing
+            )
         elif not action_available:
             record_kind = "explanation"
             explanation_reason = "read_only_action_unavailable"
@@ -1139,7 +1181,6 @@ def build_knowledge_context(
             explanation_reason = None
             explanation_details = []
 
-        card_cases = [cases[case_id] for case_id in card["case_ids"]]
         exact_case_ids = sorted(
             item["id"]
             for item in card_cases
@@ -1444,8 +1485,8 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
     if cases["schema_version"] != "cuda-optimizer/case-memory-v1":
         raise ValueError("case memory schema is unsupported")
     case_items = cases["cases"]
-    if type(case_items) is not list or len(case_items) != len(_CASE_IDS):
-        raise ValueError("case memory ids are incomplete")
+    if type(case_items) is not list or not case_items:
+        raise ValueError("case memory is empty")
     case_fields = {
         "id",
         "replay_case_id",
@@ -1469,6 +1510,7 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
             raise ValueError("case memory ids must match replay_case_id")
         if item["replay_status"] not in {
             "scoreable",
+            "package_regression",
             "partial",
             "rejection_only",
             "protocol_only",
@@ -1505,7 +1547,8 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
             raise ValueError(f"case memory {case_id} content_status is unsupported")
         if (
             item["content_status"] in {"replay_verified", "locally_measured"}
-            and item["replay_status"] not in {"scoreable", "rejection_only"}
+            and item["replay_status"]
+            not in {"scoreable", "package_regression", "rejection_only"}
         ):
             raise ValueError(
                 f"case memory {case_id} {item['content_status']} requires a "
@@ -1519,16 +1562,13 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
                 f"case memory {case_id} locally_measured requires exact identity "
                 "and knowledge_identity_sha256"
             )
-    if set(case_by_id) != _CASE_IDS:
-        raise ValueError("case memory ids are incomplete")
-
     _closed(cards, {"schema_version", "as_of", "cards"}, "diagnostic cards")
     if cards["schema_version"] != "cuda-optimizer/diagnostic-cards-v1":
         raise ValueError("diagnostic card schema is unsupported")
     cards_as_of = _iso_date(cards["as_of"], "diagnostic cards as_of")
     card_items = cards["cards"]
-    if type(card_items) is not list or len(card_items) != 7:
-        raise ValueError("diagnostic cards must contain exactly 7 entries")
+    if type(card_items) is not list or not card_items:
+        raise ValueError("diagnostic card registry is empty")
     card_fields = {
         "id",
         "mechanism_key",
@@ -1652,7 +1692,7 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
                 for case_id in referenced_cases
                 if (
                     case_by_id[case_id]["replay_status"]
-                    in {"scoreable", "rejection_only"}
+                    in {"scoreable", "package_regression", "rejection_only"}
                     and case_by_id[case_id]["content_status"]
                     in {"replay_verified", "locally_measured"}
                 )
@@ -1670,7 +1710,7 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
                 if (
                     case_by_id[case_id]["content_status"] == "locally_measured"
                     and case_by_id[case_id]["replay_status"]
-                    in {"scoreable", "rejection_only"}
+                    in {"scoreable", "package_regression", "rejection_only"}
                     and case_by_id[case_id]["identity_match"] == "exact"
                     and case_by_id[case_id]["knowledge_identity_sha256"] is not None
                 )

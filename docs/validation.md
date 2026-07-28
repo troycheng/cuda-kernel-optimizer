@@ -5,7 +5,7 @@ predict the speedup of a new workload.
 
 ## Automated checks
 
-Current branch validation on 2026-07-28 covered 1,334 tests: 1,323 passed and
+Current branch validation on 2026-07-28 covered 1,344 tests: 1,333 passed and
 11 physical RTX 5090 opt-in tests were skipped. Ten require a GPU; the remaining
 read-only replay test requires the 5090 archive to be mounted locally. The suite covers input validation, state recovery,
 evidence binding, shared-host guards, timeouts, restoration, capability retrieval,
@@ -19,6 +19,28 @@ replay, and project-copy direction experiments. These checks do not
 validate the reader's CUDA environment.
 
 ## Physical GPU lane
+
+The V1.3 development lane ran six Triton decision points on a physical RTX 5090
+on 2026-07-28 using container image
+`ngc.nju.edu.cn/nvidia/tritonserver@sha256:07c340d3b2de4139ca196ff014ded951bbfec475394c3916aa577c6aac15b308`.
+The lane was rerun after the readiness probe was corrected to seal `sm_120`,
+CUDA 13.0, and the current driver as verified identity facts.
+
+These six cases seed the same knowledge package that replays them. They are
+therefore development and package-regression material, not an independent
+release gate, and their earlier Top-1, Top-3, action-count, and profiler-count
+comparison is not a release claim. All six Controller diagnosis traces ended in
+`PURSUE`; subsequent workload validation accepted four candidate mechanisms and
+rejected two at the 1 us threshold. That distinction is retained instead of
+rewriting the two diagnosis outcomes as `STOP`.
+
+V1.3 remains unreleased until at least six new Controller decision points are
+collected after the knowledge package is frozen, excluded from that package,
+and replayed through the full Controller trace with evidence-derived labels.
+The existing harness supplies a predeclared semantic observation for a known
+mechanism, so it tests evidence-to-card routing; it does not test mechanism
+extraction from an unfamiliar raw profile. No driver, clock, service, or host
+policy was changed.
 
 The V1.1 lane passed 24 of 24 checks in 134.726 seconds on a physical RTX 5090
 on 2026-07-22. It used immutable compatibility image

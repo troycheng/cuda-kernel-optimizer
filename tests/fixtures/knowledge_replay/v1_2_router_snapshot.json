@@ -1,0 +1,90 @@
+{
+  "schema_version": "cuda-optimizer/v1-2-router-snapshot-v1",
+  "source_tag": "v1.2.0",
+  "source_commit": "bdf68c875b95f8da06937b9034dc35cd6ea930ed",
+  "diagnostic_cards_sha256": "bed90de9593a1596794dc4fbdcc73e0786a0327c4c59c4d1c2ce735a380524c9",
+  "evidence_action_catalog_sha256": "2a0b73c0fd6d41cfa0e0706aef68bdbfa46a1e4b82787b199e3e39a928403e2a",
+  "cards": [
+    {
+      "id": "diagnostic.cross-layer.triage",
+      "categories": ["unknown", "mixed"],
+      "priority": 0,
+      "match_terms": [],
+      "preferred_actions": ["nsys-global-timeline"]
+    },
+    {
+      "id": "diagnostic.framework.launch-gaps",
+      "categories": ["framework"],
+      "priority": 1,
+      "match_terms": ["cudalaunchkernel", "launch", "cuda graph", "short kernel"],
+      "preferred_actions": ["pytorch-operator-trace", "nsys-os-runtime-slice"]
+    },
+    {
+      "id": "diagnostic.kernel.resource-or-memory",
+      "categories": ["kernel"],
+      "priority": 1,
+      "match_terms": ["kernel", "gemm", "attention", "norm", "rope", "moe"],
+      "preferred_actions": ["ncu-targeted-kernel", "compiler-sass-inspection"]
+    },
+    {
+      "id": "diagnostic.cpu-data.starvation",
+      "categories": ["cpu_data"],
+      "priority": 1,
+      "match_terms": ["data", "preprocess", "dataloader", "queue"],
+      "preferred_actions": ["pytorch-operator-trace"]
+    },
+    {
+      "id": "diagnostic.transfer.h2d",
+      "categories": ["transfer"],
+      "priority": 1,
+      "match_terms": ["memcpy", "h2d", "dtoh", "transfer"],
+      "preferred_actions": ["nsys-os-runtime-slice"]
+    },
+    {
+      "id": "diagnostic.communication.collective",
+      "categories": ["communication"],
+      "priority": 1,
+      "match_terms": ["nccl", "allreduce", "alltoall", "collective"],
+      "preferred_actions": ["nsys-os-runtime-slice"]
+    },
+    {
+      "id": "diagnostic.io.request-path",
+      "categories": ["io", "environment"],
+      "priority": 1,
+      "match_terms": ["io", "serialize", "request", "storage", "socket"],
+      "preferred_actions": ["nsys-os-runtime-slice"]
+    }
+  ],
+  "actions": [
+    {
+      "action_id": "compiler-sass-inspection",
+      "evidence_kind": "compiler_sass",
+      "cost": "low"
+    },
+    {
+      "action_id": "direction-experiment-project-copy",
+      "evidence_kind": "direction_experiment",
+      "cost": "medium"
+    },
+    {
+      "action_id": "ncu-targeted-kernel",
+      "evidence_kind": "ncu_kernel",
+      "cost": "high"
+    },
+    {
+      "action_id": "nsys-global-timeline",
+      "evidence_kind": "nsys_timeline",
+      "cost": "medium"
+    },
+    {
+      "action_id": "nsys-os-runtime-slice",
+      "evidence_kind": "os_runtime",
+      "cost": "medium"
+    },
+    {
+      "action_id": "pytorch-operator-trace",
+      "evidence_kind": "framework_trace",
+      "cost": "low"
+    }
+  ]
+}

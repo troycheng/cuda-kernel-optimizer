@@ -4,15 +4,817 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
+import importlib.util
 import json
+import math
 from pathlib import Path
+import re
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts"
+REFERENCES = ROOT / "skills" / "cuda-kernel-optimizer" / "references"
+V1_2_ROUTER_SNAPSHOT = (
+    ROOT
+    / "tests"
+    / "fixtures"
+    / "knowledge_replay"
+    / "v1_2_router_snapshot.json"
+)
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_TERMINAL_DECISIONS = {"MEASURE", "PURSUE", "REVIEW_REQUIRED", "STOP"}
+_V1_2_ROUTER_CARDS_SHA256 = (
+    "152da6fd51bb68affc1e2903910aeb1990fc98dc0f2b1c0a600ff5d5073675e7"
+)
+_V1_2_ROUTER_ACTIONS_SHA256 = (
+    "48538fb8723a61a6d43090c72fbc008924efcb4b70a8fc9276fe21ea76a097f4"
+)
+_V1_2_CARD_TO_MECHANISM = {
+    "diagnostic.cross-layer.triage": "crosslayerunattributedcriticalpath",
+    "diagnostic.framework.launch-gaps": "frameworklaunchgaps",
+    "diagnostic.kernel.resource-or-memory": "kernelresourceormemory",
+    "diagnostic.cpu-data.starvation": "cpudatainputstarvation",
+    "diagnostic.transfer.h2d": "transferhostdeviceserialization",
+    "diagnostic.communication.collective": "communicationcollectivecriticalpath",
+    "diagnostic.io.request-path": "iorequestpath",
+}
 
 
 def canonical_sha256(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     ).hexdigest()
+
+
+def _load_v1_2_router_snapshot() -> dict:
+    registry = json.loads(V1_2_ROUTER_SNAPSHOT.read_text(encoding="utf-8"))
+    if (
+        set(registry)
+        != {
+            "schema_version",
+            "source_tag",
+            "source_commit",
+            "diagnostic_cards_sha256",
+            "evidence_action_catalog_sha256",
+            "cards",
+            "actions",
+        }
+        or registry.get("schema_version")
+        != "cuda-optimizer/v1-2-router-snapshot-v1"
+        or registry.get("source_tag") != "v1.2.0"
+        or registry.get("source_commit")
+        != "bdf68c875b95f8da06937b9034dc35cd6ea930ed"
+        or registry.get("diagnostic_cards_sha256")
+        != "bed90de9593a1596794dc4fbdcc73e0786a0327c4c59c4d1c2ce735a380524c9"
+        or registry.get("evidence_action_catalog_sha256")
+        != "2a0b73c0fd6d41cfa0e0706aef68bdbfa46a1e4b82787b199e3e39a928403e2a"
+        or canonical_sha256(registry.get("cards")) != _V1_2_ROUTER_CARDS_SHA256
+        or canonical_sha256(registry.get("actions"))
+        != _V1_2_ROUTER_ACTIONS_SHA256
+    ):
+        raise ValueError("frozen V1.2 router snapshot provenance is invalid")
+    return registry
+
+
+def _route_v1_2_cards(
+    diagnosis: dict,
+    execution_map: dict,
+    *,
+    limit: int = 3,
+) -> dict:
+    """Replay the frozen V1.2 router against its original seven card IDs."""
+    primary = diagnosis.get("primary_category")
+    categories = []
+    if isinstance(primary, str) and primary != "mixed":
+        categories.append(primary)
+    ranked = diagnosis.get("ranked_categories", [])
+    if type(ranked) is list:
+        categories.extend(
+            item.get("category")
+            for item in ranked
+            if type(item) is dict and isinstance(item.get("category"), str)
+        )
+    if not categories:
+        categories = ["unknown"]
+    elif primary == "mixed":
+        categories.insert(0, "mixed")
+    categories = list(dict.fromkeys(categories))
+    labels = " ".join(
+        str(item.get("label", "")).lower()
+        for item in execution_map.get("nodes", [])
+        if type(item) is dict
+    )
+    registry = _load_v1_2_router_snapshot()
+    cards = [
+        card
+        for card in registry["cards"]
+        if card["id"] in _V1_2_CARD_TO_MECHANISM
+    ]
+    if {card["id"] for card in cards} != set(_V1_2_CARD_TO_MECHANISM):
+        raise ValueError("frozen V1.2 diagnostic card set is incomplete")
+    ranked_cards = []
+    for card in cards:
+        category_rank = min(
+            (
+                categories.index(category)
+                for category in card["categories"]
+                if category in categories
+            ),
+            default=99,
+        )
+        if category_rank == 99:
+            continue
+        term_match = any(term in labels for term in card["match_terms"])
+        ranked_cards.append(
+            (
+                (
+                    category_rank,
+                    0 if term_match else 1,
+                    card["priority"],
+                    card["id"],
+                ),
+                card,
+            )
+        )
+    if not ranked_cards:
+        fallback = next(
+            card
+            for card in cards
+            if card["id"] == "diagnostic.cross-layer.triage"
+        )
+        ranked_cards = [((0, 0, 0, fallback["id"]), fallback)]
+    ranked_cards.sort(key=lambda item: item[0])
+    return {
+        "schema_version": "cuda-optimizer/diagnostic-knowledge-context-v1",
+        "categories": categories,
+        "cards": [copy.deepcopy(card) for _, card in ranked_cards[:limit]],
+        "promotion_authority": "none",
+    }
+
+
+def _load_module(filename: str, name: str):
+    path = SCRIPTS / filename
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+def _load_json(path: Path, label: str) -> dict:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} must be a regular file: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is not valid JSON: {path}") from error
+    if type(value) is not dict:
+        raise ValueError(f"{label} must be a JSON object")
+    return value
+
+
+def _contained_path(root: Path, relative_path: str, label: str) -> Path:
+    if type(relative_path) is not str or not relative_path:
+        raise ValueError(f"{label} relative_path must be non-empty")
+    relative = Path(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"{label} relative_path must stay inside the run")
+    path = root / relative
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} source must be a regular file: {relative_path}")
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError as error:
+        raise ValueError(f"{label} source escapes the run") from error
+    return path
+
+
+def _json_pointer(value: object, pointer: str, label: str) -> object:
+    if type(pointer) is not str or not pointer.startswith("/"):
+        raise ValueError(f"{label} locator must be a JSON pointer")
+    current = value
+    for raw in pointer[1:].split("/"):
+        token = raw.replace("~1", "/").replace("~0", "~")
+        if type(current) is dict and token in current:
+            current = current[token]
+        elif type(current) is list and token.isdigit() and int(token) < len(current):
+            current = current[int(token)]
+        else:
+            raise ValueError(f"{label} locator does not resolve: {pointer}")
+    return copy.deepcopy(current)
+
+
+def _canonical_strings(value: object, label: str) -> list[str]:
+    if (
+        type(value) is not list
+        or any(type(item) is not str or not item for item in value)
+        or value != sorted(set(value))
+    ):
+        raise ValueError(f"{label} must be a sorted unique string array")
+    return list(value)
+
+
+def _load_machine_mapped_label(run_root: Path, label_path: Path) -> dict:
+    label_path = label_path.expanduser().resolve(strict=False)
+    try:
+        label_path.relative_to(run_root)
+    except ValueError as error:
+        raise ValueError("label source must be inside the Controller run") from error
+    value = _load_json(label_path, "label source")
+    fields = {
+        "schema_version",
+        "case_id",
+        "accepted_mechanism_keys",
+        "cheapest_valid_action_ids",
+        "expected_terminal_decisions",
+        "field_sources",
+    }
+    if set(value) != fields:
+        raise ValueError("label source fields are not closed")
+    if value["schema_version"] != "cuda-optimizer/knowledge-replay-label-v1":
+        raise ValueError("label source schema is unsupported")
+    if (
+        type(value["case_id"]) is not str
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value["case_id"])
+        is None
+    ):
+        raise ValueError("label source case_id is invalid")
+    for field in (
+        "accepted_mechanism_keys",
+        "cheapest_valid_action_ids",
+        "expected_terminal_decisions",
+    ):
+        _canonical_strings(value[field], f"label source {field}")
+    if not set(value["expected_terminal_decisions"]).issubset(_TERMINAL_DECISIONS):
+        raise ValueError("label source expected_terminal_decisions is unsupported")
+    sources = value["field_sources"]
+    label_fields = {
+        "accepted_mechanism_keys",
+        "cheapest_valid_action_ids",
+        "expected_terminal_decisions",
+    }
+    if type(sources) is not dict or set(sources) != label_fields:
+        raise ValueError("label source field_sources must map every scored field")
+    normalized_sources = {}
+    for field in sorted(label_fields):
+        source = sources[field]
+        if type(source) is not dict or set(source) != {
+            "relative_path",
+            "source_sha256",
+            "locator",
+        }:
+            raise ValueError(f"label source mapping for {field} is not closed")
+        path = _contained_path(
+            run_root,
+            source["relative_path"],
+            f"label source mapping for {field}",
+        )
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if source["source_sha256"] != digest:
+            raise ValueError(f"label source digest drifted for {field}")
+        source_value = _json_pointer(
+            _load_json(path, f"label source artifact for {field}"),
+            source["locator"],
+            f"label source mapping for {field}",
+        )
+        if source_value != value[field]:
+            raise ValueError(f"label source mapping does not reproduce {field}")
+        normalized_sources[field] = copy.deepcopy(source)
+    return {
+        "case_id": value["case_id"],
+        "accepted_mechanism_keys": list(value["accepted_mechanism_keys"]),
+        "cheapest_valid_action_ids": list(value["cheapest_valid_action_ids"]),
+        "expected_terminal_decisions": list(value["expected_terminal_decisions"]),
+        "field_sources": normalized_sources,
+        "label_source_sha256": hashlib.sha256(label_path.read_bytes()).hexdigest(),
+    }
+
+
+def _run_source_references(run_root: Path) -> list[dict]:
+    fixed = (
+        "control_manifest.json",
+        "state.json",
+        "state_commit.json",
+        "diagnosis.json",
+        "diagnosis_context.json",
+        "baseline/observation.json",
+        "active_diagnosis/analysis_contract.json",
+        "active_diagnosis/global_scan.json",
+        "active_diagnosis/epoch.json",
+        "active_diagnosis/evidence_catalog.json",
+        "active_diagnosis/execution_map.json",
+        "active_diagnosis/performance_model.json",
+        "active_diagnosis/action_catalog.json",
+        "active_diagnosis/selection_policy.json",
+        "active_diagnosis/request_history.json",
+        "active_diagnosis/completed_action_ids.json",
+        "active_diagnosis/knowledge_context.json",
+        "active_diagnosis/hypothesis_result.json",
+        "active_diagnosis/request_set.json",
+        "active_diagnosis/evidence_selection.json",
+        "active_diagnosis/decision.json",
+        "active_diagnosis/investment_brief.json",
+    )
+    paths = [run_root / relative for relative in fixed]
+    for directory in (
+        run_root / "readiness",
+        run_root / "probes",
+        run_root / "state_generations",
+        run_root / "active_diagnosis" / "ledger",
+        run_root / "active_diagnosis" / "evidence",
+    ):
+        if directory.is_dir() and not directory.is_symlink():
+            paths.extend(directory.rglob("*.json"))
+    records = []
+    seen = set()
+    for path in sorted(paths):
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(
+                f"Controller scoreable source is missing: {path.relative_to(run_root)}"
+            )
+        records.append(
+            {
+                "relative_path": path.relative_to(run_root).as_posix(),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "locator": "whole_file",
+            }
+        )
+    return records
+
+
+def _pointer_token(value: object) -> str:
+    return str(value).replace("~", "~0").replace("/", "~1")
+
+
+def _timing_provenance(
+    value: object,
+    *,
+    relative_path: str,
+    source_sha256: str,
+    target_root: str,
+) -> list[dict]:
+    records = []
+
+    def visit(current: object, parts: list[object]) -> None:
+        if type(current) is dict:
+            for key in sorted(current):
+                visit(current[key], [*parts, key])
+            return
+        if type(current) is list:
+            for index, item in enumerate(current):
+                visit(item, [*parts, index])
+            return
+        if not parts or type(current) not in {int, float}:
+            return
+        field = str(parts[-1])
+        if not (field.endswith("_us") or field.endswith("_seconds")):
+            return
+        pointer = "/" + "/".join(_pointer_token(part) for part in parts)
+        records.append(
+            {
+                "target": f"{target_root}{pointer}",
+                "relative_path": relative_path,
+                "source_sha256": source_sha256,
+                "locator": pointer,
+                "source_value": current,
+                "source_unit": "us" if field.endswith("_us") else "seconds",
+                "transform": "identity",
+            }
+        )
+
+    visit(value, [])
+    return records
+
+
+def _active_evidence_envelopes(
+    controller,
+    run_root: Path,
+    context: dict,
+    action_catalog: dict,
+    contract: dict,
+) -> list[dict]:
+    by_action = {item["action_id"]: item for item in action_catalog["actions"]}
+    contract_actions = {item["action_id"]: item for item in contract["actions"]}
+    envelopes = []
+    for summary in context.get("evidence_results", []):
+        result = controller.load_json_object(run_root / summary["result_path"])
+        action_id = summary["action_id"]
+        action = by_action[action_id]
+        contract_action = contract_actions[action_id]
+        envelopes.append(
+            {
+                "action_id": action_id,
+                "evidence_kind": action["evidence_kind"],
+                "adapter_implementation_sha256": contract_action["adapter_sha256"],
+                "result_sha256": summary["result_sha256"],
+                "status": summary["status"],
+                "observations": copy.deepcopy(result["observations"]),
+            }
+        )
+    return envelopes
+
+
+def extract_scoreable_controller_case(run_dir: Path, label_path: Path) -> dict:
+    """Extract one live, Controller-sealed decision without consulting its label."""
+    run_root = run_dir.expanduser().resolve(strict=False)
+    controller = _load_module(
+        "workload_controller.py",
+        "cuda_optimizer_controller_replay_extract",
+    )
+    state = controller.read_run_state(run_root)
+    control = controller._load_frozen_control(run_root, state)
+    (
+        context,
+        epoch,
+        execution_map,
+        evidence_catalog,
+        action_catalog,
+        selection_policy,
+    ) = controller._load_active_diagnosis_context(
+        control,
+        run_root,
+        state,
+        verify_current_project_surface=False,
+    )
+    raw_decision = controller.load_json_object(
+        run_root / "active_diagnosis" / "decision.json"
+    )
+    decision = controller._load_bound_diagnostic_artifacts(
+        run_root,
+        state,
+        expected_decision=raw_decision.get("decision"),
+    )
+    contract = controller._load_frozen_analysis_contract(run_root, state)
+    performance_model = controller.load_json_object(
+        run_root / "active_diagnosis" / "performance_model.json"
+    )
+    ready = sorted(selection_policy["available_capability_ids"])
+    contract_ids = sorted(item["action_id"] for item in contract["actions"])
+    available = sorted(
+        item["action_id"]
+        for item in action_catalog["actions"]
+        if item.get("control_scope") == "read_only"
+        and item["action_id"] in contract_ids
+        and set(item.get("required_capability_ids", [])).issubset(ready)
+    )
+    read_only_actions = sorted(
+        (
+            copy.deepcopy(item)
+            for item in action_catalog["actions"]
+            if item["action_id"] in available
+        ),
+        key=lambda item: item["action_id"],
+    )
+    active_results = _active_evidence_envelopes(
+        controller,
+        run_root,
+        context,
+        action_catalog,
+        contract,
+    )
+    frozen = {
+        "knowledge_identity": copy.deepcopy(context["knowledge_identity"]),
+        "diagnosis": controller.load_json_object(run_root / "diagnosis.json"),
+        "analysis_epoch": copy.deepcopy(epoch),
+        "evidence_catalog": copy.deepcopy(evidence_catalog),
+        "execution_map": copy.deepcopy(execution_map),
+        "performance_model": copy.deepcopy(performance_model),
+        "diagnostic_evidence": [],
+        "active_evidence_results": active_results,
+        "requested_claim": context["requested_claim"],
+        "ready_capability_ids": ready,
+        "contract_action_ids": contract_ids,
+        "available_actions": available,
+        "closed_mechanism_keys": copy.deepcopy(
+            context.get("closed_mechanism_keys", [])
+        ),
+        "candidate_history": copy.deepcopy(context.get("candidate_history", [])),
+    }
+    rebuilt_context = controller._rebuild_knowledge_context(
+        run_root,
+        context,
+        contract,
+        epoch,
+        execution_map,
+        evidence_catalog,
+        selection_policy,
+        performance_model,
+    )
+    knowledge = controller._load_diagnostic_knowledge_module().build_knowledge_context(
+        frozen,
+        limit=3,
+    )
+    if rebuilt_context != knowledge or knowledge != context["knowledge_context"]:
+        raise ValueError("Controller frozen knowledge context does not replay exactly")
+
+    label = _load_machine_mapped_label(run_root, label_path)
+    references = _run_source_references(run_root)
+    map_ref = next(
+        item
+        for item in references
+        if item["relative_path"] == "active_diagnosis/execution_map.json"
+    )
+    model_ref = next(
+        item
+        for item in references
+        if item["relative_path"] == "active_diagnosis/performance_model.json"
+    )
+    timing = [
+        *_timing_provenance(
+            execution_map,
+            relative_path=map_ref["relative_path"],
+            source_sha256=map_ref["sha256"],
+            target_root="input_snapshot.execution_map",
+        ),
+        *_timing_provenance(
+            performance_model,
+            relative_path=model_ref["relative_path"],
+            source_sha256=model_ref["sha256"],
+            target_root="input_snapshot.performance_model",
+        ),
+    ]
+    case = {
+        "case_id": label.pop("case_id"),
+        "scoring_group": "triton",
+        "replay_eligibility": {
+            "status": "scoreable",
+            "reason_codes": [],
+            "timing_provenance": timing,
+        },
+        "input_snapshot": {
+            "archive_identity_facts": {
+                "status": "complete",
+                "archive_case_directory": "controller-run",
+                "source_manifest_sha256": canonical_sha256(references),
+                "unknown_fields": [],
+            },
+            **frozen,
+            "read_only_actions": read_only_actions,
+            "evidence_summaries": references,
+        },
+        "controller_decision": copy.deepcopy(decision),
+        "v1_2_card_to_mechanism": copy.deepcopy(_V1_2_CARD_TO_MECHANISM),
+        "label": label,
+    }
+    validate_scoreable_case(case)
+    return case
+
+
+def _validate_controller_replay_case(
+    case: dict,
+    *,
+    eligibility_status: str,
+) -> None:
+    if type(case) is not dict or case.get("scoring_group") != "triton":
+        raise ValueError("scoreable case must belong to the Triton scoring group")
+    eligibility = case.get("replay_eligibility")
+    if (
+        type(eligibility) is not dict
+        or eligibility.get("status") != eligibility_status
+        or eligibility.get("reason_codes") != []
+        or type(eligibility.get("timing_provenance")) is not list
+        or not eligibility["timing_provenance"]
+    ):
+        raise ValueError("scoreable case replay eligibility is incomplete")
+    snapshot = case.get("input_snapshot")
+    required = {
+        "archive_identity_facts",
+        "diagnosis",
+        "read_only_actions",
+        "evidence_summaries",
+        "knowledge_identity",
+        "analysis_epoch",
+        "evidence_catalog",
+        "execution_map",
+        "performance_model",
+        "diagnostic_evidence",
+        "active_evidence_results",
+        "requested_claim",
+        "ready_capability_ids",
+        "contract_action_ids",
+        "available_actions",
+        "closed_mechanism_keys",
+        "candidate_history",
+    }
+    if type(snapshot) is not dict or set(snapshot) != required:
+        raise ValueError("scoreable input_snapshot fields are not closed")
+    forbidden = {
+        "accepted_mechanism_keys",
+        "cheapest_valid_action_ids",
+        "expected_terminal_decisions",
+        "label_source_sha256",
+    }
+
+    def keys(value: object) -> set[str]:
+        if type(value) is dict:
+            return set(value).union(*(keys(item) for item in value.values()))
+        if type(value) is list:
+            return set().union(*(keys(item) for item in value))
+        return set()
+
+    if forbidden & keys(snapshot):
+        raise ValueError("future labels leaked into scoreable input_snapshot")
+    frozen_fields = {
+        "knowledge_identity",
+        "diagnosis",
+        "analysis_epoch",
+        "evidence_catalog",
+        "execution_map",
+        "performance_model",
+        "diagnostic_evidence",
+        "active_evidence_results",
+        "requested_claim",
+        "ready_capability_ids",
+        "contract_action_ids",
+        "available_actions",
+        "closed_mechanism_keys",
+        "candidate_history",
+    }
+    frozen = {field: copy.deepcopy(snapshot[field]) for field in frozen_fields}
+    knowledge = _load_module(
+        "diagnostic_knowledge.py",
+        "cuda_optimizer_knowledge_replay_validate",
+    )
+    knowledge.build_knowledge_context(frozen, limit=3)
+    if [
+        item["action_id"] for item in snapshot["read_only_actions"]
+    ] != snapshot["available_actions"]:
+        raise ValueError("read_only_actions do not match available_actions")
+    label = case.get("label")
+    label_fields = {
+        "accepted_mechanism_keys",
+        "cheapest_valid_action_ids",
+        "expected_terminal_decisions",
+        "field_sources",
+        "label_source_sha256",
+    }
+    if type(label) is not dict or set(label) != label_fields:
+        raise ValueError("scoreable label fields are not closed")
+    for field in (
+        "accepted_mechanism_keys",
+        "cheapest_valid_action_ids",
+        "expected_terminal_decisions",
+    ):
+        _canonical_strings(label[field], f"scoreable label {field}")
+    if not set(label["expected_terminal_decisions"]).issubset(_TERMINAL_DECISIONS):
+        raise ValueError("scoreable label terminal decision is unsupported")
+    if (
+        type(label["label_source_sha256"]) is not str
+        or _SHA256.fullmatch(label["label_source_sha256"]) is None
+    ):
+        raise ValueError("scoreable label_source_sha256 is invalid")
+    for source in label["field_sources"].values():
+        if (
+            type(source) is not dict
+            or set(source) != {"relative_path", "source_sha256", "locator"}
+            or type(source["source_sha256"]) is not str
+            or _SHA256.fullmatch(source["source_sha256"]) is None
+        ):
+            raise ValueError("scoreable label field source is invalid")
+    source_by_path = {}
+    for source in snapshot["evidence_summaries"]:
+        relative_path = (
+            Path(source["relative_path"])
+            if type(source) is dict
+            and type(source.get("relative_path")) is str
+            else None
+        )
+        if (
+            type(source) is not dict
+            or set(source) != {"relative_path", "sha256", "locator"}
+            or relative_path is None
+            or not source["relative_path"]
+            or relative_path.is_absolute()
+            or ".." in relative_path.parts
+            or type(source["sha256"]) is not str
+            or _SHA256.fullmatch(source["sha256"]) is None
+            or source["locator"] != "whole_file"
+            or source["relative_path"] in source_by_path
+        ):
+            raise ValueError("scoreable evidence summary is invalid")
+        source_by_path[source["relative_path"]] = source
+    if snapshot["archive_identity_facts"].get(
+        "source_manifest_sha256"
+    ) != canonical_sha256(snapshot["evidence_summaries"]):
+        raise ValueError("scoreable source manifest digest drifted")
+    for record in eligibility["timing_provenance"]:
+        if type(record) is not dict or set(record) != {
+            "target",
+            "relative_path",
+            "source_sha256",
+            "locator",
+            "source_value",
+            "source_unit",
+            "transform",
+        }:
+            raise ValueError("scoreable timing provenance is not closed")
+        source = source_by_path.get(record["relative_path"])
+        if (
+            source is None
+            or source["sha256"] != record["source_sha256"]
+            or record["transform"] != "identity"
+            or type(record["source_value"]) not in {int, float}
+            or not math.isfinite(record["source_value"])
+        ):
+            raise ValueError("scoreable timing provenance source is not sealed")
+        target_root, separator, target_pointer = record["target"].partition("/")
+        if separator != "/" or not target_root.startswith("input_snapshot."):
+            raise ValueError("scoreable timing provenance target is invalid")
+        field = target_pointer.rsplit("/", 1)[-1]
+        expected_unit = (
+            "us"
+            if field.endswith("_us")
+            else "seconds"
+            if field.endswith("_seconds")
+            else None
+        )
+        if (
+            record["locator"] != f"/{target_pointer}"
+            or record["source_unit"] != expected_unit
+        ):
+            raise ValueError("scoreable timing provenance locator is invalid")
+        target_value: object = case
+        for token in target_root.split("."):
+            if type(target_value) is not dict or token not in target_value:
+                raise ValueError("scoreable timing provenance target is missing")
+            target_value = target_value[token]
+        resolved_value = _json_pointer(
+            target_value,
+            f"/{target_pointer}",
+            "scoreable timing provenance target",
+        )
+        if resolved_value != record["source_value"]:
+            raise ValueError("scoreable timing provenance value drifted")
+
+
+def validate_scoreable_case(case: dict) -> None:
+    _validate_controller_replay_case(case, eligibility_status="scoreable")
+
+
+def validate_package_regression_case(case: dict) -> None:
+    _validate_controller_replay_case(
+        case,
+        eligibility_status="package_regression",
+    )
+
+
+def _build_scoreable_v1_2_baseline(case: dict) -> dict:
+    validate_scoreable_case(case)
+    snapshot = case["input_snapshot"]
+    route = _route_v1_2_cards(
+        snapshot["diagnosis"],
+        snapshot["execution_map"],
+        limit=3,
+    )
+    mapping = case["v1_2_card_to_mechanism"]
+    ranked = []
+    action_ids = []
+    for card in route["cards"]:
+        card_id = card["id"]
+        if card_id not in mapping:
+            raise ValueError(f"V1.2 card has no explicit mechanism mapping: {card_id}")
+        ranked.append(mapping[card_id])
+        action_id = card["preferred_actions"][0]
+        if action_id not in action_ids:
+            action_ids.append(action_id)
+    catalog = _load_v1_2_router_snapshot()
+    action_by_id = {item["action_id"]: item for item in catalog["actions"]}
+    timings = snapshot["performance_model"]["action_timing_estimates"]
+    next_actions = []
+    for action_id in action_ids:
+        action = action_by_id[action_id]
+        estimate = timings.get(action_id)
+        next_actions.append(
+            {
+                "action_id": action_id,
+                "cost_class": action["cost"],
+                "is_profiler": action["evidence_kind"] != "compiler_sass",
+                "measured_seconds": None if estimate is None else estimate["p50_seconds"],
+            }
+        )
+    return {
+        "ranked_mechanism_keys": ranked,
+        "next_actions": next_actions,
+        "diagnostic_terminal_decision": {
+            "status": "unavailable",
+            "reason": "v1_2_controller_terminal_not_replayed",
+        },
+        "promotion_authority": route["promotion_authority"],
+        "valid_for_scoring": True,
+        "route_output_sha256": canonical_sha256(route),
+    }
 
 
 def _reference(root: Path, relative_path: str) -> dict:
@@ -503,14 +1305,17 @@ def build_suite(root: Path) -> dict:
 
 
 def build_baseline(suite: dict) -> dict:
-    cases = {
-        case["case_id"]: {
-            "status": "unavailable",
-            "reason_codes": case["replay_eligibility"]["reason_codes"],
-        }
-        for case in suite["cases"]
-        if case["scoring_group"] == "triton"
-    }
+    cases = {}
+    for case in suite["cases"]:
+        if case["scoring_group"] != "triton":
+            continue
+        if case["replay_eligibility"]["status"] == "scoreable":
+            cases[case["case_id"]] = _build_scoreable_v1_2_baseline(case)
+        else:
+            cases[case["case_id"]] = {
+                "status": "unavailable",
+                "reason_codes": case["replay_eligibility"]["reason_codes"],
+            }
     return {
         "schema_version": "cuda-optimizer/knowledge-replay-baseline-v1",
         "source_cases_sha256": suite["cases_sha256"],

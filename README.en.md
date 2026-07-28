@@ -14,35 +14,27 @@
 
 ## Project overview
 
-`cuda-kernel-optimizer` is a GPU performance optimization skill for ChatGPT's coding
-agent. The user supplies a test workload (dataset, representative requests, or replay),
-correctness checks (expected outputs, tolerances, or accuracy criteria), the target
-environment, and the allowed modification scope.
-ChatGPT checks the environment, runs the original baseline, analyzes
-bottlenecks, modifies code, and uses correctness and paired performance data to
-decide whether a change should be kept.
+`cuda-kernel-optimizer` is a GPU performance optimization skill for ChatGPT's coding agent. The user supplies a test workload
+(dataset, representative requests, or replay), correctness checks (expected outputs, tolerances, or accuracy criteria), the target
+environment, and the allowed modification scope. ChatGPT checks the environment, runs the original baseline, analyzes bottlenecks,
+modifies code, and uses correctness and paired performance data to decide whether a change should be kept.
 
-The analysis covers CUDA, CUTLASS, Triton, PyTorch, vLLM, and TensorRT-LLM. It
-also covers framework scheduling, CPU and data processing, transfers,
-communication, I/O, allocator behavior, and runtime state. The supplied
-complete workload remains the optimization target; the skill does not assume
-that the bottleneck is inside a kernel.
+The analysis covers CUDA, CUTLASS, Triton, PyTorch, vLLM, and TensorRT-LLM. It also covers framework scheduling, CPU and data
+processing, transfers, communication, I/O, allocator behavior, and runtime state. The supplied complete workload remains the
+optimization target; the skill does not assume that the bottleneck is inside a kernel.
 
-Each run records candidate changes, when present, along with measurements and
-the terminal reason. Without a representative test workload or valid
-measurement evidence, the result is limited to static analysis, environment
-preparation, or directions that still require validation. It does not claim a
-speedup.
+Each run records candidate changes, when present, along with measurements and the terminal reason. Without a representative test
+workload or valid measurement evidence, the result is limited to static analysis, environment preparation, or directions that
+still require validation. It does not claim a speedup.
 
 ## Core capabilities
 
 - Check that build, correctness, benchmark, GPU, and profiler capabilities and dependencies are available before optimization starts.
 - Run the project's original baseline and locate the bottleneck layer on the critical path of the complete workload.
-- Use profiles, source code, and technical knowledge to form competing bottleneck hypotheses, then prefer the lowest-cost check that can falsify one.
+- Use sealed evidence from the current workload, source code, and technical knowledge to form at most three falsifiable directions, then prefer the lowest-cost check.
 - Optimize CUDA, CUTLASS, and Triton kernels and their surrounding execution paths, with staged validation for each candidate.
-- Decide whether to continue, pause, or stop from the available headroom,
-  evidence strength, and next-stage cost; a resumed run will not rerun completed
-  expensive stages.
+- Decide whether to continue, pause, or stop from the available headroom, evidence strength, and next-stage cost; a resumed run
+  will not rerun completed expensive stages.
 - Analyze an existing NCU report or `.ncu-rep` without rerunning the workload, while stating exactly what the available evidence can support.
 
 ## Quick start
@@ -53,9 +45,8 @@ Installation is performed by ChatGPT's coding agent. The user does not run the p
 
 > Install `skills/cuda-kernel-optimizer` from the latest published release of [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer). Install only that skill into the active skills directory, run its CPU/static `self_check`, and report the installed tag, commit, and destination. Do not use `main` unless I ask.
 
-Start a new session after installation so that the skill instructions are
-reloaded. `self_check` covers only the package's CPU/static path; it does not
-prove that the target GPU or profiler is available.
+Start a new session after installation so that the skill instructions are reloaded. `self_check` covers only the package's
+CPU/static path; it does not prove that the target GPU or profiler is available.
 
 ### What to prepare
 
@@ -67,14 +58,12 @@ prove that the target GPU or profiler is available.
 | Target GPU and runtime environment | Bind build artifacts, tool capabilities, and performance evidence |
 | Allowed paths and constraints | Limit changes to code, dependencies, and runtime state |
 
-Static analysis is still possible with source code alone, but its output is
-limited to candidate directions and an environment-preparation plan. It cannot
-support a performance-improvement claim.
+Static analysis is still possible with source code alone, but its output is limited to candidate directions and an
+environment-preparation plan. It cannot support a performance-improvement claim.
 
 ### Run a 10-minute fit check
 
-For a first use, ask ChatGPT to check whether the project is ready for
-optimization:
+For a first use, ask ChatGPT to check whether the project is ready for optimization:
 
 > Use cuda-kernel-optimizer to check whether this project is ready for optimization. Spend at most 10 minutes. Do not edit source files, install dependencies, or change host settings. Confirm the test workload, correctness checks, benchmark, target GPU, and profiler access. Report blockers, the analysis that is currently possible, and the lowest-cost next step. Do not claim a speedup.
 
@@ -122,11 +111,13 @@ evidence gaps. A benefit ceiling is the amount of time a direction could affect,
 not a promised speedup.
 
 ChatGPT proposes no more than three competing hypotheses from the execution
-map, source code, and relevant knowledge. The Controller checks whether each
-hypothesis is bound to current evidence, does not duplicate an existing mechanism, and
-supports its declared claim layer. It then selects the cheapest check that can
-distinguish between the hypotheses. New timing evidence updates the execution
-map until a direction is supported or rejected.
+map, source code, and relevant knowledge. V1.3 derives directions only from the
+current identity, performance model, and sealed observations; it never treats
+historical speedup numbers as current benefit. A prior failure may prevent a
+repeat only under the same identity. The Controller then checks evidence
+binding, mechanism duplication, and claim layer before selecting the cheapest
+check that can distinguish the hypotheses. New evidence updates the next round
+until a direction is supported or rejected.
 
 External search and third-party AI may challenge a direction or review a final
 result. Only the necessary technical summary is shared. External opinions
@@ -183,6 +174,7 @@ artifacts:
 | `summary.md` | Conclusions, kept changes, rejected directions, and blockers |
 | `active_diagnosis/initial_investment_brief.json` | Investment recommendation after the first global analysis |
 | `active_diagnosis/performance_model.json` | Critical path, benefit ceiling, and evidence gaps |
+| `active_diagnosis/knowledge_context.json` | Evidence-bound directions, exclusions, and lowest-cost checks |
 | `decision.json` | Final decision and terminal reason |
 | Raw paired samples and environment identity | Show whether performance data is comparable |
 | Correctness and evidence-integrity records | Show whether the change is suitable for integration |
@@ -206,6 +198,12 @@ studies](docs/case-studies.md) record historical workload results separately.
 Neither predicts the speedup of a new project.
 
 ## Release notes
+
+### V1.3 (in development)
+
+- The local knowledge engine returns at most three falsifiable directions from the current identity, performance model, and sealed observations.
+- Historical cases support or reject only identity-bound mechanisms; historical gains do not transfer to a new workload.
+- The current six RTX 5090 Triton decision points are package-regression seeds, not release-gate cases; release requires independent post-freeze cases.
 
 ### V1.2.0
 

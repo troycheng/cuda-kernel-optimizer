@@ -90,10 +90,20 @@ stage; only explicit `abandon` rolls the snapshot back.
 
 Freeze objective, constraints, environment, paths, and stability policy with
 `scripts/workload_contract.py`; calibrate with
-`scripts/stability_calibration.py`. Query only a few evidence-matched cards:
+`scripts/stability_calibration.py`. During active diagnosis, consume only
+`active_diagnosis/knowledge_context.json`, which the Controller rebuilds from
+the current identity, performance model, and sealed semantic observations. Its
+at most three candidates are falsifiable directions with
+`promotion_authority="none"`; they are not permission to modify code. Exact
+prior rejections may close the same identity-bound mechanism, but historical
+speedup values never become current benefit facts.
+
+Use the query CLI only for inspection; runtime queries require a closed frozen
+input. The architecture-only mode remains a reference catalog:
 
 ```bash
 python3 <skill>/scripts/capability_query.py --help
+python3 <skill>/scripts/knowledge_query.py --help
 python3 <skill>/scripts/knowledge_query.py --arch sm_120 --layer kernel --bottleneck gemm --limit 5
 ```
 

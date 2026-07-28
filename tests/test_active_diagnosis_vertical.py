@@ -1524,6 +1524,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             "ledger-drift",
             "missing-intent-marker",
             "immutable-conflict",
+            "proposal-conflict",
         ):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp).resolve()
@@ -1663,6 +1664,32 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                         conflict,
                     )
                     continue
+                if mode == "proposal-conflict":
+                    proposal_path = (
+                        active
+                        / "proposal_generations"
+                        / (
+                            intent["proposal_ledger_event"][
+                                "payload_sha256"
+                            ]
+                            + ".json"
+                        )
+                    )
+                    conflict = {"immutable": "foreign"}
+                    helper.controller._atomic_json(
+                        proposal_path,
+                        conflict,
+                    )
+                    recovered = helper.controller.resume_run(run_dir)
+                    self.assertEqual(
+                        (recovered["status"], recovered["next_action"]),
+                        ("manual_recovery_required", "manual_recovery"),
+                    )
+                    self.assertEqual(
+                        json.loads(proposal_path.read_text("utf-8")),
+                        conflict,
+                    )
+                    continue
 
                 if mode == "middle-artifact":
                     knowledge_mirror = active / "knowledge_context.json"
@@ -1708,6 +1735,12 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                         ]
                         + ".json"
                     ): intent["hypothesis_generation"],
+                    active
+                    / "proposal_generations"
+                    / (
+                        intent["proposal_ledger_event"]["payload_sha256"]
+                        + ".json"
+                    ): intent,
                     active / "hypothesis_result.json": intent[
                         "hypothesis_result"
                     ],
@@ -2630,6 +2663,42 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             )
             self.assertEqual(no_ready_adaptation["knowledge_support"], "unavailable")
             self.assertEqual(no_ready_requests["requests"], [])
+
+            (
+                unknown_identity_hypotheses,
+                unknown_identity_requests,
+                unknown_identity_adaptation,
+            ) = helper.controller._adapt_controller_knowledge(
+                {},
+                contract=helper.controller._load_frozen_analysis_contract(
+                    run_dir, state
+                ),
+                execution_map=json.loads(
+                    (active / "execution_map.json").read_text("utf-8")
+                ),
+                action_catalog=action_catalog,
+                selection_policy=selection_policy,
+                knowledge_identity=context["knowledge_identity"],
+                local_knowledge_context=local_context,
+                hypothesis_set=hypothesis,
+                request_set=request,
+            )
+            self.assertEqual(
+                unknown_identity_adaptation["knowledge_support"], "unavailable"
+            )
+            self.assertEqual(unknown_identity_adaptation["candidates"], [])
+            self.assertIn(
+                "knowledge_identity_unverified",
+                {
+                    item["reason"]
+                    for item in unknown_identity_adaptation["rejections"]
+                },
+            )
+            self.assertEqual(
+                unknown_identity_hypotheses["hypotheses"],
+                hypothesis["hypotheses"],
+            )
+            self.assertEqual(unknown_identity_requests["requests"], [])
 
     def test_cli_register_diagnosis_adapts_raw_external_knowledge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

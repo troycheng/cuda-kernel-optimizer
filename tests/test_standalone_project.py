@@ -11,10 +11,16 @@ OLD_PUBLIC_REPOSITORY = "github.com/troycheng/cuda-optimized-skill"
 
 
 class StandaloneProjectTests(unittest.TestCase):
-    def test_public_version_uses_the_v1_release_line(self) -> None:
+    def test_public_version_stays_on_v1_2_while_v1_3_is_in_development(self) -> None:
         self.assertEqual((ROOT / "VERSION").read_text("utf-8").strip(), "1.2.0")
-        for name in ("README.md", "README.en.md"):
+        headings = {
+            "README.md": "### V1.3（开发中）",
+            "README.en.md": "### V1.3 (in development)",
+        }
+        for name, heading in headings.items():
             text = (ROOT / name).read_text("utf-8")
+            self.assertIn(heading, text)
+            self.assertNotIn("### V1.3.0", text)
             self.assertIn("### V1.2.0", text)
             self.assertIn("### V1.1.0", text)
             self.assertIn("### V1.0.1", text)

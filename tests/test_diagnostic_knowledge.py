@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/cuda-kernel-optimizer/scripts/diagnostic_knowledge.py"
 REFERENCE_DIR = ROOT / "skills/cuda-kernel-optimizer/references"
 REPLAY_FIXTURE = ROOT / "tests/fixtures/knowledge_replay/decision_points.json"
+FRESH_REPLAY_FIXTURE = (
+    ROOT / "tests/fixtures/knowledge_replay/fresh_controller_cases.json"
+)
 IMPLEMENTATION_SHA = "1" * 64
 REQUEST_SHA = "2" * 64
 RESULT_SHA = "3" * 64
@@ -675,6 +678,13 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
             "source_sha256": None,
         }
         unknown_context = self.module.build_knowledge_context(unknown, limit=3)
+        self.assertEqual(unknown_context["candidates"], [])
+        self.assertFalse(
+            any(
+                item["reason"] == "exact_case_rejection"
+                for item in unknown_context["rejections"]
+            )
+        )
         self.assertTrue(
             any(
                 item["card_id"] == "diagnostic.cpu-data.starvation"
@@ -767,7 +777,8 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
     def test_validates_closed_knowledge_package(self) -> None:
         result = self.module.validate_knowledge_package(REFERENCE_DIR)
         self.assertEqual(result["status"], "passed")
-        self.assertEqual(result["case_count"], 9)
+        self.assertEqual(result["case_count"], 15)
+        self.assertEqual(result["card_count"], 13)
 
     def _mutated_references(self):
         temporary = tempfile.TemporaryDirectory()
@@ -1033,9 +1044,30 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
 
     def test_case_memory_matches_task1_fixture_identity_status_and_digest(self) -> None:
         fixture = json.loads(REPLAY_FIXTURE.read_text(encoding="utf-8"))
-        wanted = {"R01", "R02", "R03", "R04", "R05", "R06", "X01", "K01", "K02"}
+        fresh_fixture = json.loads(
+            FRESH_REPLAY_FIXTURE.read_text(encoding="utf-8")
+        )
+        wanted = {
+            "R01",
+            "R02",
+            "R03",
+            "R04",
+            "R05",
+            "R06",
+            "X01",
+            "K01",
+            "K02",
+            "R07-fresh-20260728",
+            "R08-fresh-20260728",
+            "R09-fresh-20260728",
+            "R10-fresh-20260728",
+            "R11-fresh-20260728",
+            "R12-fresh-20260728",
+        }
         replay_cases = {
-            case["case_id"]: case for case in fixture["cases"] if case["case_id"] in wanted
+            case["case_id"]: case
+            for case in [*fixture["cases"], *fresh_fixture["cases"]]
+            if case["case_id"] in wanted
         }
         memory = json.loads((REFERENCE_DIR / "case_memory.json").read_text(encoding="utf-8"))
         self.assertEqual({item["id"] for item in memory["cases"]}, wanted)

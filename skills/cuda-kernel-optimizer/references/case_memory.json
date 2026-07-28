@@ -126,6 +126,95 @@
         "triton-tutorials"
       ],
       "content_status": "source_verified"
+    },
+    {
+      "id": "R07-fresh-20260728",
+      "replay_case_id": "R07-fresh-20260728",
+      "replay_status": "package_regression",
+      "replay_case_sha256": "f90725a81d1e8cb2a55eb5f0a15b9a035f9a430a450c756f8081827a8d437fe4",
+      "identity_match": "exact",
+      "predecision_evidence_sha256": "7ee0e33c6a0a9fe4fa84a99ed32aa2f62de1acf45cec5d855783c8133a231557",
+      "knowledge_identity_sha256": "20117b437732437a7590da47656ba3b71e5c30212993c180ee5ca61252fbdb75",
+      "outcome_type": "historical_outcome",
+      "source_ids": [
+        "nvidia-cuda-best-practices",
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "locally_measured"
+    },
+    {
+      "id": "R08-fresh-20260728",
+      "replay_case_id": "R08-fresh-20260728",
+      "replay_status": "package_regression",
+      "replay_case_sha256": "7215604e0be28c8c90fcf65cca821c37dea0c4d27b2a5154d7062bf01dca052d",
+      "identity_match": "exact",
+      "predecision_evidence_sha256": "607fa0f061a5a15e9d46504d9ac45b3772498e2972004c65d011862deb92dc88",
+      "knowledge_identity_sha256": "0553e2008922d43a1e4a68b04454232cafc0c4b577eb3c428a899ddab2759a3a",
+      "outcome_type": "historical_outcome",
+      "source_ids": [
+        "nvidia-cuda-best-practices",
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "locally_measured"
+    },
+    {
+      "id": "R09-fresh-20260728",
+      "replay_case_id": "R09-fresh-20260728",
+      "replay_status": "package_regression",
+      "replay_case_sha256": "0e1b5d7f4ae16c7daea2130a907d45227f75fe16f08f2e3847e2a0f8dfb55b24",
+      "identity_match": "exact",
+      "predecision_evidence_sha256": "027532cffb250760c51cec2b0983847b364f1fc3d87962c05b7c8718e0c81223",
+      "knowledge_identity_sha256": "77013dfbf4420edec32d17d7c4077d192d16b6e2ac1d47a328d3c7454a4b34a4",
+      "outcome_type": "historical_outcome",
+      "source_ids": [
+        "nvidia-cuda-best-practices",
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "locally_measured"
+    },
+    {
+      "id": "R10-fresh-20260728",
+      "replay_case_id": "R10-fresh-20260728",
+      "replay_status": "package_regression",
+      "replay_case_sha256": "d0056a862f727cebe5963c3f2b940aaadf235565c3406b97c27939ca147cfc4f",
+      "identity_match": "exact",
+      "predecision_evidence_sha256": "16386057d6b1333074c1bb8b9945fbe7bd900b39eb3f39caaf8bf9c8c6243258",
+      "knowledge_identity_sha256": "409cc93fd0c618e9d776ca3aa8daf0769a05b9aaf7145e919420a9f92ed14005",
+      "outcome_type": "historical_outcome",
+      "source_ids": [
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "locally_measured"
+    },
+    {
+      "id": "R11-fresh-20260728",
+      "replay_case_id": "R11-fresh-20260728",
+      "replay_status": "package_regression",
+      "replay_case_sha256": "b45920ec8c8c47b2d50478aa30cb3e0c6ee4e5c39925626645eae829faf7c06b",
+      "identity_match": "exact",
+      "predecision_evidence_sha256": "b278ceaf49b36a26febcf141df5870a17b2e51b34a4332297e6e37d056aa1e8d",
+      "knowledge_identity_sha256": "625bd2b6fe42b91908fef04957761b4bf9a3f97584d892027953ce6049a74a22",
+      "outcome_type": "rejection",
+      "source_ids": [
+        "nvidia-cuda-best-practices",
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "locally_measured"
+    },
+    {
+      "id": "R12-fresh-20260728",
+      "replay_case_id": "R12-fresh-20260728",
+      "replay_status": "package_regression",
+      "replay_case_sha256": "7c62679c8cc6ebaf3330fd1461c2d50e3da88e0aea2e4d6a7f3d14197cd0eb47",
+      "identity_match": "exact",
+      "predecision_evidence_sha256": "d53409c6705c67665dbdacd0e527a67a6c292f95f1de7914aa983dfa1243b98c",
+      "knowledge_identity_sha256": "4dc45d60ce9263d1ed8db03b75fcfb352cf572ab639889835b096cda748282bd",
+      "outcome_type": "rejection",
+      "source_ids": [
+        "nvidia-cuda-best-practices",
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "locally_measured"
     }
   ]
 }
