@@ -2047,7 +2047,10 @@ class WorkloadRoundTests(unittest.TestCase):
                 context["performance_model_sha256"],
             )
             self.assertEqual(performance_model["minimum_effect_us"], 1.0)
-            self.assertLessEqual(len(context["knowledge_context"]["cards"]), 3)
+            self.assertLessEqual(
+                len(context["knowledge_context"]["candidates"]),
+                3,
+            )
             self.assertEqual(
                 context["knowledge_context"]["promotion_authority"], "none"
             )
@@ -3473,6 +3476,13 @@ class WorkloadRoundTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            knowledge_mirror = (
+                run_dir / "active_diagnosis" / "knowledge_context.json"
+            )
+            knowledge_mirror.unlink()
+            ledger_before_recovery = (
+                self.controller._verify_active_diagnosis_ledger(run_dir)
+            )
 
             recovered = self.controller.resume_run(run_dir)
             replayed = self.controller.resume_run(run_dir)
@@ -3485,6 +3495,17 @@ class WorkloadRoundTests(unittest.TestCase):
             )
             self.assertEqual(replayed, recovered)
             self.assertEqual(complete_path.stat().st_mtime_ns, complete_mtime)
+            self.assertEqual(
+                self.controller._verify_active_diagnosis_ledger(run_dir),
+                ledger_before_recovery,
+            )
+            formal_context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            self.assertEqual(
+                json.loads(knowledge_mirror.read_text("utf-8")),
+                formal_context["knowledge_context"],
+            )
 
     def test_completion_recovery_revalidates_missing_or_tampered_grant(
         self,

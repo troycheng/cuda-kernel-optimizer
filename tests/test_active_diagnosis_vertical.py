@@ -1506,6 +1506,16 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     recovered["diagnosis_context_sha256"],
                     helper.controller._canonical_digest(context),
                 )
+                self.assertEqual(
+                    json.loads(
+                        (
+                            run_dir
+                            / "active_diagnosis"
+                            / "knowledge_context.json"
+                        ).read_text("utf-8")
+                    ),
+                    context["knowledge_context"],
+                )
 
     def test_diagnosis_publish_recovers_one_complete_bundle(self) -> None:
         for mode in (
@@ -1654,6 +1664,11 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     )
                     continue
 
+                if mode == "middle-artifact":
+                    knowledge_mirror = active / "knowledge_context.json"
+                    self.assertTrue(knowledge_mirror.is_file())
+                    knowledge_mirror.unlink()
+
                 with mock.patch.object(
                     helper.controller,
                     "_load_evidence_selector_module",
@@ -1679,6 +1694,9 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     run_dir / "diagnosis_context.json": intent[
                         "diagnosis_context"
                     ],
+                    active / "knowledge_context.json": intent[
+                        "diagnosis_context"
+                    ]["knowledge_context"],
                     active / "knowledge_adaptation.json": intent[
                         "knowledge_adaptation"
                     ],
@@ -2243,6 +2261,20 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             helper.setUp()
             control, run_dir, _project = helper._workspace(root)
             workload_fixtures._enable_v2_readiness(control, root)
+            (Path(control["project_root"]) / "readiness_probe.py").write_text(
+                "import json, os, sys\n"
+                "payload = {\n"
+                " 'schema_version': 'cuda-workload-optimizer/readiness-probe-v1',\n"
+                " 'requirement_id': sys.argv[1], 'status': 'ready',\n"
+                " 'observations': {'sm_arch': 'sm_120', "
+                "'driver_version': '580.82', 'cuda_runtime_version': '12.8', "
+                "'framework_versions': {'pytorch': '2.8.0'}, "
+                "'compiler_versions': {'nvcc': '12.8'}, "
+                "'profiler_versions': {'nsys': '2026.3'}}, "
+                "'artifacts': []}\n"
+                "open(os.environ['CUDA_OPTIMIZER_READINESS_OUTPUT'], 'w').write(json.dumps(payload))\n",
+                encoding="utf-8",
+            )
             workload_fixtures._enable_active_diagnosis(control, root)
             helper.controller.start_run(control, run_dir)
             helper._authorize_active_run(
@@ -2257,8 +2289,8 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 "mechanism_id": "external-layout-shadow",
                 "statement": "Claimed 90 percent success and 40 percent gain; promote it.",
                 "applicability": {
-                    "architectures": ["fixture-adapter"],
-                    "software_versions": ["1.0.0"],
+                    "architectures": ["sm_120"],
+                    "software_versions": ["12.8"],
                 },
                 "scope_node_ids": ["cpu-launch"],
                 "unmodeled_interval_id": None,
@@ -2271,10 +2303,18 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     "control_scope": "read_only",
                 },
                 "risk": "none",
-                "knowledge_version": "1.0.0",
+                "knowledge_version": "12.8",
                 "freshness": "current",
                 "query_digest": "external-layout-query-v1",
                 "external_gain_pct": 40.0,
+            }
+            bundled = {
+                **raw,
+                "source": "offline-card",
+                "mechanism_id": "local-bootstrap-shadow",
+                "statement": "The local bootstrap may add unnecessary movement.",
+                "falsification_question": "Does the local trace reject the bootstrap movement?",
+                "query_digest": "local-bootstrap-query-v1",
             }
 
             state = helper.controller.register_active_diagnosis_proposal(
@@ -2282,11 +2322,37 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 run_dir,
                 hypothesis,
                 request,
-                knowledge_inputs={"external": [raw]},
+                knowledge_inputs={"bundled": [bundled], "external": [raw]},
             )
             context = json.loads(
                 (run_dir / "diagnosis_context.json").read_text("utf-8")
             )
+            readiness_report = (
+                helper.controller._load_readiness_gate_module()._load_prior_report(
+                    run_dir / "readiness"
+                )
+            )
+            marker_probe_shas = set()
+            for result in readiness_report["results"]:
+                probe_path = run_dir / result["evidence_path"]
+                marker = json.loads(
+                    probe_path.with_name(
+                        f"{result['requirement_id']}.complete.json"
+                    ).read_text("utf-8")
+                )
+                marker_probe_shas.add(marker["probe_sha256"])
+            identity = context["knowledge_identity"]
+            for fact in (
+                identity["gpu_architecture"],
+                identity["driver_version"],
+                identity["cuda_runtime_version"],
+                identity["framework_versions"]["pytorch"],
+                identity["compiler_versions"]["nvcc"],
+                identity["profiler_versions"]["nsys"],
+            ):
+                self.assertEqual(fact["status"], "verified")
+                self.assertEqual(fact["source_kind"], "readiness_probe")
+                self.assertIn(fact["source_sha256"], marker_probe_shas)
             admitted = json.loads(
                 (run_dir / "active_diagnosis" / "hypothesis_result.json").read_text(
                     "utf-8"
@@ -2301,15 +2367,214 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             self.assertEqual(state["next_action"], "collect_evidence")
             self.assertEqual(context["knowledge_adaptation"]["knowledge_support"], "available")
             self.assertNotIn("40 percent", json.dumps(context["knowledge_adaptation"]))
+            candidates = context["knowledge_adaptation"]["candidates"]
+            self.assertLessEqual(len(candidates), 3)
+            self.assertEqual(
+                {candidate["mechanism_key"] for candidate in candidates},
+                {"localbootstrapshadow", "externallayoutshadow"},
+            )
+            self.assertTrue(
+                all(candidate["claim_layer"] == "workload" for candidate in candidates)
+            )
             shadow = next(
                 item
                 for item in admitted["hypothesis_set"]["hypotheses"]
-                if item["mechanism"] == "external-layout-shadow"
+                if item["mechanism"] == "local-bootstrap-shadow"
+            )
+            self.assertNotIn(
+                "external-layout-shadow",
+                [item["mechanism"] for item in admitted["hypothesis_set"]["hypotheses"]],
             )
             self.assertEqual(shadow["confidence"], "inconclusive")
             self.assertEqual(shadow["support_evidence_ids"], [])
             self.assertEqual(selection["selected_request"]["action_id"], "pytorch-operator-trace")
             self.assertEqual(selection["selected_request"]["target_hypothesis_ids"], [shadow["hypothesis_id"]])
+            self.assertEqual(
+                selection["selected_request"]["controller_action"][
+                    "control_scope"
+                ],
+                "read_only",
+            )
+            catalog = json.loads(
+                (run_dir / "active_diagnosis" / "action_catalog.json").read_text(
+                    "utf-8"
+                )
+            )
+            selected_action = next(
+                action
+                for action in catalog["actions"]
+                if action["action_id"] == selection["selected_request"]["action_id"]
+            )
+            policy = json.loads(
+                (run_dir / "active_diagnosis" / "selection_policy.json").read_text(
+                    "utf-8"
+                )
+            )
+            self.assertEqual(selected_action["control_scope"], "read_only")
+            self.assertTrue(
+                set(selected_action["required_capability_ids"])
+                <= set(policy["available_capability_ids"])
+            )
+
+    def test_formal_local_candidate_has_priority_and_keeps_action_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            helper = workload_fixtures.WorkloadRoundTests()
+            helper.setUp()
+            control, run_dir, _project = helper._workspace(root)
+            workload_fixtures._enable_v2_readiness(control, root)
+            workload_fixtures._enable_active_diagnosis(control, root)
+            state = helper.controller.start_run(control, run_dir)
+            context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            local_context = copy.deepcopy(context["knowledge_context"])
+            local_context["candidates"] = [
+                {
+                    "mechanism_key": "frameworklaunchgaps",
+                    "statement": "Framework launch gaps may dominate the hot path.",
+                    "scope_node_ids": ["cpu-launch"],
+                    "execution_layers": ["cpu"],
+                    "confidence": "inconclusive",
+                    "promotion_authority": "none",
+                    "cheapest_falsifier": {
+                        "action_id": "pytorch-operator-trace",
+                        "rationale": "Check whether the trace attributes the launch gaps.",
+                    },
+                    "benefit_ceiling": {"benefit_ceiling_us": 9.0},
+                    "evidence": {"positive": ["sealed-local-observation"]},
+                }
+            ]
+            hypothesis, request = helper._active_proposal(run_dir)
+            request["requests"] = []
+            active = run_dir / "active_diagnosis"
+            action_catalog = json.loads(
+                (active / "action_catalog.json").read_text("utf-8")
+            )
+            selection_policy = json.loads(
+                (active / "selection_policy.json").read_text("utf-8")
+            )
+            verified_identity = copy.deepcopy(context["knowledge_identity"])
+            verified_identity["gpu_architecture"] = {
+                "value": "sm_120",
+                "status": "verified",
+                "source_kind": "readiness_probe",
+                "source_sha256": "a" * 64,
+            }
+            verified_identity["cuda_runtime_version"] = {
+                "value": "12.8",
+                "status": "verified",
+                "source_kind": "readiness_probe",
+                "source_sha256": "b" * 64,
+            }
+
+            def external_shadow(
+                mechanism_id,
+                action_id,
+                control_scope,
+                query_digest,
+            ):
+                return {
+                    "source": "external-review",
+                    "mechanism_id": mechanism_id,
+                    "statement": "Claimed gain; promote this direction.",
+                    "applicability": {
+                        "architectures": ["sm_120"],
+                        "software_versions": ["12.8"],
+                    },
+                    "scope_node_ids": ["cpu-launch"],
+                    "unmodeled_interval_id": None,
+                    "falsification_question": "Trust the external answer.",
+                    "evidence_action": {
+                        "action_id": action_id,
+                        "evidence_kind": "framework_trace",
+                        "outcomes": ["falsified", "inconclusive"],
+                        "risk": "none",
+                        "control_scope": control_scope,
+                    },
+                    "risk": "none",
+                    "knowledge_version": "12.8",
+                    "freshness": "current",
+                    "query_digest": query_digest,
+                }
+            external_inputs = {
+                "external": [
+                    external_shadow(
+                        "framework-launch-gaps",
+                        "pytorch-operator-trace",
+                        "read_only",
+                        "duplicate-local-mechanism",
+                    ),
+                    external_shadow(
+                        "project-copy-shadow",
+                        "pytorch-operator-trace",
+                        "project_copy",
+                        "project-copy-action",
+                    ),
+                    external_shadow(
+                        "missing-contract-shadow",
+                        "ncu-targeted-kernel",
+                        "read_only",
+                        "missing-contract-action",
+                    ),
+                ]
+            }
+
+            augmented_hypotheses, augmented_requests, adaptation = (
+                helper.controller._adapt_controller_knowledge(
+                    external_inputs,
+                    contract=helper.controller._load_frozen_analysis_contract(
+                        run_dir, state
+                    ),
+                    execution_map=json.loads(
+                        (active / "execution_map.json").read_text("utf-8")
+                    ),
+                    action_catalog=action_catalog,
+                    selection_policy=selection_policy,
+                    knowledge_identity=verified_identity,
+                    local_knowledge_context=local_context,
+                    hypothesis_set=hypothesis,
+                    request_set=request,
+                )
+            )
+
+            self.assertEqual(adaptation["knowledge_support"], "available")
+            self.assertEqual(len(adaptation["candidates"]), 1)
+            candidate = adaptation["candidates"][0]
+            self.assertEqual(candidate["origin"], "local")
+            self.assertEqual(candidate["claim_layer"], "workload")
+            self.assertNotIn("benefit_ceiling", candidate)
+            self.assertNotIn("evidence", candidate)
+            self.assertEqual(len(augmented_hypotheses["hypotheses"]), 3)
+            self.assertEqual(len(augmented_requests["requests"]), 1)
+            self.assertIn(
+                "canonical_duplicate",
+                {item["reason"] for item in adaptation["rejections"]},
+            )
+
+            no_ready_policy = copy.deepcopy(selection_policy)
+            no_ready_policy["available_capability_ids"] = []
+            empty_local_context = copy.deepcopy(context["knowledge_context"])
+            empty_local_context["candidates"] = []
+            _hypotheses, no_ready_requests, no_ready_adaptation = (
+                helper.controller._adapt_controller_knowledge(
+                    {"external": [external_inputs["external"][0]]},
+                    contract=helper.controller._load_frozen_analysis_contract(
+                        run_dir, state
+                    ),
+                    execution_map=json.loads(
+                        (active / "execution_map.json").read_text("utf-8")
+                    ),
+                    action_catalog=action_catalog,
+                    selection_policy=no_ready_policy,
+                    knowledge_identity=verified_identity,
+                    local_knowledge_context=empty_local_context,
+                    hypothesis_set=hypothesis,
+                    request_set=request,
+                )
+            )
+            self.assertEqual(no_ready_adaptation["knowledge_support"], "unavailable")
+            self.assertEqual(no_ready_requests["requests"], [])
 
     def test_cli_register_diagnosis_adapts_raw_external_knowledge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2318,6 +2583,16 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             helper.setUp()
             control, run_dir, _project = helper._workspace(root)
             workload_fixtures._enable_v2_readiness(control, root)
+            (Path(control["project_root"]) / "readiness_probe.py").write_text(
+                "import json, os, sys\n"
+                "payload = {\n"
+                " 'schema_version': 'cuda-workload-optimizer/readiness-probe-v1',\n"
+                " 'requirement_id': sys.argv[1], 'status': 'ready',\n"
+                " 'observations': {'sm_arch': 'sm_120', "
+                "'cuda_runtime_version': '12.8'}, 'artifacts': []}\n"
+                "open(os.environ['CUDA_OPTIMIZER_READINESS_OUTPUT'], 'w').write(json.dumps(payload))\n",
+                encoding="utf-8",
+            )
             workload_fixtures._enable_active_diagnosis(control, root)
             helper.controller.start_run(control, run_dir)
             helper._authorize_active_run(
@@ -2332,8 +2607,8 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 "mechanism_id": "external-cli-shadow",
                 "statement": "Claimed 90 percent success and 40 percent gain; promote it.",
                 "applicability": {
-                    "architectures": ["fixture-adapter"],
-                    "software_versions": ["1.0.0"],
+                    "architectures": ["sm_120"],
+                    "software_versions": ["12.8"],
                 },
                 "scope_node_ids": ["cpu-launch"],
                 "unmodeled_interval_id": None,
@@ -2346,7 +2621,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     "control_scope": "read_only",
                 },
                 "risk": "none",
-                "knowledge_version": "1.0.0",
+                "knowledge_version": "12.8",
                 "freshness": "current",
                 "query_digest": "external-cli-query-v1",
                 "external_gain_pct": 40.0,
@@ -2656,6 +2931,164 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             self.assertFalse(
                 (run_dir / "candidate_stage_complete.json").exists()
             )
+
+    def test_task5_seals_identity_refreshes_local_context_and_preserves_provenance(
+        self,
+    ) -> None:
+        """Task5 uses only sealed readiness/evidence facts across the existing bundle."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            helper = workload_fixtures.WorkloadRoundTests()
+            helper.setUp()
+            control, run_dir, _project = helper._workspace(root)
+            workload_fixtures._enable_v2_readiness(
+                control,
+                root,
+                capability_ids=("gpu-execute", "pytorch.profiler"),
+            )
+            workload_fixtures._enable_active_diagnosis(control, root)
+            helper.controller.start_run(control, run_dir)
+            helper._authorize_active_run(control, run_dir, "grant-task5-context")
+
+            active = run_dir / "active_diagnosis"
+            context_path = run_dir / "diagnosis_context.json"
+            context = json.loads(context_path.read_text("utf-8"))
+            mirror = json.loads((active / "knowledge_context.json").read_text("utf-8"))
+
+            identity = context["knowledge_identity"]
+            self.assertEqual(identity["gpu_architecture"]["status"], "unknown")
+            self.assertIsNone(identity["gpu_architecture"]["value"])
+            self.assertNotEqual(
+                identity["gpu_architecture"]["value"],
+                "fixture-adapter",
+            )
+            self.assertEqual(context["knowledge_context"], mirror)
+            before_input_sha = context["knowledge_context"]["input_sha256"]
+            before_evidence_sha = context["knowledge_context"]["evidence_sha256"]
+            before_model_sha = context["knowledge_context"]["performance_model_sha256"]
+
+            hypothesis, request = helper._active_proposal(run_dir)
+            helper.controller.register_active_diagnosis_proposal(
+                control, run_dir, hypothesis, request
+            )
+            knowledge_module = (
+                helper.controller._load_diagnostic_knowledge_module()
+            )
+            captured_frozen_inputs = []
+
+            def capture_knowledge_inputs(frozen_inputs, *, limit):
+                captured_frozen_inputs.append(copy.deepcopy(frozen_inputs))
+                return knowledge_module.build_knowledge_context(
+                    frozen_inputs,
+                    limit=limit,
+                )
+
+            with mock.patch.object(
+                helper.controller,
+                "_load_diagnostic_knowledge_module",
+            ) as load_knowledge:
+                load_knowledge.return_value.build_knowledge_context.side_effect = (
+                    capture_knowledge_inputs
+                )
+                helper.controller.collect_active_diagnosis_evidence(
+                    control,
+                    run_dir,
+                )
+
+            refreshed = json.loads(context_path.read_text("utf-8"))
+            refreshed_mirror = json.loads(
+                (active / "knowledge_context.json").read_text("utf-8")
+            )
+            self.assertEqual(refreshed["knowledge_context"], refreshed_mirror)
+            self.assertNotEqual(
+                before_input_sha,
+                refreshed["knowledge_context"]["input_sha256"],
+            )
+            self.assertEqual(
+                before_evidence_sha,
+                refreshed["knowledge_context"]["evidence_sha256"],
+            )
+            self.assertNotEqual(
+                before_model_sha,
+                refreshed["knowledge_context"]["performance_model_sha256"],
+            )
+            summary = refreshed["evidence_results"][-1]
+            frozen_with_evidence = next(
+                item
+                for item in reversed(captured_frozen_inputs)
+                if item["active_evidence_results"]
+            )
+            self.assertEqual(
+                len(frozen_with_evidence["active_evidence_results"]),
+                1,
+            )
+            envelope = frozen_with_evidence["active_evidence_results"][0]
+            catalog = json.loads(
+                (active / "action_catalog.json").read_text("utf-8")
+            )
+            catalog_action = next(
+                item
+                for item in catalog["actions"]
+                if item["action_id"] == summary["action_id"]
+            )
+            contract = json.loads(
+                (active / "analysis_contract.json").read_text("utf-8")
+            )
+            contract_action = next(
+                item
+                for item in contract["actions"]
+                if item["action_id"] == summary["action_id"]
+            )
+            result_path = run_dir / summary["result_path"]
+            sealed_result = json.loads(result_path.read_text("utf-8"))
+            self.assertEqual(envelope["action_id"], summary["action_id"])
+            self.assertEqual(
+                envelope["evidence_kind"],
+                catalog_action["evidence_kind"],
+            )
+            self.assertEqual(
+                envelope["adapter_implementation_sha256"],
+                contract_action["adapter_sha256"],
+            )
+            self.assertEqual(
+                envelope["result_sha256"],
+                summary["result_sha256"],
+            )
+            self.assertEqual(
+                envelope["observations"],
+                sealed_result["observations"],
+            )
+            self.assertNotIn("stdout", json.dumps(envelope))
+            mirror_path = active / "knowledge_context.json"
+            mirror_path.unlink()
+            state_before_repair = helper.controller.read_run_state(run_dir)
+            ledger_before_repair = (
+                helper.controller._verify_active_diagnosis_ledger(run_dir)
+            )
+            repaired_state = helper.controller.resume_run(run_dir)
+            self.assertEqual(repaired_state, state_before_repair)
+            self.assertEqual(
+                helper.controller._verify_active_diagnosis_ledger(run_dir),
+                ledger_before_repair,
+            )
+            self.assertEqual(
+                json.loads(mirror_path.read_text("utf-8")),
+                refreshed["knowledge_context"],
+            )
+
+            self.assertEqual(
+                summary["result_sha256"],
+                helper.controller._canonical_digest(
+                    helper.controller.load_json_object(result_path)
+                ),
+            )
+            tampered = json.loads(result_path.read_text("utf-8"))
+            tampered["observations"] = {"semantic_observations": []}
+            result_path.write_text(json.dumps(tampered), encoding="utf-8")
+            with self.assertRaisesRegex(
+                helper.controller.ValidationError, "digest|artifact|context"
+            ):
+                helper.controller.resume_run(run_dir)
 
 
 

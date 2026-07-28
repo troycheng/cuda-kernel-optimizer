@@ -16,6 +16,7 @@ _CONTEXT_FIELDS = {
     "architecture",
     "software_version",
     "execution_node_ids",
+    "execution_node_layers",
     "uncovered_interval_ids",
     "available_evidence_action_ids",
     "authorized_risk",
@@ -53,6 +54,10 @@ def _identifier(value: Any, label: str) -> str:
     return value
 
 
+def _canonical_mechanism_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
 def _text(value: Any, label: str) -> str:
     if type(value) is not str or not value.strip() or len(value) > 1024:
         raise ValidationError(f"{label} must be a non-empty bounded string")
@@ -87,12 +92,30 @@ def _context(value: Mapping[str, Any]) -> dict:
     scope = value["authorized_scope"]
     if risk not in _LEVELS or scope not in _SCOPES:
         raise ValidationError("context authorization is unsupported")
+    execution_node_ids = _ids(
+        value["execution_node_ids"], "context.execution_node_ids"
+    )
+    raw_node_layers = value["execution_node_layers"]
+    if type(raw_node_layers) is not dict or set(raw_node_layers) != set(
+        execution_node_ids
+    ):
+        raise ValidationError(
+            "context.execution_node_layers must exactly cover execution_node_ids"
+        )
+    execution_node_layers = {
+        node_id: _identifier(
+            raw_node_layers[node_id],
+            f"context.execution_node_layers.{node_id}",
+        )
+        for node_id in execution_node_ids
+    }
     return {
         "architecture": _identifier(value["architecture"], "context.architecture"),
         "software_version": _identifier(
             value["software_version"], "context.software_version"
         ),
-        "execution_node_ids": _ids(value["execution_node_ids"], "context.execution_node_ids"),
+        "execution_node_ids": execution_node_ids,
+        "execution_node_layers": execution_node_layers,
         "uncovered_interval_ids": _ids(
             value["uncovered_interval_ids"],
             "context.uncovered_interval_ids",
@@ -196,36 +219,48 @@ def _normalize(
         or control_scope != context["authorized_scope"]
     ):
         return None, "not_locally_falsifiable"
-    normalized_statement = (
-        statement if origin == "bundled" else f"Mechanism candidate: {mechanism_id}."
+    # All values accepted by this adapter are caller-supplied shadows.  The
+    # Controller's state-bound local knowledge context is consumed through a
+    # separate trusted seam, so a caller cannot obtain trusted wording merely
+    # by labelling an input "bundled".
+    normalized_statement = f"Mechanism candidate: {mechanism_id}."
+    local_scope = (
+        f"scope {', '.join(scope_ids)}"
+        if scope_ids
+        else f"uncovered interval {interval_id}"
     )
-    normalized_question = question
-    if origin != "bundled":
-        local_scope = (
-            f"scope {', '.join(scope_ids)}"
-            if scope_ids
-            else f"uncovered interval {interval_id}"
-        )
-        normalized_question = (
-            f"Does local evidence action {action_id} falsify mechanism "
-            f"{mechanism_id} at {local_scope}?"
-        )
+    normalized_question = (
+        f"Does local evidence action {action_id} falsify mechanism "
+        f"{mechanism_id} at {local_scope}?"
+    )
+    normalized_action = {
+        "action_id": action_id,
+        "evidence_kind": evidence_kind,
+        "outcomes": outcomes,
+        "risk": action_risk,
+        "control_scope": control_scope,
+    }
     return {
         "mechanism_id": mechanism_id,
+        "mechanism_key": _canonical_mechanism_key(mechanism_id),
         "statement": normalized_statement,
         "applicability": {
             "architectures": architectures,
             "software_versions": sorted(versions),
         },
         "scope_node_ids": scope_ids,
+        "execution_layers": sorted(
+            {
+                context["execution_node_layers"][node_id]
+                for node_id in scope_ids
+            }
+        ),
         "unmodeled_interval_id": interval_id,
         "falsification_question": normalized_question,
-        "evidence_action": {
+        "evidence_action": copy.deepcopy(normalized_action),
+        "cheapest_falsifier": {
             "action_id": action_id,
-            "evidence_kind": evidence_kind,
-            "outcomes": outcomes,
-            "risk": action_risk,
-            "control_scope": control_scope,
+            "rationale": normalized_question,
         },
         "risk": risk,
         "origin": origin,

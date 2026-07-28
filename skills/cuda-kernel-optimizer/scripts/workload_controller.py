@@ -2995,6 +2995,217 @@ def _bootstrap_execution_seconds(
     )
 
 
+def _unknown_knowledge_fact() -> dict:
+    return {
+        "value": None,
+        "status": "unknown",
+        "source_kind": "unknown",
+        "source_sha256": None,
+    }
+
+
+def _readiness_knowledge_identity(
+    run_root: Path,
+    report: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    identities: Mapping[str, str],
+) -> dict:
+    """Extract only marker-bound readiness observations; never re-run probes."""
+    scalar_names = {"sm_arch": "gpu_architecture", "driver_version": "driver_version",
+                    "cuda_runtime_version": "cuda_runtime_version"}
+    grouped_names = {"framework_versions", "compiler_versions", "profiler_versions"}
+    values: dict[str, list[tuple[Any, str]]] = {name: [] for name in scalar_names}
+    groups: dict[str, list[tuple[dict, str]]] = {name: [] for name in grouped_names}
+    for raw in report.get("results", []):
+        if (type(raw) is not dict or raw.get("admission_status") != "ready"
+                or raw.get("identity_digest") != report.get("environment_identity_digest")):
+            continue
+        requirement_id = _identifier(raw.get("requirement_id"), "readiness requirement_id")
+        relative = _relative(raw.get("evidence_path"), "readiness evidence_path")
+        probe_path = run_root / relative
+        if (probe_path.is_symlink() or not probe_path.is_file()
+                or not _is_within(probe_path.resolve(strict=False), run_root)):
+            raise ValidationError("readiness evidence path is not a contained regular file")
+        execution_path = probe_path.with_name(f"{requirement_id}.execution.json")
+        marker_path = probe_path.with_name(f"{requirement_id}.complete.json")
+        if any(path.is_symlink() or not path.is_file() for path in (execution_path, marker_path)):
+            raise ValidationError("readiness completion chain is incomplete")
+        probe = load_json_object(probe_path)
+        execution = load_json_object(execution_path)
+        marker = load_json_object(marker_path)
+        if (probe.get("requirement_id") != requirement_id
+                or execution.get("requirement_id") != requirement_id
+                or marker.get("requirement_id") != requirement_id
+                or marker.get("schema_version") != "cuda-workload-optimizer/readiness-completion-v1"
+                or marker.get("probe_sha256") != _sha256_path(probe_path)
+                or marker.get("execution_sha256") != _sha256_path(execution_path)
+                or execution.get("environment_identity_digest") != raw.get("identity_digest")):
+            raise ValidationError("readiness completion provenance does not match report")
+        observations = probe.get("observations", {})
+        if type(observations) is not dict:
+            continue
+        source_sha = marker["probe_sha256"]
+        for name in scalar_names:
+            if type(observations.get(name)) is str and observations[name]:
+                values[name].append((observations[name], source_sha))
+        for name in grouped_names:
+            group = observations.get(name)
+            if type(group) is dict and all(type(key) is str and type(value) is str and value for key, value in group.items()):
+                groups[name].append((group, source_sha))
+    def fact(items: list[tuple[Any, str]]) -> dict:
+        if not items or any(value != items[0][0] for value, _sha in items):
+            return _unknown_knowledge_fact()
+        return {"value": items[0][0], "status": "verified", "source_kind": "readiness_probe", "source_sha256": items[0][1]}
+    identity = {
+        "schema_version": "cuda-optimizer/knowledge-identity-v1",
+        **{target: fact(values[name]) for name, target in scalar_names.items()},
+        **{name: {} for name in grouped_names},
+        "workload_contract_sha256": identities["workload_contract_sha256"],
+        "source_sha256": identities["source_sha256"],
+        "environment_sha256": identities["environment_sha256"],
+    }
+    for name, entries in groups.items():
+        merged: dict[str, list[tuple[str, str]]] = {}
+        for group, source_sha in entries:
+            for key, value in group.items():
+                merged.setdefault(key, []).append((value, source_sha))
+        identity[name] = {key: fact(items) for key, items in merged.items()}
+    profiler = contract["source"]
+    contract_sha = _canonical_digest(contract)
+    existing_profiler = identity["profiler_versions"].get(profiler["profiler"])
+    if existing_profiler is None:
+        identity["profiler_versions"][profiler["profiler"]] = {
+            "value": profiler["profiler_version"], "status": "verified",
+            "source_kind": "analysis_contract", "source_sha256": contract_sha,
+        }
+    elif existing_profiler["value"] != profiler["profiler_version"]:
+        identity["profiler_versions"][profiler["profiler"]] = _unknown_knowledge_fact()
+    return identity
+
+
+def _rebuild_knowledge_context(
+    run_root: Path, context: Mapping[str, Any], contract: Mapping[str, Any],
+    epoch: Mapping[str, Any], execution_map: Mapping[str, Any],
+    evidence_catalog: Mapping[str, Any], selection_policy: Mapping[str, Any],
+    performance_model: Mapping[str, Any],
+    pending_summary: Mapping[str, Any] | None = None,
+) -> dict:
+    catalog = load_json_object(run_root / "active_diagnosis" / "action_catalog.json")
+    ready = sorted(selection_policy.get("available_capability_ids", []))
+    contract_ids = sorted(action["action_id"] for action in contract["actions"])
+    available = sorted(action["action_id"] for action in catalog["actions"]
+                       if action.get("control_scope") == "read_only"
+                       and set(action.get("required_capability_ids", [])).issubset(ready))
+    envelopes = []
+    by_action = {item["action_id"]: item for item in catalog["actions"]}
+    contract_actions = {item["action_id"]: item for item in contract["actions"]}
+    ledger = _verify_active_diagnosis_ledger(run_root)
+    summaries = context.get("evidence_results", [])
+    for index, summary in enumerate(summaries):
+        signature = _sha256(
+            summary["request_signature"],
+            "knowledge evidence request_signature",
+        )
+        result_path = run_root / _relative(
+            summary["result_path"], "knowledge result path"
+        )
+        expected_result_path = (
+            run_root
+            / "active_diagnosis"
+            / "evidence"
+            / signature
+            / "result.json"
+        )
+        if (result_path.is_symlink() or not result_path.is_file()
+                or result_path != expected_result_path
+                or not _is_within(result_path.resolve(strict=False), run_root)):
+            raise ValidationError("sealed evidence result path is unsafe")
+        result = load_json_object(result_path)
+        if _canonical_digest(result) != summary["result_sha256"]:
+            raise ValidationError("sealed evidence result digest does not match summary")
+        action_id = summary["action_id"]
+        action = by_action.get(action_id)
+        contract_action = contract_actions.get(action_id)
+        if not isinstance(action, Mapping) or not isinstance(contract_action, Mapping):
+            raise ValidationError("sealed evidence action is not catalog and contract bound")
+        attempt_root = result_path.parent
+        request_path = attempt_root / "request.json"
+        execution_path = attempt_root / "execution.json"
+        intent_path = attempt_root / "intent.json"
+        complete_path = attempt_root / "complete.json"
+        if any(path.is_symlink() or not path.is_file()
+               for path in (request_path, execution_path, intent_path)):
+            raise ValidationError("sealed evidence provenance path is unsafe")
+        request = load_json_object(request_path)
+        execution = load_json_object(execution_path)
+        intent = load_json_object(intent_path)
+        expected_signature = _load_evidence_selector_module()._request_signature(
+            epoch["epoch_id"], action, request
+        )
+        bindings = {
+            "request_signature": request.get("request_signature") == summary["request_signature"],
+            "request_action": request.get("action_id") == action_id,
+            "selector_signature": expected_signature == summary["request_signature"],
+            "catalog_action": request.get("controller_action") == action,
+            "intent_action": intent.get("action_sha256") == _canonical_digest(contract_action),
+            "execution_action": execution.get("action_id") == action_id,
+            "execution_adapter": execution.get("adapter_sha256") == contract_action["adapter_sha256"],
+            "result_signature": result.get("request_signature") == summary["request_signature"],
+            "result_status": result.get("status") == summary["status"],
+            "result_outcome": result.get("outcome_id") == summary["outcome_id"],
+        }
+        if not all(bindings.values()):
+            raise ValidationError(
+                "sealed evidence request, action, or adapter binding drifted: "
+                + ",".join(name for name, valid in bindings.items() if not valid)
+            )
+        pending = (pending_summary is not None and index == len(summaries) - 1
+                   and summary == pending_summary)
+        if complete_path.is_file() and not complete_path.is_symlink():
+            complete = load_json_object(complete_path)
+            expected = {
+                "result_sha256": summary["result_sha256"],
+                "execution_sha256": _canonical_digest(execution),
+            }
+            completion_context_sha = complete.get("context_sha256")
+            if (complete.get("schema_version") != "cuda-optimizer/evidence-completion-v1"
+                    or complete.get("request_signature") != summary["request_signature"]
+                    or not isinstance(completion_context_sha, str)
+                    or len(completion_context_sha) != 64
+                    or any(character not in "0123456789abcdef"
+                           for character in completion_context_sha)
+                    or any(complete.get(field) != digest for field, digest in expected.items())):
+                raise ValidationError("evidence completion digest binding drifted")
+            payload = {"request_signature": summary["request_signature"], **expected,
+                       "context_sha256": completion_context_sha}
+            if not any(event["event_type"] == "evidence"
+                       and event["payload_sha256"] == _canonical_digest(payload)
+                       for event in ledger):
+                raise ValidationError("evidence completion has no matching ledger payload")
+        elif not pending:
+            raise ValidationError("historical evidence has no sealed completion marker")
+        envelopes.append({"action_id": action_id, "evidence_kind": action["evidence_kind"],
+                          "adapter_implementation_sha256": contract_action["adapter_sha256"],
+                          "result_sha256": summary["result_sha256"], "status": summary["status"],
+                          "observations": copy.deepcopy(result["observations"])})
+    frozen = {
+        "knowledge_identity": copy.deepcopy(context["knowledge_identity"]),
+        "diagnosis": load_json_object(run_root / "diagnosis.json"),
+        "analysis_epoch": copy.deepcopy(dict(epoch)), "evidence_catalog": copy.deepcopy(dict(evidence_catalog)),
+        "execution_map": copy.deepcopy(dict(execution_map)), "performance_model": copy.deepcopy(dict(performance_model)),
+        "diagnostic_evidence": [], "active_evidence_results": envelopes,
+        "requested_claim": context["requested_claim"],
+        "ready_capability_ids": ready, "contract_action_ids": contract_ids,
+        "available_actions": available,
+        "closed_mechanism_keys": copy.deepcopy(context.get("closed_mechanism_keys", [])),
+        "candidate_history": copy.deepcopy(context.get("candidate_history", [])),
+    }
+    try:
+        return _load_diagnostic_knowledge_module().build_knowledge_context(frozen, limit=3)
+    except ValueError as error:
+        raise ValidationError(f"invalid frozen knowledge context: {error}") from error
+
+
 def _build_active_diagnosis_context(
     control: Mapping[str, Any], run_root: Path, state: Mapping[str, Any]
 ) -> dict:
@@ -3138,10 +3349,9 @@ def _build_active_diagnosis_context(
         initial_brief,
     )
     diagnosis = load_json_object(run_root / "diagnosis.json")
-    knowledge_context = _load_diagnostic_knowledge_module().route_cards(
-        diagnosis, execution_map, limit=3
+    knowledge_identity = _readiness_knowledge_identity(
+        run_root, readiness_report, contract, identities
     )
-    _atomic_json(active_root / "knowledge_context.json", knowledge_context)
     project_surface_identity = _project_surface_identity(Path(control["project_root"]))
     _atomic_json(
         active_root / "project_surface_identity.json", project_surface_identity
@@ -3163,7 +3373,9 @@ def _build_active_diagnosis_context(
         "project_surface_identity_sha256": _canonical_digest(
             project_surface_identity
         ),
-        "knowledge_context": knowledge_context,
+        "knowledge_identity": knowledge_identity,
+        "requested_claim": readiness_report["requested_claim"],
+        "knowledge_context": {},
         "requires_unmodeled_hypothesis": map_result[
             "requires_unmodeled_hypothesis"
         ],
@@ -3172,13 +3384,22 @@ def _build_active_diagnosis_context(
         "closed_mechanism_keys": [],
         "closed_scope_records": [],
     }
+    context["knowledge_context"] = _rebuild_knowledge_context(
+        run_root, context, contract, epoch, execution_map, evidence_catalog,
+        selection_policy, performance_model,
+    )
     _atomic_json(run_root / "diagnosis_context.json", context)
+    _atomic_json(active_root / "knowledge_context.json", context["knowledge_context"])
     _append_active_diagnosis_event(run_root, "context", context)
     return context
 
 
 def _load_active_diagnosis_context(
-    control: Mapping[str, Any], run_root: Path, state: Mapping[str, Any]
+    control: Mapping[str, Any],
+    run_root: Path,
+    state: Mapping[str, Any],
+    *,
+    verify_current_project_surface: bool = True,
 ) -> tuple[dict, dict, dict, dict, dict, dict]:
     if _identity(control, "project")["digest"] != state.get(
         "baseline_identity_digest"
@@ -3216,7 +3437,11 @@ def _load_active_diagnosis_context(
         "project_surface_identity_sha256"
     ):
         raise ValidationError("diagnosis context project surface identity drifted")
-    if _project_surface_identity(Path(control["project_root"])) != project_surface_identity:
+    if (
+        verify_current_project_surface
+        and _project_surface_identity(Path(control["project_root"]))
+        != project_surface_identity
+    ):
         raise ValidationError("complete project surface drifted after diagnosis context")
     if type(request_history) is not list or type(completed_action_ids) is not list:
         raise ValidationError("active diagnosis histories are invalid")
@@ -3451,6 +3676,31 @@ def _load_active_diagnosis_context(
     for field, digest in expected.items():
         if context.get(field) != digest:
             raise ValidationError(f"diagnosis context {field} drifted")
+    expected_knowledge_context = _rebuild_knowledge_context(
+        run_root,
+        context,
+        contract,
+        epoch,
+        execution_map,
+        evidence_catalog,
+        selection_policy,
+        performance_model,
+    )
+    if context.get("knowledge_context") != expected_knowledge_context:
+        raise ValidationError("formal diagnosis knowledge context drifted")
+    mirror_path = active_root / "knowledge_context.json"
+    if mirror_path.is_symlink() or (
+        mirror_path.exists() and not mirror_path.is_file()
+    ):
+        raise ValidationError("knowledge context mirror is unsafe")
+    mirror = None
+    if mirror_path.is_file():
+        try:
+            mirror = load_json_object(mirror_path)
+        except ValidationError:
+            mirror = None
+    if mirror != context["knowledge_context"]:
+        _atomic_json(mirror_path, context["knowledge_context"])
     return (
         context,
         epoch,
@@ -3937,42 +4187,144 @@ def _adapt_controller_knowledge(
     contract: Mapping[str, Any],
     execution_map: Mapping[str, Any],
     action_catalog: Mapping[str, Any],
+    selection_policy: Mapping[str, Any],
+    knowledge_identity: Mapping[str, Any],
+    local_knowledge_context: Mapping[str, Any],
     hypothesis_set: Mapping[str, Any],
     request_set: Mapping[str, Any],
 ) -> tuple[dict, dict, dict]:
-    """Normalize raw knowledge and create at most one evidence-only shadow."""
+    """Merge state-bound local candidates with neutralized external shadows."""
     if knowledge_inputs is None:
         raw_inputs = {}
     else:
         raw_inputs = _object(knowledge_inputs, "knowledge_inputs")
         _closed(raw_inputs, {"bundled", "searched", "external"}, "knowledge_inputs")
+    contract_action_ids = {item["action_id"] for item in contract["actions"]}
+    ready_capabilities = set(selection_policy.get("available_capability_ids", []))
     by_action = {
         item["action_id"]: item
         for item in action_catalog.get("actions", [])
         if item.get("control_scope") == "read_only"
+        and item.get("action_id") in contract_action_ids
+        and set(item.get("required_capability_ids", [])).issubset(ready_capabilities)
     }
-    adapter_context = {
-        "architecture": contract["source"]["adapter_id"],
-        "software_version": contract["source"]["adapter_version"],
-        "execution_node_ids": sorted(
-            item["node_id"] for item in execution_map.get("nodes", [])
-        ),
-        "uncovered_interval_ids": [],
-        "available_evidence_action_ids": sorted(by_action),
-        "authorized_risk": contract["selection_policy"]["max_risk"],
-        "authorized_scope": "read_only",
+    nodes = {
+        item["node_id"]: item for item in execution_map.get("nodes", [])
     }
-    if not adapter_context["available_evidence_action_ids"]:
-        adaptation = {
+    hypothesis_module = _load_hypothesis_space_module()
+    formal_context = _object(
+        local_knowledge_context, "local_knowledge_context"
+    )
+    if formal_context.get("schema_version") != "cuda-optimizer/knowledge-context-v1":
+        raise ValidationError("local knowledge context schema is unsupported")
+    raw_local_candidates = formal_context.get("candidates")
+    if type(raw_local_candidates) is not list:
+        raise ValidationError("local knowledge context candidates are invalid")
+    local_candidates = []
+    for index, raw_candidate in enumerate(raw_local_candidates):
+        candidate = _object(
+            raw_candidate, f"local_knowledge_context.candidates[{index}]"
+        )
+        mechanism_key = candidate.get("mechanism_key")
+        if (
+            type(mechanism_key) is not str
+            or not mechanism_key
+            or hypothesis_module.canonical_mechanism_key(mechanism_key)
+            != mechanism_key
+            or candidate.get("confidence") != "inconclusive"
+            or candidate.get("promotion_authority") != "none"
+        ):
+            raise ValidationError("formal local knowledge candidate is not canonical")
+        scope_node_ids = candidate.get("scope_node_ids")
+        execution_layers = candidate.get("execution_layers")
+        if (
+            type(scope_node_ids) is not list
+            or not scope_node_ids
+            or scope_node_ids != sorted(set(scope_node_ids))
+            or not set(scope_node_ids).issubset(nodes)
+            or type(execution_layers) is not list
+            or not execution_layers
+            or not {
+                nodes[node_id]["layer"] for node_id in scope_node_ids
+            }.issubset(set(execution_layers))
+        ):
+            raise ValidationError("formal local knowledge scope is invalid")
+        falsifier = candidate.get("cheapest_falsifier")
+        if not isinstance(falsifier, Mapping):
+            raise ValidationError("formal local knowledge falsifier is invalid")
+        action = by_action.get(falsifier.get("action_id"))
+        if not isinstance(action, Mapping):
+            raise ValidationError(
+                "formal local knowledge action is outside current authorization"
+            )
+        statement = candidate.get("statement")
+        rationale = falsifier.get("rationale")
+        if (
+            type(statement) is not str
+            or not statement
+            or type(rationale) is not str
+            or not rationale
+        ):
+            raise ValidationError("formal local knowledge wording is invalid")
+        local_candidates.append(
+            {
+                "mechanism_id": mechanism_key,
+                "mechanism_key": mechanism_key,
+                "statement": statement,
+                "scope_node_ids": copy.deepcopy(scope_node_ids),
+                "execution_layers": copy.deepcopy(execution_layers),
+                "unmodeled_interval_id": None,
+                "falsification_question": rationale,
+                "evidence_action": {
+                    "action_id": action["action_id"],
+                    "evidence_kind": action["evidence_kind"],
+                    "outcomes": ["falsified", "inconclusive"],
+                    "risk": action["risk"],
+                    "control_scope": action["control_scope"],
+                },
+                "cheapest_falsifier": {
+                    "action_id": action["action_id"],
+                    "rationale": rationale,
+                },
+                "risk": action["risk"],
+                "origin": "local",
+                "claim_layer": "workload",
+                "confidence": "inconclusive",
+                "promotion_authority": "none",
+            }
+        )
+    architecture = knowledge_identity.get("gpu_architecture", {})
+    runtime = knowledge_identity.get("cuda_runtime_version", {})
+    if architecture.get("status") != "verified" or runtime.get("status") != "verified":
+        raw_adaptation = {
+            "knowledge_support": "unavailable",
+            "candidates": [],
+            "rejections": [
+                {
+                    "origin": "controller",
+                    "reason": "knowledge_identity_unverified",
+                }
+            ],
+        }
+    else:
+        adapter_context = {
+            "architecture": architecture["value"], "software_version": runtime["value"],
+            "execution_node_ids": sorted(item["node_id"] for item in execution_map.get("nodes", [])),
+            "execution_node_layers": {item["node_id"]: item["layer"] for item in execution_map.get("nodes", [])},
+            "uncovered_interval_ids": [], "available_evidence_action_ids": sorted(by_action),
+            "authorized_risk": contract["selection_policy"]["max_risk"], "authorized_scope": "read_only",
+        }
+    if architecture.get("status") == "verified" and runtime.get("status") == "verified" and not adapter_context["available_evidence_action_ids"]:
+        raw_adaptation = {
             "knowledge_support": "unavailable",
             "candidates": [],
             "rejections": [
                 {"origin": "controller", "reason": "no_local_read_only_action"}
             ],
         }
-    else:
+    elif architecture.get("status") == "verified" and runtime.get("status") == "verified":
         try:
-            adaptation = _load_knowledge_adapter_module().recommend(
+            raw_adaptation = _load_knowledge_adapter_module().recommend(
                 adapter_context,
                 bundled=raw_inputs.get("bundled", ()),
                 searched=raw_inputs.get("searched", ()),
@@ -3980,7 +4332,7 @@ def _adapt_controller_knowledge(
                 limit=3,
             )
         except ValueError as error:
-            adaptation = {
+            raw_adaptation = {
                 "knowledge_support": "unavailable",
                 "candidates": [],
                 "rejections": [
@@ -3990,9 +4342,9 @@ def _adapt_controller_knowledge(
                     }
                 ],
             }
-    valid_candidates = []
-    rejections = copy.deepcopy(adaptation.get("rejections", []))
-    for candidate in adaptation.get("candidates", []):
+    external_candidates = []
+    rejections = copy.deepcopy(raw_adaptation.get("rejections", []))
+    for candidate in raw_adaptation.get("candidates", []):
         action = candidate.get("evidence_action")
         local = by_action.get(action.get("action_id")) if isinstance(action, Mapping) else None
         if (
@@ -4009,7 +4361,25 @@ def _adapt_controller_knowledge(
                 }
             )
             continue
-        valid_candidates.append(copy.deepcopy(candidate))
+        normalized = copy.deepcopy(candidate)
+        normalized["claim_layer"] = "workload"
+        external_candidates.append(normalized)
+    valid_candidates = []
+    seen_mechanisms = set()
+    for candidate in (*local_candidates, *external_candidates):
+        mechanism_key = candidate["mechanism_key"]
+        if mechanism_key in seen_mechanisms:
+            rejections.append(
+                {
+                    "origin": candidate.get("origin", "unknown"),
+                    "reason": "canonical_duplicate",
+                }
+            )
+            continue
+        if len(valid_candidates) == 3:
+            break
+        seen_mechanisms.add(mechanism_key)
+        valid_candidates.append(candidate)
     adaptation = {
         "knowledge_support": "available" if valid_candidates else "unavailable",
         "candidates": valid_candidates,
@@ -4023,18 +4393,17 @@ def _adapt_controller_knowledge(
         item.get("disposition") == "active"
         for item in augmented_hypotheses.get("hypotheses", [])
     )
-    candidate = valid_candidates[0] if valid_candidates and active_count < 3 else None
-    if candidate is not None:
+    existing_keys = {
+        hypothesis_module.canonical_mechanism_key(item["mechanism"])
+        for item in augmented_hypotheses.get("hypotheses", [])
+        if item.get("disposition") == "active"
+    }
+    slots = max(0, 3 - active_count)
+    for candidate in valid_candidates:
+        mechanism_key = candidate["mechanism_key"]
+        if slots <= 0 or mechanism_key in existing_keys:
+            continue
         shadow_id = f"knowledge-{_canonical_digest(candidate)[:16]}"
-        nodes = {
-            item["node_id"]: item for item in execution_map.get("nodes", [])
-        }
-        layers = {
-            nodes[node_id]["layer"]
-            for node_id in candidate["scope_node_ids"]
-            if node_id in nodes
-        }
-        claim_layer = "kernel" if layers == {"gpu"} else "runtime"
         action = candidate["evidence_action"]
         augmented_hypotheses["hypotheses"].append(
             {
@@ -4043,7 +4412,7 @@ def _adapt_controller_knowledge(
                 "scope_node_ids": copy.deepcopy(candidate["scope_node_ids"]),
                 "statement": candidate["statement"],
                 "mechanism": candidate["mechanism_id"],
-                "claim_layer": claim_layer,
+                "claim_layer": "workload",
                 "disposition": "active",
                 "confidence": "inconclusive",
                 "support_evidence_ids": [],
@@ -4073,6 +4442,8 @@ def _adapt_controller_knowledge(
                 ],
             }
         )
+        existing_keys.add(mechanism_key)
+        slots -= 1
     return augmented_hypotheses, augmented_requests, adaptation
 
 
@@ -5818,6 +6189,10 @@ def _materialize_diagnosis_publish(
     fixed_artifacts = (
         (run_root / "diagnosis_context.json", intent["diagnosis_context"]),
         (
+            active_root / "knowledge_context.json",
+            intent["diagnosis_context"]["knowledge_context"],
+        ),
+        (
             active_root / "knowledge_adaptation.json",
             intent["knowledge_adaptation"],
         ),
@@ -6234,6 +6609,9 @@ def _register_active_diagnosis_proposal_unlocked(
         contract=contract,
         execution_map=execution_map,
         action_catalog=action_catalog,
+        selection_policy=selection_policy,
+        knowledge_identity=context["knowledge_identity"],
+        local_knowledge_context=context["knowledge_context"],
         hypothesis_set=hypothesis_set,
         request_set=request_set,
     )
@@ -6336,6 +6714,16 @@ def _register_active_diagnosis_proposal_unlocked(
     context = copy.deepcopy(context)
     context["closed_mechanism_keys"] = evolution["closed_mechanism_keys"]
     context["closed_scope_records"] = evolution["closed_scope_records"]
+    context["knowledge_context"] = _rebuild_knowledge_context(
+        run_root,
+        context,
+        contract,
+        epoch,
+        execution_map,
+        evidence_catalog,
+        selection_policy,
+        performance_model,
+    )
     context["knowledge_adaptation"] = copy.deepcopy(knowledge_adaptation)
     investment_brief = copy.deepcopy(decision["investment_brief"])
     return _publish_diagnosis_bundle(
@@ -6730,6 +7118,7 @@ def _refresh_active_diagnosis_context(
     selection_policy: Mapping[str, Any],
     result_summary: Mapping[str, Any],
     minimum_effect_us: float,
+    contract: Mapping[str, Any],
 ) -> dict:
     refreshed = copy.deepcopy(dict(context))
     refreshed["epoch_id"] = epoch["epoch_id"]
@@ -6779,7 +7168,15 @@ def _refresh_active_diagnosis_context(
         performance_model,
     )
     refreshed["performance_model_sha256"] = _canonical_digest(performance_model)
+    refreshed["knowledge_context"] = _rebuild_knowledge_context(
+        run_root, refreshed, contract, epoch, execution_map, evidence_catalog,
+        selection_policy, performance_model, pending_summary=result_summary,
+    )
     _atomic_json(run_root / "diagnosis_context.json", refreshed)
+    _atomic_json(
+        run_root / "active_diagnosis" / "knowledge_context.json",
+        refreshed["knowledge_context"],
+    )
     return refreshed
 
 
@@ -7108,6 +7505,7 @@ def _collect_active_diagnosis_evidence_unlocked(
             "duration_seconds": execution["duration_seconds"],
         },
         contract["minimum_effect_us"],
+        contract,
     )
     event_payload = {
         "request_signature": signature,
@@ -7756,6 +8154,17 @@ def _validate_candidate_failure_pending(
     base_history = list(base_context["candidate_history"])
     record = base_history.pop()
     base_context["candidate_history"] = base_history
+    active_root = run_root / "active_diagnosis"
+    base_context["knowledge_context"] = _rebuild_knowledge_context(
+        run_root,
+        base_context,
+        _load_frozen_analysis_contract(run_root, base_state),
+        load_json_object(active_root / "epoch.json"),
+        load_json_object(active_root / "execution_map.json"),
+        load_json_object(active_root / "evidence_catalog.json"),
+        load_json_object(active_root / "selection_policy.json"),
+        load_json_object(active_root / "performance_model.json"),
+    )
     if _canonical_digest(base_context) != base_state.get(
         "diagnosis_context_sha256"
     ):
@@ -7892,6 +8301,22 @@ def _apply_candidate_failure_pending(
             != plan["context"]
         ):
             raise ValidationError("candidate failure committed artifact drifted")
+    mirror_path = run_root / "active_diagnosis" / "knowledge_context.json"
+    if mirror_path.is_symlink() or (
+        mirror_path.exists() and not mirror_path.is_file()
+    ):
+        raise ValidationError("candidate failure knowledge mirror is unsafe")
+    mirror = None
+    if mirror_path.is_file():
+        try:
+            mirror = load_json_object(mirror_path)
+        except ValidationError:
+            mirror = None
+    if mirror != plan["context"]["knowledge_context"]:
+        _atomic_json(
+            mirror_path,
+            plan["context"]["knowledge_context"],
+        )
     for relative in _candidate_failure_removals(control, plan["scope"]):
         path = run_root / relative
         if path.exists() or path.is_symlink():
@@ -7981,6 +8406,23 @@ def _resume_active_diagnosis_after_candidate_rejection(
     transition_at = time.time()
     refreshed = copy.deepcopy(context)
     refreshed.setdefault("candidate_history", []).append(record)
+    active_root = run_root / "active_diagnosis"
+    contract = _load_frozen_analysis_contract(run_root, state)
+    epoch = load_json_object(active_root / "epoch.json")
+    execution_map = load_json_object(active_root / "execution_map.json")
+    evidence_catalog = load_json_object(active_root / "evidence_catalog.json")
+    selection_policy = load_json_object(active_root / "selection_policy.json")
+    performance_model = load_json_object(active_root / "performance_model.json")
+    refreshed["knowledge_context"] = _rebuild_knowledge_context(
+        run_root,
+        refreshed,
+        contract,
+        epoch,
+        execution_map,
+        evidence_catalog,
+        selection_policy,
+        performance_model,
+    )
     context_digest = _canonical_digest(refreshed)
     ledger_path, ledger_event = _prepare_active_diagnosis_event(
         run_root,
@@ -10167,6 +10609,31 @@ def _resume_run_unlocked(run_root: Path) -> dict:
         _recover_reviewer_checkpoint(run_root, state, "final")
     )
     if final_recovery == "manual":
+        return state
+    mirror_only_actions = {
+        "propose_hypotheses",
+        "evidence_gap",
+        "refresh_required",
+        "register_change",
+        "done",
+        "manual_recovery",
+    }
+    if (
+        state.get("stage") == "active_diagnosis"
+        and (run_root / "diagnosis_context.json").is_file()
+        and state.get("next_action") in mirror_only_actions
+        and state.get("diagnosis_context_sha256") is not None
+        and state.get("active_diagnosis_ledger_sequence") is not None
+    ):
+        # These branches return without executing a Controller action.  This
+        # permits state-bound knowledge validation and mirror repair while
+        # preserving the normal full-surface gate on every execution path.
+        _load_active_diagnosis_context(
+            control,
+            run_root,
+            state,
+            verify_current_project_surface=False,
+        )
         return state
     if state["next_action"] == "collect_evidence":
         return _collect_active_diagnosis_evidence_unlocked(control, run_root)

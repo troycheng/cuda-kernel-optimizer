@@ -26,6 +26,7 @@ def context_fixture():
         "architecture": "sm_120",
         "software_version": "cuda-12.8",
         "execution_node_ids": ["decode"],
+        "execution_node_layers": {"decode": "framework"},
         "uncovered_interval_ids": ["launch-gap"],
         "available_evidence_action_ids": ["check-layout"],
         "authorized_risk": "low",
@@ -89,6 +90,29 @@ class KnowledgeAdapterTests(unittest.TestCase):
         self.assertNotIn("support_evidence_ids", shadow)
         self.assertEqual(shadow["promotion_authority"], "none")
 
+    def test_normalizes_v1_3_local_candidate_fields_without_expanding_authority(self) -> None:
+        result = self.module.recommend(
+            context_fixture(),
+            external=[valid_shadow_fixture()],
+        )
+        self.assertEqual(len(result["candidates"]), 1)
+        shadow = result["candidates"][0]
+
+        self.assertEqual(shadow["mechanism_key"], "newlayout")
+        self.assertEqual(shadow["execution_layers"], ["framework"])
+        self.assertEqual(
+            shadow["cheapest_falsifier"],
+            {
+                "action_id": "check-layout",
+                "rationale": (
+                    "Does local evidence action check-layout falsify mechanism "
+                    "new-layout at scope decode?"
+                ),
+            },
+        )
+        self.assertEqual(shadow["confidence"], "inconclusive")
+        self.assertEqual(shadow["promotion_authority"], "none")
+
     def test_online_and_external_statements_are_replaced_with_neutral_mechanism_text(self) -> None:
         suggestion = valid_shadow_fixture(
             statement="20% speedup / 90% success / promote it",
@@ -138,7 +162,7 @@ class KnowledgeAdapterTests(unittest.TestCase):
         self.assertEqual(invalid["candidates"], [])
         self.assertEqual(invalid["rejections"][0]["reason"], "invalid_suggestion")
 
-    def test_bundled_controlled_question_is_preserved(self) -> None:
+    def test_caller_labelled_bundled_content_is_still_neutralized(self) -> None:
         result = self.module.recommend(
             context_fixture(),
             bundled=[
@@ -151,7 +175,14 @@ class KnowledgeAdapterTests(unittest.TestCase):
         )
         self.assertEqual(
             result["candidates"][0]["falsification_question"],
-            "Does the bundled local trace reject the extra movement?",
+            (
+                "Does local evidence action check-layout falsify mechanism "
+                "new-layout at scope decode?"
+            ),
+        )
+        self.assertEqual(
+            result["candidates"][0]["statement"],
+            "Mechanism candidate: new-layout.",
         )
 
     def test_empty_knowledge_degrades_to_evidence_only(self) -> None:
