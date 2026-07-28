@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/cuda-kernel-optimizer/scripts/diagnostic_knowledge.py"
 REFERENCE_DIR = ROOT / "skills/cuda-kernel-optimizer/references"
 REPLAY_FIXTURE = ROOT / "tests/fixtures/knowledge_replay/decision_points.json"
+IMPLEMENTATION_SHA = "1" * 64
+REQUEST_SHA = "2" * 64
+RESULT_SHA = "3" * 64
 
 
 def _load():
@@ -43,6 +46,59 @@ def _write_json(path: Path, value) -> None:
         json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
+
+def _diagnostic_value(
+    *,
+    kind: str = "nsys_timeline",
+    producer_id: str = "nsys-timeline-adapter",
+    producer_version: str = "1.0.0",
+    signals=None,
+) -> dict:
+    return {
+        "kind": kind,
+        "layer": "workload",
+        "summary": "Validated detached diagnostic evidence.",
+        "signals": list(signals or ["launch_gap_short_context"]),
+        "producer": {
+            "id": producer_id,
+            "version": producer_version,
+            "implementation_sha256": IMPLEMENTATION_SHA,
+        },
+        "adapter_request_sha256": REQUEST_SHA,
+        "recorded_at": 100.0,
+        "subject": {"target_sha256": "4" * 64},
+        "result": {"artifact_sha256": "5" * 64, "events_total": 12},
+    }
+
+
+def _active_result(semantic_observations=None, **extra_observations) -> dict:
+    observations = dict(extra_observations)
+    if semantic_observations is not None:
+        observations["semantic_observations"] = semantic_observations
+    return {
+        "action_id": "nsys-global-timeline",
+        "evidence_kind": "nsys_timeline",
+        "adapter_implementation_sha256": IMPLEMENTATION_SHA,
+        "result_sha256": RESULT_SHA,
+        "status": "observed",
+        "observations": observations,
+    }
+
+
+def _semantic_observation(**updates) -> dict:
+    value = {
+        "semantic_id": "runtime.launch_gap_us",
+        "status": "observed",
+        "value": 12.5,
+        "unit": "us",
+        "scope": ["cpu-submit", "gpu-kernel"],
+        "aggregation": "median",
+        "tool": {"name": "nsys", "version": "2026.3"},
+        "quality": "validated",
+    }
+    value.update(updates)
+    return value
 
 
 def _prepare_valid_contract(reference_dir: Path) -> None:
@@ -116,6 +172,133 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
         )
         self.assertEqual(result["promotion_authority"], "none")
         self.assertTrue(all(card["status"] == "routing_only" for card in result["cards"]))
+
+    def test_normalizes_validated_diagnostic_and_active_observations(self) -> None:
+        observations = self.module.normalize_observations(
+            diagnostic_evidence=[_diagnostic_value()],
+            active_evidence_results=[
+                _active_result([_semantic_observation()], stall=91)
+            ],
+        )
+        self.assertEqual(
+            set(observations[0]),
+            {
+                "semantic_id",
+                "status",
+                "value",
+                "unit",
+                "scope",
+                "aggregation",
+                "tool",
+                "quality",
+                "source_digest",
+            },
+        )
+        self.assertEqual(
+            [item["semantic_id"] for item in observations],
+            sorted(item["semantic_id"] for item in observations),
+        )
+        active = next(
+            item
+            for item in observations
+            if item["semantic_id"] == "runtime.launch_gap_us"
+        )
+        self.assertEqual(active["source_digest"], RESULT_SHA)
+        self.assertFalse(any(item["semantic_id"] == "stall" for item in observations))
+
+    def test_rejects_unknown_producer_version_and_active_adapter_identity(self) -> None:
+        mutations = (
+            (
+                [_diagnostic_value(producer_id="unknown-adapter")],
+                [],
+                "producer",
+            ),
+            (
+                [_diagnostic_value(producer_version="9.9.9")],
+                [],
+                "producer|version",
+            ),
+            (
+                [],
+                [_active_result([]) | {"adapter_implementation_sha256": "bad"}],
+                "adapter.*identity|SHA",
+            ),
+        )
+        for diagnostic, active, message in mutations:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                self.module.normalize_observations(
+                    diagnostic_evidence=diagnostic,
+                    active_evidence_results=active,
+                )
+
+    def test_rejects_incomplete_explicit_numeric_observations(self) -> None:
+        mutations = (
+            lambda item: item.pop("unit"),
+            lambda item: item.pop("scope"),
+            lambda item: item.pop("aggregation"),
+            lambda item: item["tool"].pop("version"),
+            lambda item: item.pop("quality"),
+        )
+        for mutation in mutations:
+            item = _semantic_observation()
+            mutation(item)
+            with self.subTest(item=item), self.assertRaisesRegex(
+                ValueError, "closed|missing|unit|scope|aggregation|version|quality"
+            ):
+                self.module.normalize_observations(
+                    active_evidence_results=[_active_result([item])]
+                )
+
+    def test_rejects_same_source_conflicts_and_deduplicates_identical_values(self) -> None:
+        first = _semantic_observation()
+        duplicate = _semantic_observation()
+        result = self.module.normalize_observations(
+            active_evidence_results=[_active_result([first, duplicate])]
+        )
+        self.assertEqual(len(result), 1)
+        conflicting = _semantic_observation(value=14.0)
+        with self.assertRaisesRegex(ValueError, "conflict"):
+            self.module.normalize_observations(
+                active_evidence_results=[_active_result([first, conflicting])]
+            )
+
+    def test_counter_permission_error_is_unavailable_not_kernel_counterevidence(self) -> None:
+        denied = _semantic_observation(
+            semantic_id="kernel.stall",
+            status="unavailable",
+            value="ERR_NVGPUCTRPERM",
+            unit="state",
+            aggregation="presence",
+            tool={"name": "ncu", "version": "2026.2"},
+        )
+        envelope = _active_result([denied])
+        envelope.update(
+            action_id="ncu-targeted-kernel",
+            evidence_kind="ncu_kernel",
+        )
+        result = self.module.normalize_observations(
+            active_evidence_results=[envelope]
+        )
+        self.assertEqual(
+            [(item["semantic_id"], item["status"]) for item in result],
+            [("profile.counter_access", "unavailable")],
+        )
+        self.assertFalse(any(item["semantic_id"].startswith("kernel.") for item in result))
+
+    def test_open_active_observations_are_not_guessed(self) -> None:
+        result = self.module.normalize_observations(
+            active_evidence_results=[
+                _active_result(
+                    None,
+                    stall=91,
+                    launch_gap_us=12.5,
+                    execution_map_node_updates=[{"node_id": "gpu"}],
+                )
+            ]
+        )
+        self.assertEqual(result, [])
 
     def test_validates_closed_knowledge_package(self) -> None:
         result = self.module.validate_knowledge_package(REFERENCE_DIR)

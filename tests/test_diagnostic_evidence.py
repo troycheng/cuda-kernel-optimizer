@@ -14,6 +14,7 @@ MODULE_PATH = (
     / "scripts"
     / "diagnostic_evidence.py"
 )
+KNOWLEDGE_PATH = MODULE_PATH.with_name("diagnostic_knowledge.py")
 CONTRACT_SHA = "a" * 64
 ENVIRONMENT_SHA = "b" * 64
 TARGET_SHA = "2" * 64
@@ -23,6 +24,16 @@ REQUEST_SHA = "4" * 64
 
 def _load():
     spec = importlib.util.spec_from_file_location("cuda_diagnostic_evidence_v3", MODULE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_knowledge():
+    spec = importlib.util.spec_from_file_location(
+        "cuda_diagnostic_knowledge_v13", KNOWLEDGE_PATH
+    )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -68,6 +79,36 @@ class DiagnosticEvidenceTests(unittest.TestCase):
         self.assertEqual(result["producer"]["implementation_sha256"], IMPLEMENTATION_SHA)
         self.assertTrue(evidence.endswith(b"\n"))
         self.assertEqual(json.loads(evidence)["adapter_request_sha256"], REQUEST_SHA)
+
+    def test_validated_pytorch_evidence_normalizes_to_framework_observation(self) -> None:
+        raw = (
+            json.dumps(_measurement(["framework_dispatch_overhead"])) + "\n"
+        ).encode()
+        evidence = self.module.derive_diagnostic_evidence(
+            raw,
+            kind="pytorch_profile",
+            producer_id="pytorch-profile-adapter",
+            producer_version="1.0.0",
+            implementation_sha256=IMPLEMENTATION_SHA,
+            adapter_request_sha256=REQUEST_SHA,
+            contract_sha256=CONTRACT_SHA,
+            environment_sha256=ENVIRONMENT_SHA,
+            recorded_at=100.0,
+        )
+        validated = self.module.validate_diagnostic_evidence(
+            evidence,
+            expected_contract_sha256=CONTRACT_SHA,
+            expected_environment_sha256=ENVIRONMENT_SHA,
+        )
+
+        observations = _load_knowledge().normalize_observations(
+            diagnostic_evidence=[validated]
+        )
+
+        self.assertEqual(
+            [(item["semantic_id"], item["status"]) for item in observations],
+            [("framework.dispatch_overhead", "present")],
+        )
 
     def test_kind_signal_vocabulary_and_raw_metadata_are_closed(self) -> None:
         invalid = [

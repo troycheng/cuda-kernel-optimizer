@@ -7,10 +7,11 @@ import copy
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 
@@ -18,6 +19,7 @@ CARDS_PATH = Path(__file__).resolve().parents[1] / "references" / "diagnostic_ca
 REFERENCE_DIR = CARDS_PATH.parent
 _MAX_REFERENCE_BYTES = 2 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _CASE_IDS = {"R01", "R02", "R03", "R04", "R05", "R06", "X01", "K01", "K02"}
 _LAYERS = {
     "cpu",
@@ -28,6 +30,39 @@ _LAYERS = {
     "io",
     "synchronization",
     "idle",
+}
+_DIAGNOSTIC_PRODUCERS = {
+    "nsys_timeline": "nsys-timeline-adapter",
+    "pytorch_profile": "pytorch-profile-adapter",
+}
+_DIAGNOSTIC_SIGNALS = {
+    "nsys_timeline": {
+        "launch_gap_short_context": (
+            "runtime.launch_gap_short_context",
+            ["cpu-submit", "gpu-kernel"],
+        ),
+        "gpu_idle_gap": ("runtime.gpu_idle_gap", ["gpu-kernel"]),
+        "cpu_launch_overhead": ("runtime.cpu_launch_overhead", ["cpu-submit"]),
+    },
+    "pytorch_profile": {
+        "gqa_head_ratio": (
+            "framework.gqa_head_ratio",
+            ["framework", "gpu-kernel"],
+        ),
+        "shape_fragmentation": ("framework.shape_fragmentation", ["framework"]),
+        "framework_dispatch_overhead": (
+            "framework.dispatch_overhead",
+            ["framework", "cpu-submit"],
+        ),
+    },
+}
+_ACTIVE_ACTIONS = {
+    "compiler-sass-inspection": "compiler_sass",
+    "direction-experiment-project-copy": "direction_experiment",
+    "ncu-targeted-kernel": "ncu_kernel",
+    "nsys-global-timeline": "nsys_timeline",
+    "nsys-os-runtime-slice": "os_runtime",
+    "pytorch-operator-trace": "framework_trace",
 }
 
 
@@ -158,6 +193,267 @@ def _canonical_sha256(value: object) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _observation_identifier(value: object, label: str) -> str:
+    value = _text(value, label)
+    if _IDENTIFIER.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a safe identifier")
+    return value
+
+
+def _observation_value(value: object, label: str) -> object:
+    if value is None or type(value) in {bool, str}:
+        return value
+    if type(value) in {int, float} and math.isfinite(value):
+        return value
+    raise ValueError(f"{label} must be a finite scalar")
+
+
+def _append_observation(observations: dict[tuple, dict], item: dict) -> None:
+    key = (
+        item["semantic_id"],
+        tuple(item["scope"]),
+        item["source_digest"],
+    )
+    previous = observations.get(key)
+    if previous is not None and previous != item:
+        raise ValueError(
+            "semantic observation conflict for the same semantic_id, scope, "
+            "and source_digest"
+        )
+    observations[key] = item
+
+
+def normalize_observations(
+    *,
+    diagnostic_evidence: Sequence[Mapping[str, object]] = (),
+    active_evidence_results: Sequence[Mapping[str, object]] = (),
+) -> list[dict]:
+    """Convert already-validated evidence into stable semantic observations."""
+    if isinstance(diagnostic_evidence, (str, bytes)) or not isinstance(
+        diagnostic_evidence, Sequence
+    ):
+        raise ValueError("diagnostic_evidence must be a sequence")
+    if isinstance(active_evidence_results, (str, bytes)) or not isinstance(
+        active_evidence_results, Sequence
+    ):
+        raise ValueError("active_evidence_results must be a sequence")
+
+    normalized: dict[tuple, dict] = {}
+    diagnostic_fields = {
+        "kind",
+        "layer",
+        "summary",
+        "signals",
+        "producer",
+        "adapter_request_sha256",
+        "recorded_at",
+        "subject",
+        "result",
+    }
+    for index, raw in enumerate(diagnostic_evidence):
+        item = _closed(raw, diagnostic_fields, f"diagnostic evidence {index}")
+        kind = item["kind"]
+        if kind not in _DIAGNOSTIC_PRODUCERS:
+            raise ValueError(f"diagnostic evidence {index} has unknown producer kind")
+        producer = _closed(
+            item["producer"],
+            {"id", "version", "implementation_sha256"},
+            f"diagnostic evidence {index} producer",
+        )
+        if (
+            producer["id"] != _DIAGNOSTIC_PRODUCERS[kind]
+            or producer["version"] != "1.0.0"
+        ):
+            raise ValueError(f"diagnostic evidence {index} producer/version is unknown")
+        implementation_sha = _sha256(
+            producer["implementation_sha256"],
+            f"diagnostic evidence {index} producer implementation_sha256",
+        )
+        request_sha = _sha256(
+            item["adapter_request_sha256"],
+            f"diagnostic evidence {index} adapter_request_sha256",
+        )
+        subject = _closed(
+            item["subject"],
+            {"target_sha256"},
+            f"diagnostic evidence {index} subject",
+        )
+        _sha256(
+            subject["target_sha256"],
+            f"diagnostic evidence {index} subject target_sha256",
+        )
+        result = _closed(
+            item["result"],
+            {"artifact_sha256", "events_total"},
+            f"diagnostic evidence {index} result",
+        )
+        artifact_sha = _sha256(
+            result["artifact_sha256"],
+            f"diagnostic evidence {index} result artifact_sha256",
+        )
+        if type(result["events_total"]) is not int or result["events_total"] < 1:
+            raise ValueError(
+                f"diagnostic evidence {index} result events_total must be positive"
+            )
+        if item["layer"] != "workload":
+            raise ValueError(f"diagnostic evidence {index} layer is unsupported")
+        _text(item["summary"], f"diagnostic evidence {index} summary")
+        if (
+            type(item["recorded_at"]) not in {int, float}
+            or not math.isfinite(item["recorded_at"])
+            or item["recorded_at"] < 0
+        ):
+            raise ValueError(f"diagnostic evidence {index} recorded_at is invalid")
+        signals = _strings(
+            item["signals"],
+            f"diagnostic evidence {index} signals",
+            nonempty=False,
+        )
+        unknown_signals = set(signals) - set(_DIAGNOSTIC_SIGNALS[kind])
+        if unknown_signals:
+            raise ValueError(
+                f"diagnostic evidence {index} has unknown signals: "
+                f"{sorted(unknown_signals)}"
+            )
+        source_digest = _canonical_sha256(
+            {
+                "kind": kind,
+                "producer": {
+                    "id": producer["id"],
+                    "version": producer["version"],
+                    "implementation_sha256": implementation_sha,
+                },
+                "adapter_request_sha256": request_sha,
+                "report_artifact_sha256": artifact_sha,
+            }
+        )
+        for signal in signals:
+            semantic_id, scope = _DIAGNOSTIC_SIGNALS[kind][signal]
+            _append_observation(
+                normalized,
+                {
+                    "semantic_id": semantic_id,
+                    "status": "present",
+                    "value": True,
+                    "unit": "state",
+                    "scope": list(scope),
+                    "aggregation": "presence",
+                    "tool": {
+                        "name": producer["id"],
+                        "version": producer["version"],
+                    },
+                    "quality": "validated",
+                    "source_digest": source_digest,
+                },
+            )
+
+    envelope_fields = {
+        "action_id",
+        "evidence_kind",
+        "adapter_implementation_sha256",
+        "result_sha256",
+        "status",
+        "observations",
+    }
+    semantic_fields = {
+        "semantic_id",
+        "status",
+        "value",
+        "unit",
+        "scope",
+        "aggregation",
+        "tool",
+        "quality",
+    }
+    for index, raw in enumerate(active_evidence_results):
+        envelope = _closed(raw, envelope_fields, f"active evidence result {index}")
+        action_id = _observation_identifier(
+            envelope["action_id"], f"active evidence result {index} action_id"
+        )
+        evidence_kind = _observation_identifier(
+            envelope["evidence_kind"],
+            f"active evidence result {index} evidence_kind",
+        )
+        if _ACTIVE_ACTIONS.get(action_id) != evidence_kind:
+            raise ValueError(f"active evidence result {index} action identity is unknown")
+        _sha256(
+            envelope["adapter_implementation_sha256"],
+            f"active evidence result {index} adapter identity SHA",
+        )
+        result_sha = _sha256(
+            envelope["result_sha256"],
+            f"active evidence result {index} result_sha256",
+        )
+        if envelope["status"] not in {
+            "observed",
+            "inconclusive",
+            "unavailable",
+            "failed",
+        }:
+            raise ValueError(f"active evidence result {index} status is unsupported")
+        observations = envelope["observations"]
+        if type(observations) is not dict:
+            raise ValueError(f"active evidence result {index} observations must be an object")
+        semantic_items = observations.get("semantic_observations")
+        if semantic_items is None:
+            continue
+        if type(semantic_items) is not list:
+            raise ValueError(
+                f"active evidence result {index} semantic_observations must be an array"
+            )
+        for semantic_index, raw_semantic in enumerate(semantic_items):
+            label = (
+                f"active evidence result {index} semantic observation {semantic_index}"
+            )
+            semantic = _closed(raw_semantic, semantic_fields, label)
+            semantic_id = _observation_identifier(
+                semantic["semantic_id"], f"{label} semantic_id"
+            )
+            status = _observation_identifier(semantic["status"], f"{label} status")
+            if status not in {"observed", "present", "absent", "unavailable"}:
+                raise ValueError(f"{label} status is unsupported")
+            value = _observation_value(semantic["value"], f"{label} value")
+            unit = _text(semantic["unit"], f"{label} unit")
+            scope = _strings(semantic["scope"], f"{label} scope")
+            aggregation = _text(
+                semantic["aggregation"], f"{label} aggregation"
+            )
+            tool = _closed(semantic["tool"], {"name", "version"}, f"{label} tool")
+            tool_value = {
+                "name": _text(tool["name"], f"{label} tool name"),
+                "version": _text(tool["version"], f"{label} tool version"),
+            }
+            quality = _text(semantic["quality"], f"{label} quality")
+            if value == "ERR_NVGPUCTRPERM":
+                semantic_id = "profile.counter_access"
+                status = "unavailable"
+                unit = "state"
+                scope = ["profile"]
+                aggregation = "presence"
+            _append_observation(
+                normalized,
+                {
+                    "semantic_id": semantic_id,
+                    "status": status,
+                    "value": value,
+                    "unit": unit,
+                    "scope": list(scope),
+                    "aggregation": aggregation,
+                    "tool": tool_value,
+                    "quality": quality,
+                    "source_digest": result_sha,
+                },
+            )
+
+    return [
+        normalized[key]
+        for key in sorted(
+            normalized,
+            key=lambda item: (item[0], item[1], item[2]),
+        )
+    ]
 
 
 def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
