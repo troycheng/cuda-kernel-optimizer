@@ -101,6 +101,19 @@ def _semantic_observation(**updates) -> dict:
     return value
 
 
+def _observation_rule(**updates) -> dict:
+    value = {
+        "semantic_id": "runtime.launch_gap_short_context",
+        "statuses": ["present"],
+        "scope_all": ["cpu-submit", "gpu-kernel"],
+        "unit": "state",
+        "aggregation": "presence",
+        "comparison": None,
+    }
+    value.update(updates)
+    return value
+
+
 def _prepare_valid_contract(reference_dir: Path) -> None:
     source_path = reference_dir / "knowledge_sources.json"
     sources = json.loads(source_path.read_text(encoding="utf-8"))
@@ -324,6 +337,65 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
                     action_id="direction-experiment-project-copy"
                 ),
                 "read_only",
+            ),
+            (
+                lambda card: card.pop("observation_rules", None),
+                "observation_rules",
+            ),
+            (
+                lambda card: card.update(
+                    observation_rules={
+                        "positive": [
+                            _observation_rule(
+                                comparison={"op": "probability", "value": 0.9}
+                            )
+                        ],
+                        "counter": [],
+                        "invalidators": [],
+                    }
+                ),
+                "comparison",
+            ),
+            (
+                lambda card: card.update(
+                    observation_rules={
+                        "positive": [],
+                        "counter": [
+                            _observation_rule(statuses=["unavailable"])
+                        ],
+                        "invalidators": [],
+                    }
+                ),
+                "unavailable",
+            ),
+            (
+                lambda card: card.update(
+                    observation_rules={
+                        "positive": [
+                            _observation_rule(),
+                            _observation_rule(
+                                scope_all=["gpu-kernel", "cpu-submit"]
+                            ),
+                        ],
+                        "counter": [],
+                        "invalidators": [],
+                    }
+                ),
+                "duplicate",
+            ),
+            (
+                lambda card: card.update(
+                    observation_rules={
+                        "positive": [_observation_rule()],
+                        "counter": [
+                            _observation_rule(
+                                scope_all=["gpu-kernel", "cpu-submit"]
+                            )
+                        ],
+                        "invalidators": [],
+                    }
+                ),
+                "duplicate",
             ),
         ):
             with self.subTest(message=message):

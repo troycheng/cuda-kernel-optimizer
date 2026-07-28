@@ -225,6 +225,80 @@ def _append_observation(observations: dict[tuple, dict], item: dict) -> None:
     observations[key] = item
 
 
+def _validate_observation_rules(value: object, label: str) -> None:
+    rules = _closed(
+        value,
+        {"positive", "counter", "invalidators"},
+        label,
+    )
+    rule_fields = {
+        "semantic_id",
+        "statuses",
+        "scope_all",
+        "unit",
+        "aggregation",
+        "comparison",
+    }
+    seen_match_keys: dict[tuple, str] = {}
+    for group in ("positive", "counter", "invalidators"):
+        entries = rules[group]
+        if type(entries) is not list:
+            raise ValueError(f"{label}.{group} must be an array")
+        for index, raw in enumerate(entries):
+            rule_label = f"{label}.{group}[{index}]"
+            rule = _closed(raw, rule_fields, rule_label)
+            semantic_id = _observation_identifier(
+                rule["semantic_id"], f"{rule_label}.semantic_id"
+            )
+            statuses = _strings(
+                rule["statuses"],
+                f"{rule_label}.statuses",
+                allowed={"present", "observed", "absent", "unavailable"},
+            )
+            if "unavailable" in statuses:
+                raise ValueError(
+                    f"{rule_label}.statuses cannot contain unavailable"
+                )
+            scope_all = _strings(rule["scope_all"], f"{rule_label}.scope_all")
+            unit = _text(rule["unit"], f"{rule_label}.unit")
+            aggregation = _text(
+                rule["aggregation"], f"{rule_label}.aggregation"
+            )
+            comparison = rule["comparison"]
+            if comparison is None:
+                comparison_key = None
+            else:
+                comparison = _closed(
+                    comparison,
+                    {"op", "value"},
+                    f"{rule_label}.comparison",
+                )
+                if comparison["op"] not in {"eq", "lt", "lte", "gt", "gte"}:
+                    raise ValueError(f"{rule_label}.comparison op is unsupported")
+                if (
+                    type(comparison["value"]) not in {int, float}
+                    or not math.isfinite(comparison["value"])
+                ):
+                    raise ValueError(
+                        f"{rule_label}.comparison value must be finite"
+                    )
+                comparison_key = (comparison["op"], comparison["value"])
+            match_key = (
+                semantic_id,
+                tuple(sorted(statuses)),
+                tuple(sorted(scope_all)),
+                unit,
+                aggregation,
+                comparison_key,
+            )
+            if match_key in seen_match_keys:
+                raise ValueError(
+                    f"{rule_label} duplicates observation rule in "
+                    f"{seen_match_keys[match_key]}"
+                )
+            seen_match_keys[match_key] = f"{label}.{group}"
+
+
 def normalize_observations(
     *,
     diagnostic_evidence: Sequence[Mapping[str, object]] = (),
@@ -639,6 +713,7 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
         "mechanism_key",
         "status",
         "content_status",
+        "observation_rules",
         "categories",
         "execution_layers",
         "priority",
@@ -678,6 +753,10 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
             "locally_measured",
         }:
             raise ValueError(f"diagnostic card {card_id} content_status is unsupported")
+        _validate_observation_rules(
+            item["observation_rules"],
+            f"diagnostic card {card_id} observation_rules",
+        )
         _strings(item["categories"], f"diagnostic card {card_id} categories")
         _strings(
             item["execution_layers"],

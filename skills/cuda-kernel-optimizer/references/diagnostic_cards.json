@@ -7,6 +7,11 @@
       "mechanism_key": "cross-layer.unattributed-critical-path",
       "status": "routing_only",
       "content_status": "source_verified",
+      "observation_rules": {
+        "positive": [],
+        "counter": [],
+        "invalidators": []
+      },
       "categories": ["unknown", "mixed"],
       "execution_layers": ["cpu", "gpu", "framework", "transfer", "communication", "io", "synchronization", "idle"],
       "priority": 0,
@@ -33,6 +38,36 @@
       "mechanism_key": "framework.launch-gaps",
       "status": "routing_only",
       "content_status": "source_verified",
+      "observation_rules": {
+        "positive": [
+          {
+            "semantic_id": "runtime.launch_gap_short_context",
+            "statuses": ["present"],
+            "scope_all": ["cpu-submit", "gpu-kernel"],
+            "unit": "state",
+            "aggregation": "presence",
+            "comparison": null
+          },
+          {
+            "semantic_id": "runtime.cpu_launch_overhead",
+            "statuses": ["present"],
+            "scope_all": ["cpu-submit"],
+            "unit": "state",
+            "aggregation": "presence",
+            "comparison": null
+          },
+          {
+            "semantic_id": "framework.dispatch_overhead",
+            "statuses": ["present"],
+            "scope_all": ["framework", "cpu-submit"],
+            "unit": "state",
+            "aggregation": "presence",
+            "comparison": null
+          }
+        ],
+        "counter": [],
+        "invalidators": []
+      },
       "categories": ["framework"],
       "execution_layers": ["cpu", "framework", "gpu", "synchronization", "idle"],
       "priority": 1,
@@ -59,6 +94,11 @@
       "mechanism_key": "kernel.resource-or-memory",
       "status": "routing_only",
       "content_status": "source_verified",
+      "observation_rules": {
+        "positive": [],
+        "counter": [],
+        "invalidators": []
+      },
       "categories": ["kernel"],
       "execution_layers": ["gpu"],
       "priority": 1,
@@ -85,6 +125,11 @@
       "mechanism_key": "cpu-data.input-starvation",
       "status": "routing_only",
       "content_status": "source_verified",
+      "observation_rules": {
+        "positive": [],
+        "counter": [],
+        "invalidators": []
+      },
       "categories": ["cpu_data"],
       "execution_layers": ["cpu", "framework", "io", "idle"],
       "priority": 1,
@@ -111,6 +156,11 @@
       "mechanism_key": "transfer.host-device-serialization",
       "status": "routing_only",
       "content_status": "source_verified",
+      "observation_rules": {
+        "positive": [],
+        "counter": [],
+        "invalidators": []
+      },
       "categories": ["transfer"],
       "execution_layers": ["transfer", "gpu", "synchronization"],
       "priority": 1,
@@ -137,6 +187,11 @@
       "mechanism_key": "communication.collective-critical-path",
       "status": "routing_only",
       "content_status": "source_verified",
+      "observation_rules": {
+        "positive": [],
+        "counter": [],
+        "invalidators": []
+      },
       "categories": ["communication"],
       "execution_layers": ["communication", "gpu", "synchronization"],
       "priority": 1,
@@ -163,6 +218,11 @@
       "mechanism_key": "io.request-path",
       "status": "routing_only",
       "content_status": "source_verified",
+      "observation_rules": {
+        "positive": [],
+        "counter": [],
+        "invalidators": []
+      },
       "categories": ["io", "environment"],
       "execution_layers": ["io", "cpu", "idle"],
       "priority": 1,
