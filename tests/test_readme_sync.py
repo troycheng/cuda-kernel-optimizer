@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -23,6 +24,19 @@ def assert_in_order(testcase, text: str, markers: tuple[str, ...]) -> None:
     testcase.assertEqual(positions, sorted(positions))
 
 
+def claims_v1_3_release(text: str) -> bool:
+    version = r"V1\.3(?:\.\d+)*"
+    english = r"(?:released|published|current\s+release)"
+    chinese = r"(?:已发布|正式发布|当前版本)"
+    return bool(
+        re.search(rf"(?m)^#+\s+{version}\b", text)
+        or re.search(rf"(?is)\b{version}\b.{{0,80}}\b{english}\b", text)
+        or re.search(rf"(?is)\b{english}\b.{{0,80}}\b{version}\b", text)
+        or re.search(rf"(?s){version}.{{0,80}}{chinese}", text)
+        or re.search(rf"(?s){chinese}.{{0,80}}{version}", text)
+    )
+
+
 class ReadmeSyncTests(unittest.TestCase):
     def setUp(self) -> None:
         self.chinese = README_ZH.read_text(encoding="utf-8")
@@ -31,8 +45,8 @@ class ReadmeSyncTests(unittest.TestCase):
 
     def test_language_roles_and_full_readme_sizes(self) -> None:
         self.assertIn("## 项目概述", self.chinese)
-        self.assertIn("## About", self.english)
-        self.assertNotIn("## About", self.chinese)
+        self.assertIn("## Project overview", self.english)
+        self.assertNotIn("## Project overview", self.chinese)
         self.assertNotIn("## 项目概述", self.english)
         self.assertLessEqual(len(self.chinese.splitlines()), 200)
         self.assertLessEqual(len(self.english.splitlines()), 240)
@@ -67,6 +81,35 @@ class ReadmeSyncTests(unittest.TestCase):
             self.chinese.index("## 工作流程"),
         )
 
+    def test_english_readme_follows_chinese_information_architecture(self) -> None:
+        self.assertEqual(
+            re.findall(r"^## .+$", self.english, re.MULTILINE),
+            [
+                "## Project overview",
+                "## Core capabilities",
+                "## Quick start",
+                "## Workflow",
+                "## Results and acceptance",
+                "## Release notes",
+                "## Documentation",
+            ],
+        )
+        self.assertEqual(
+            re.findall(r"^### .+$", self.english, re.MULTILINE),
+            [
+                "### Installation",
+                "### What to prepare",
+                "### Run a 10-minute fit check",
+                "### Start formal optimization",
+                "### How optimization directions are formed",
+                "### How candidate changes advance",
+                "### V1.2.0",
+                "### V1.1.0",
+                "### V1.0.1",
+                "### V1.0.0",
+            ],
+        )
+
     def test_first_use_path_is_concrete_and_ai_executed(self) -> None:
         for marker in (
             "最多用 10 分钟",
@@ -98,11 +141,13 @@ class ReadmeSyncTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.chinese)
         for marker in (
-            "Environment readiness",
-            "Kernel optimization",
-            "Complete workload",
-            "Serving validation",
-            "Existing NCU report",
+            "build, correctness, benchmark, GPU, and profiler",
+            "CUDA",
+            "CUTLASS",
+            "Triton",
+            "complete, repeatable workload",
+            "serving KPI",
+            "existing NCU report",
         ):
             self.assertIn(marker, self.english)
 
@@ -110,7 +155,7 @@ class ReadmeSyncTests(unittest.TestCase):
         chinese = MERMAID.findall(self.chinese)
         english = MERMAID.findall(self.english)
         self.assertEqual(len(chinese), 2)
-        self.assertEqual(len(english), 1)
+        self.assertEqual(len(english), 2)
         diagnosis_edges = set(EDGE.findall(chinese[0]))
         for edge in (
             ("baseline", "-->", "execution"),
@@ -132,8 +177,14 @@ class ReadmeSyncTests(unittest.TestCase):
             ("keep", "-->", "finish"),
         ):
             self.assertIn(edge, candidate_edges)
-        self.assertIn(("evaluation", "-->", "keep"), set(EDGE.findall(english[0])))
-        self.assertIn(("evaluation", "-->", "restore"), set(EDGE.findall(english[0])))
+        self.assertEqual(
+            set(EDGE.findall(english[0])),
+            diagnosis_edges,
+        )
+        self.assertEqual(
+            set(EDGE.findall(english[1])),
+            candidate_edges,
+        )
 
     def test_readmes_explain_v1_2_adaptive_investment(self) -> None:
         chinese = "".join(self.chinese.split()).replace("`", "")
@@ -151,7 +202,8 @@ class ReadmeSyncTests(unittest.TestCase):
             "run-level grant",
             "scope, risk, stage",
             "waiting does not consume it",
-            "pauses for review",
+            "does not continue experimenting just to spend the authorization",
+            "saves the run state and pauses",
         ):
             self.assertIn(marker, english)
 
@@ -165,16 +217,16 @@ class ReadmeSyncTests(unittest.TestCase):
             "明确放弃",
         ):
             self.assertIn(marker, self.chinese)
+        english = " ".join(self.english.lower().split())
         for marker in (
-            "ChangeSet",
-            "static",
-            "correctness",
-            "short paired",
-            "Completed stages survive restarts",
-            "grant pause preserves",
-            "explicit abandonment",
+            "static review or isolated small test",
+            "minimum correctness",
+            "short paired screen",
+            "will not rerun completed expensive stages",
+            "resume after additional authorization",
+            "explicitly abandons",
         ):
-            self.assertIn(marker, self.english)
+            self.assertIn(marker, english)
 
     def test_real_workload_and_claim_boundaries_are_explicit(self) -> None:
         for marker in (
@@ -209,14 +261,15 @@ class ReadmeSyncTests(unittest.TestCase):
             "外部搜索和第三方 AI",
         ):
             self.assertIn(marker, self.chinese)
+        english = " ".join(self.english.split())
         for marker in (
-            "Automatic pre-baseline readiness",
-            "never changes host-level settings automatically",
+            "build, correctness, benchmark, GPU, and profiler",
+            "does not modify them automatically",
             "self_check",
             "ERR_NVGPUCTRPERM",
-            "External search and multi-model challenge",
+            "External search and third-party AI",
         ):
-            self.assertIn(marker, self.english)
+            self.assertIn(marker, english)
 
     def test_primary_readme_names_the_durable_outputs(self) -> None:
         for marker in (
@@ -228,13 +281,16 @@ class ReadmeSyncTests(unittest.TestCase):
             "证据完整性",
         ):
             self.assertIn(marker, self.chinese)
+        english = " ".join(self.english.lower().split())
         for marker in (
             "summary.md",
+            "active_diagnosis/initial_investment_brief.json",
             "performance_model.json",
-            "investment_brief.json",
             "decision.json",
+            "raw paired samples",
+            "evidence-integrity records",
         ):
-            self.assertIn(marker, self.english)
+            self.assertIn(marker, english)
 
     def test_readmes_publish_the_same_v1_release_line(self) -> None:
         for text in (self.chinese, self.english):
@@ -243,6 +299,60 @@ class ReadmeSyncTests(unittest.TestCase):
             self.assertEqual(text.count("### V1.0.1"), 1)
             self.assertEqual(text.count("### V1.0.0"), 1)
             self.assertNotRegex(text, r"(?m)^### V(?:2|3)\.")
+
+    def test_v1_3_release_claim_requires_six_scoreable_triton_replays(self) -> None:
+        suite = json.loads(
+            (
+                ROOT
+                / "tests"
+                / "fixtures"
+                / "knowledge_replay"
+                / "decision_points.json"
+            ).read_text(encoding="utf-8")
+        )
+        scoreable = sum(
+            case["scoring_group"] == "triton"
+            and case["replay_eligibility"]["status"] == "scoreable"
+            for case in suite["cases"]
+        )
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        public_paths = (
+            README_ZH,
+            README_EN,
+            README_ZH_COMPAT,
+            ROOT / "docs" / "index.md",
+            ROOT / "docs" / "getting-started.md",
+            ROOT / "docs" / "environment-readiness.md",
+            ROOT / "docs" / "workflows.md",
+            ROOT / "docs" / "long-running-optimization.md",
+            ROOT / "docs" / "evidence-and-safety.md",
+            ROOT / "docs" / "compatibility.md",
+            ROOT / "docs" / "validation.md",
+            ROOT / "docs" / "case-studies.md",
+            ROOT / "docs" / "knowledge-and-research.md",
+            ROOT / "skills" / "cuda-kernel-optimizer" / "SKILL.md",
+        )
+        v1_3_release_claimed = version.startswith("1.3") or any(
+            claims_v1_3_release(path.read_text(encoding="utf-8"))
+            for path in public_paths
+        )
+        if v1_3_release_claimed:
+            self.assertGreaterEqual(
+                scoreable,
+                6,
+                "V1.3 cannot be released without six scoreable Triton replays",
+            )
+
+    def test_v1_3_release_claim_detection_covers_public_wording(self) -> None:
+        for claim in (
+            "### V1.3.1",
+            "V1.3 is now released.",
+            "The current release is V1.3.2.",
+            "V1.3 已正式发布。",
+            "当前版本为 V1.3。",
+        ):
+            with self.subTest(claim=claim):
+                self.assertTrue(claims_v1_3_release(claim))
 
     def test_validation_and_case_studies_are_separate(self) -> None:
         for text in (self.chinese, self.english):

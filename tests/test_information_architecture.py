@@ -27,7 +27,7 @@ class InformationArchitectureTests(unittest.TestCase):
         chinese = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertNotIn("## Tested scope", english)
         self.assertNotIn("## 已测试范围", chinese)
-        self.assertIn("## Validation status", english)
+        self.assertIn("## Results and acceptance", english)
         self.assertIn("## 结果与验收", chinese)
         self.assertNotIn("## 验证情况", chinese)
         for text in (english, chinese):

@@ -5,227 +5,236 @@
   </picture>
 </p>
 
-<p align="center"><strong>Evidence-driven CUDA, CUTLASS and Triton optimization for ChatGPT</strong></p>
+<p align="center"><strong>GPU performance analysis, optimization, and validation for real workloads</strong></p>
 
 <p align="center">
-  <a href="docs/getting-started.md">Get Started</a> ·
-  <a href="docs/environment-readiness.md">Prepare a Workload</a> ·
-  <a href="docs/workflows.md">Workflows</a> ·
-  <a href="docs/evidence-and-safety.md">Evidence &amp; Safety</a> ·
-  <a href="skills/cuda-kernel-optimizer/examples/walkthrough.md">Examples</a> ·
+  English ·
   <a href="README.md">简体中文</a>
 </p>
 
-## About
+## Project overview
 
-`cuda-kernel-optimizer` is a GPU performance optimization skill for ChatGPT's
-coding agent. It can improve CUDA, CUTLASS, Triton, and the GPU workloads around
-them; find a bottleneck across a complete workload; validate a change against a
-serving objective; or analyze an existing Nsight Compute report without
-rerunning its program.
+`cuda-kernel-optimizer` is a GPU performance optimization skill for ChatGPT's coding
+agent. The user supplies a test workload (dataset, representative requests, or replay),
+correctness checks (expected outputs, tolerances, or accuracy criteria), the target
+environment, and the allowed modification scope.
+ChatGPT checks the environment, runs the original baseline, analyzes
+bottlenecks, modifies code, and uses correctness and paired performance data to
+decide whether a change should be kept.
 
-The user supplies a test workload (dataset, representative requests, or replay),
-correctness checks (expected outputs, tolerances, or accuracy criteria), the
-target environment, and the allowed modification scope. The agent then profiles
-the target, makes bounded project changes, checks correctness, and compares
-paired measurements.
+The analysis covers CUDA, CUTLASS, Triton, PyTorch, vLLM, and TensorRT-LLM. It
+also covers framework scheduling, CPU and data processing, transfers,
+communication, I/O, allocator behavior, and runtime state. The supplied
+complete workload remains the optimization target; the skill does not assume
+that the bottleneck is inside a kernel.
 
-The analysis also covers framework scheduling, CPU and data work, transfers,
-communication, I/O, allocator behavior, and runtime state when the evidence
-points outside a kernel.
+Each run records candidate changes, when present, along with measurements and
+the terminal reason. Without a representative test workload or valid
+measurement evidence, the result is limited to static analysis, environment
+preparation, or directions that still require validation. It does not claim a
+speedup.
 
-Its deterministic Controller freezes the objective, environment, budget, measurement
-policy, and allowed scope before optimization begins. A resumable active-diagnosis loop
-checks the required capabilities, compares competing explanations, and runs only the
-evidence actions needed to decide what should happen next. Sealed, digest-bound evidence and an
-append-only ledger keep interrupted, noisy, or drifted runs from silently changing the
-experiment or spending the same budget twice.
+## Core capabilities
 
-After the first global scan, the diagnosis engine reports the critical path,
-benefit ceiling, uncertainty, next action, and any evidence-backed cost estimate.
-Without identity-matched timing history, numeric duration remains unknown. A run-level grant
-bounds later work by scope, risk, stage, and completed execution time; waiting
-does not consume it, and work outside the grant pauses for review.
-Automatic pre-baseline readiness: The AI checks required build, GPU, profiler,
-and workload-smoke capabilities before performance work begins.
-The user still supplies the test workload and authorization. The only automatic repair
-is a hash-locked pip install inside the declared isolated environment.
-The skill never changes host-level settings automatically; `self_check` does not prove that the GPU environment is ready.
-If NCU returns `ERR_NVGPUCTRPERM`, the skill records the permission boundary
-instead of raising host privileges. External search and multi-model challenge
-remain optional and advisory; they cannot replace local evidence.
+- Check that build, correctness, benchmark, GPU, and profiler capabilities and dependencies are available before optimization starts.
+- Run the project's original baseline and locate the bottleneck layer on the critical path of the complete workload.
+- Use profiles, source code, and technical knowledge to form competing bottleneck hypotheses, then prefer the lowest-cost check that can falsify one.
+- Optimize CUDA, CUTLASS, and Triton kernels and their surrounding execution paths, with staged validation for each candidate.
+- Decide whether to continue, pause, or stop from the available headroom,
+  evidence strength, and next-stage cost; a resumed run will not rerun completed
+  expensive stages.
+- Analyze an existing NCU report or `.ncu-rep` without rerunning the workload, while stating exactly what the available evidence can support.
 
 ## Quick start
 
-Installation is performed by ChatGPT's coding agent; the reader does not run
-the project scripts by hand. In a ChatGPT coding session, send:
+### Installation
+
+Installation is performed by ChatGPT's coding agent. The user does not run the project's internal scripts by hand. Send this in a ChatGPT coding session:
 
 > Install `skills/cuda-kernel-optimizer` from the latest published release of [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer). Install only that skill into the active skills directory, run its CPU/static `self_check`, and report the installed tag, commit, and destination. Do not use `main` unless I ask.
 
-Start a new session after installation so the instructions are reloaded.
+Start a new session after installation so that the skill instructions are
+reloaded. `self_check` covers only the package's CPU/static path; it does not
+prove that the target GPU or profiler is available.
 
-Before committing to the 45-minute `quick` budget, run a **10-minute fit check**:
+### What to prepare
 
-> Use cuda-kernel-optimizer for a read-only fit check of this project. Spend at most 10 minutes. Do not edit source files, install packages, or change host settings. Confirm the test workload, correctness checks, benchmark, target GPU, and profiler access. Report the supported claim layer, blockers, missing evidence, and the first lowest-cost action. Do not claim a speedup.
+| Input | Why it is needed |
+|---|---|
+| Test workload (dataset, representative requests, or replay) | Reproduces the real target and defines the optimization objective; the skill does not download or invent one |
+| Correctness checks | Define expected outputs, tolerances, or accuracy criteria so that output changes can be detected |
+| Stable benchmark or service metric | Shows whether the target performance has improved |
+| Target GPU and runtime environment | Bind build artifacts, tool capabilities, and performance evidence |
+| Allowed paths and constraints | Limit changes to code, dependencies, and runtime state |
 
-This check only decides whether the project is ready; it does not claim a
-speedup. The test workload must be supplied by the user and represent the real
-target; the skill does not download or invent one.
-If the foundations are sufficient, provide the test workload, performance goal,
-constraints, and allowed modification scope, then choose `quick`, `balanced`,
-or `thorough` for the formal run.
+Static analysis is still possible with source code alone, but its output is
+limited to candidate directions and an environment-preparation plan. It cannot
+support a performance-improvement claim.
 
-The AI then freezes the task, runs the original baseline, evaluates candidates
-from cheap checks to expensive tests, and restores rejected changes. At the end,
-it reports the exact run directory. Read `summary.md` first and use
-`itervN/decision.json` for the machine-readable decision. A change is ready to
-merge only when the declared workload objective, correctness, constraints, and
-evidence integrity all pass.
+### Run a 10-minute fit check
 
-Choose `quick` for a 45-minute ceiling, `balanced` for the default three hours,
-or `thorough` for up to ten hours. The run may stop earlier when the evidence is
-conclusive or no useful direction remains.
+For a first use, ask ChatGPT to check whether the project is ready for
+optimization:
 
-See [Getting Started](docs/getting-started.md) for the complete first-run path.
+> Use cuda-kernel-optimizer to check whether this project is ready for optimization. Spend at most 10 minutes. Do not edit source files, install dependencies, or change host settings. Confirm the test workload, correctness checks, benchmark, target GPU, and profiler access. Report blockers, the analysis that is currently possible, and the lowest-cost next step. Do not claim a speedup.
 
-## Choose a workflow
+This check answers three questions: whether the target can be measured
+reliably, what is still missing, and whether formal optimization is worth
+starting.
 
-| Workflow | Use it when | Result boundary |
-|---|---|---|
-| **Environment readiness** | The test workload, correctness checks, benchmark, profiler, or target environment is incomplete | A gap report, claim ceiling, and project-local preparation plan |
-| **Kernel optimization** | A CUDA, CUTLASS, or Triton implementation has runnable correctness checks | A kernel-level result with correctness and paired measurement evidence |
-| **Complete workload** | The bottleneck may span GPU, framework, CPU, transfers, communication, I/O, or runtime state | A bounded diagnosis and end-to-end evaluation on the supplied workload |
-| **Serving validation** | A local change must be checked against a product KPI | Frozen c1/c2/c4/c8/c12 strata, constraints, runtime identity, and separate performance and integrity decisions |
-| **Existing NCU report** | A `.ncu-rep` exists and the original workload must not run | Read-only analysis with exact degradation when the report cannot be interpreted |
+### Start formal optimization
 
-[Workflows](docs/workflows.md) explains the required inputs and supported claim
-for each path. [Long-running Optimization](docs/long-running-optimization.md)
-explains the Controller, capability registry, calibration, audit cadence, and
-recovery behavior.
+Once the workload, target, and constraints are available, ChatGPT can run the
+full workflow. For example:
 
-## How it works
+> Use cuda-kernel-optimizer to optimize this project. Use my test workload and correctness checks as the authority, and optimize end-to-end latency. Modify only the specified directories and do not change host configuration. First run the original baseline and a global analysis. Report the main bottleneck, benefit ceiling, lowest-cost validation, and investment recommendation before changing code.
+
+The skill changes only authorized project files or an isolated environment. For driver
+settings, GPU counter permissions, frequency, power, services, and system
+configuration, it gives recommendations but does not modify them automatically. If NCU
+returns `ERR_NVGPUCTRPERM`, it records the permission limit rather than escalating privileges.
+
+## Workflow
+
+An optimization run contains two connected loops. The first uses measurements
+to select directions worth trying. The second validates one candidate change
+stage by stage. New evidence updates later decisions, and a rejected mechanism
+cannot consume another round under a new name.
+
+### How optimization directions are formed
 
 ```mermaid
 flowchart LR
-    goal["Goal, code, and constraints"] --> environment["Check the test environment"]
-    environment --> baseline["Freeze and calibrate the baseline"]
-    baseline --> context["Build the execution map and evidence catalog"]
-    context --> hypothesis["State falsifiable competing explanations"]
-    hypothesis --> evidence["Run the most discriminating evidence action"]
-    evidence --> hypothesis
-    hypothesis --> change["Evidence is sufficient: create a bounded change"]
-    change --> evaluation["Check correctness and paired performance"]
-    evaluation --> keep["Evidence is sufficient: keep the change"]
-    evaluation --> restore["Evidence is insufficient: restore the original"]
+    baseline["Original baseline"] --> execution["Execution map"]
+    profile["Global profile"] --> execution
+    execution --> accounting["Critical path and<br/>benefit ceiling"]
+    source["Source and knowledge"] --> hypotheses["Competing<br/>bottleneck hypotheses"]
+    accounting --> hypotheses
+    hypotheses --> falsifier["Lowest-cost<br/>falsifier"]
+    falsifier --> evidence["New evidence"]
+    evidence --> execution
 ```
 
-Before timed work, the Controller freezes the objective and authorized scope,
-then estimates measurement noise and the minimum detectable effect. `green`
-permits a candidate, `yellow` pauses for better measurement or baseline replay,
-and `red` stops the run. The contract also limits how many candidates may run
-between baseline audits.
+The execution map records timing and dependencies across CPU, GPU, framework,
+transfer, communication, I/O, synchronization, and idle time. The performance
+model uses it to account for the critical path, overlap, benefit ceiling, and
+evidence gaps. A benefit ceiling is the amount of time a direction could affect,
+not a promised speedup.
 
-The AI may propose at most three competing mechanism hypotheses. The Controller
-computes the timing facts and returns exactly one decision: `MEASURE`, `PURSUE`,
-`REVIEW_REQUIRED`, or `STOP`. Only the action named by that decision may run.
-The current benefit ceiling, uncertainty, cost class, and next checkpoint are
-written to `active_diagnosis/performance_model.json` and
-`active_diagnosis/investment_brief.json`; numeric time estimates are included
-only when the same action has identity-matched timing history.
+ChatGPT proposes no more than three competing hypotheses from the execution
+map, source code, and relevant knowledge. The Controller checks whether each
+hypothesis is bound to current evidence, does not duplicate an existing mechanism, and
+supports its declared claim layer. It then selects the cheapest check that can
+distinguish between the hypotheses. New timing evidence updates the execution
+map until a direction is supported or rejected.
 
-For a code change, the Controller freezes one ChangeSet and advances from static
-review to correctness, a short paired screen, optional targeted profiling, and
-formal paired measurement. Completed stages survive restarts; rejection restores
-the change, a grant pause preserves it, and explicit abandonment restores it.
+External search and third-party AI may challenge a direction or review a final
+result. Only the necessary technical summary is shared. External opinions
+cannot replace local correctness or performance evidence.
 
-Verified observations query only a few matching capability cards; cards supply methods, counterexamples, and checks, but do not decide results. Every admitted round starts with a falsifiable performance hypothesis.
-Only a rehashed V2.5 evidence closure counts as an evaluated candidate. Environment readiness finishes before optimization timing starts; three minutes or 10% of the total budget is a progress review point, not a timer that kills an install or repair.
-The Controller terminates the process group only when the command timeout or readiness hard deadline is reached. Tool work is not a performance improvement.
+### How candidate changes advance
 
-Direction headroom and stop/reopen rules remain in the
-[direction-admission contract](skills/cuda-kernel-optimizer/references/direction_admission.md).
-The detailed iteration rules are in the
-[performance-first contract](skills/cuda-kernel-optimizer/references/performance_iteration.md).
+```mermaid
+flowchart TD
+    direction["Supported direction"] --> candidate["Freeze candidate"]
+    candidate --> gate{"Is the next stage worth<br/>the authorized investment?"}
+    gate -- "Insufficient benefit" --> reject["Reject and restore"]
+    gate -- "Outside authorization" --> pause["Save state and pause"]
+    pause --> gate
+    gate -- "Continue" --> stage["Run the next validation stage"]
+    stage --> result{"Did this stage pass?"}
+    result -- "No" --> reject
+    result -- "More validation" --> gate
+    result -- "All stages pass" --> keep["Keep the change"]
+    reject --> analysis["Return to direction analysis"]
+    keep --> finish["Update the best result"]
+```
 
-## Evidence, not best-sample claims
+| Order | Validation stage | Passing condition |
+|---|---|---|
+| 1 | Static review or isolated small test | The candidate mechanism can work |
+| 2 | Build and minimum correctness | The change runs and preserves the required result |
+| 3 | Short paired screen | The gain reaches the project threshold and is reasonably stable |
+| 4 | Bounded profiler run | It is needed to answer a specific unresolved question |
+| 5 | Formal workload or service validation | The real target improves with matching correctness and environment identity |
 
-A performance claim is accepted only when:
+If a stage fails, later stages do not start. Rejection restores the original
+implementation. The original implementation is restored only when the user
+explicitly abandons the candidate or the evidence rejects it; insufficient
+authorization is not treated as failure. After a kept change, the remaining
+headroom is reassessed before the run returns to direction analysis.
 
-- correctness and every declared constraint pass;
-- paired A/B samples follow the frozen schedule and aggregation rule;
-- the default 95% confidence interval supports the required effect with enough valid pairs;
-- the continuous shared-host guard covers timed work without missing, stale, or contaminated samples;
-- formal serving evidence covers c1/c2/c4/c8/c12 and binds the measured binary to its execution path.
+V1.2 uses one run-level grant to bound scope, risk, stage, and available
+execution time. It does not continue experimenting just to spend the
+authorization, and waiting does not consume it. Before each expensive stage,
+the Controller reassesses whether the work is worthwhile. If the next stage is
+outside the grant, it saves the run state and pauses; it can resume after
+additional authorization and will not rerun completed expensive stages.
+Individual commands retain separate timeouts so that stuck builds, tests, or
+profiler runs can be terminated.
 
-Missing, contradictory, contaminated, stale, or identity-invalid evidence must
-fail closed. `performance_verdict` and `evidence_integrity` remain separate: a
-fast number cannot repair an invalid experiment. The installed `self_check` is
-CPU/static only and does not validate a GPU environment.
+## Results and acceptance
 
-See [Evidence & Safety](docs/evidence-and-safety.md), the
-[pre-V1 protocol 2.5 reference](skills/cuda-kernel-optimizer/references/evidence_automation.md),
-and the [long-run control reference](skills/cuda-kernel-optimizer/references/long_running_control.md).
+At the end of a run, ChatGPT reports the run directory and the following
+artifacts:
 
-## Validation status
+| Artifact | Purpose |
+|---|---|
+| `summary.md` | Conclusions, kept changes, rejected directions, and blockers |
+| `active_diagnosis/initial_investment_brief.json` | Investment recommendation after the first global analysis |
+| `active_diagnosis/performance_model.json` | Critical path, benefit ceiling, and evidence gaps |
+| `decision.json` | Final decision and terminal reason |
+| Raw paired samples and environment identity | Show whether performance data is comparable |
+| Correctness and evidence-integrity records | Show whether the change is suitable for integration |
 
-[Validation status](docs/validation.md) records automated checks, the physical
-RTX 5090 lane, tool permissions, and the real-pair stability result.
-[Case studies](docs/case-studies.md) keeps workload-specific historical results
-separate. Neither page predicts the speedup of a new project.
+A change is ready to merge only when correctness passes, the real target
+improves, environments and samples are comparable, the modification scope is
+respected, and the evidence record is complete. A faster local kernel does not
+mean that the complete workload is faster; the user's declared target remains
+authoritative.
+
+The supported claim depends on the measurement setup. Source code alone
+supports only static hypotheses. Kernel correctness checks and a stable
+benchmark can support a kernel-level result. A complete, repeatable workload is
+required for an end-to-end result. A serving KPI requires a controlled service
+validation environment. An existing NCU report supports only read-only analysis
+within the report's coverage.
+
+[Validation records](docs/validation.md) list automated checks, the physical RTX
+5090 path, tool permissions, and actual GPU test coverage. [Case
+studies](docs/case-studies.md) record historical workload results separately.
+Neither predicts the speedup of a new project.
 
 ## Release notes
 
 ### V1.2.0
 
-- Add run-level investment grants that bound controlled work by completed
-  execution time, mutation scope, risk, and validation stage.
-- Freeze one ChangeSet and validate it one stage at a time; completed stages
-  survive restarts without being executed or charged twice.
-- Preserve a candidate when authorization is insufficient, resume it under a
-  covering grant, and restore it only after rejection or explicit abandonment.
-- Use request-bound, allowlisted external reviews as advisory challenges rather
-  than promotion evidence.
+- A run-level grant now limits time, modification scope, risk, and validation stage.
+- Candidate changes are saved stage by stage and resume after completed work.
+- Insufficient authorization preserves the candidate; additional authorization resumes it, while rejection or explicit abandonment restores the original.
+- External review supplies advisory challenges only and cannot promote a candidate.
 
 ### V1.1.0
 
-- Add a deterministic performance model for critical-path accounting, per-layer
-  headroom, missing evidence, and identity-matched action timing.
-- Limit active diagnosis to three competing mechanisms and one admitted next
-  action, with explicit `MEASURE`, `PURSUE`, `REVIEW_REQUIRED`, and `STOP`
-  outcomes.
-- Produce an early investment brief before expensive profiling and stop when no
-  admissible direction clears the project effect threshold.
-- Refresh the performance model from admitted node measurements, retain live
-  hypothesis identities, and allow evidence-closed mechanisms to be replaced
-  without letting renamed variants reopen them.
-- Preserve complete external challenges and record their local evidence
-  status without claiming that unrelated workload evidence answered them; add
-  four end-to-end RTX 5090 Controller evidence-admission checks and a separate,
-  explicitly authorized disposable NCU smoke path.
+- Added critical-path and benefit-ceiling accounting, competing bottleneck hypotheses, and an initial investment recommendation.
+- Each round selects one evidence action and records whether to measure, modify, wait for review, or stop.
+- Added RTX 5090 Controller evidence admission and a separate NCU smoke path.
 
 ### V1.0.1
 
-- Include `LICENSE` and `NOTICE` in the installable skill artifact.
-- Make the physical GPU lane configurable instead of binding it to maintainer paths.
-- Apply the hard deadline and durable elapsed-time accounting to `open-iter`.
-- Separate standalone release numbers from retained pre-V1 protocol identities.
+- Added license and provenance files to the installable package and made the physical GPU acceptance path configurable.
 
 ### V1.0.0
 
-The first standalone release combines environment readiness, active diagnosis,
-bounded code changes, staged correctness and performance checks, evidence sealing,
-and deterministic long-run recovery. Expensive stages run only after cheaper checks
-pass, and a result is retained only when the declared workload objective supports it.
-Physical GPU coverage validates the mechanisms and target-machine path; it does not
-predict the speedup of a new workload.
+- First standalone public release with environment preparation, active diagnosis, bounded changes, staged validation, and long-run recovery.
 
 ## Documentation
 
 - Start with [Getting Started](docs/getting-started.md), [Preparing a workload](docs/environment-readiness.md), and [Workflow selection](docs/workflows.md).
-- Read [Long-running optimization](docs/long-running-optimization.md), [Evidence and safety](docs/evidence-and-safety.md), [Compatibility](docs/compatibility.md), and [Knowledge and research](docs/knowledge-and-research.md) for operating details.
-- Project evidence is in [Validation status](docs/validation.md), [case studies](docs/case-studies.md), and the [RTX 5090 opt-in guide](tests/gpu/sm120/README.md).
-- The AI protocol is [SKILL.md](skills/cuda-kernel-optimizer/SKILL.md); detailed contracts cover [performance iteration](skills/cuda-kernel-optimizer/references/performance_iteration.md), [direction admission](skills/cuda-kernel-optimizer/references/direction_admission.md), [long-run control](skills/cuda-kernel-optimizer/references/long_running_control.md), [software-stack comparison](skills/cuda-kernel-optimizer/references/version_stack_audit.md), [formal evidence](skills/cuda-kernel-optimizer/references/evidence_automation.md), and [canonical compatibility](skills/cuda-kernel-optimizer/references/compatibility.md).
-- [Walkthrough](skills/cuda-kernel-optimizer/examples/walkthrough.md) · [MIT License](LICENSE)
+- For operation and decisions, see [Long-running optimization](docs/long-running-optimization.md), [Evidence and safety](docs/evidence-and-safety.md), and [Knowledge, search, and independent review](docs/knowledge-and-research.md).
+- For support status, see [Compatibility](docs/compatibility.md), [Validation records](docs/validation.md), and [Case studies](docs/case-studies.md).
+- For implementation details, see the [AI execution protocol](skills/cuda-kernel-optimizer/SKILL.md), [complete walkthrough](skills/cuda-kernel-optimizer/examples/walkthrough.md), and [RTX 5090 opt-in test guide](tests/gpu/sm120/README.md).
+- License: [MIT License](LICENSE).
 
 This project is independent of CUDA, CUTLASS, Triton, and Nsight Compute. Use
 those dependencies under their respective licenses.
