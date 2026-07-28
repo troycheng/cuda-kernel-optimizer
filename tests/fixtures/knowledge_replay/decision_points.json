@@ -1,0 +1,1015 @@
+{
+  "cases": [
+    {
+      "case_id": "R01",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "iter_156_nms_fp32_output",
+          "source_manifest_sha256": "fb02a1c8e909af092def9feca76c40625519a48c415a363ffd47db9584a511fb",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Archive has no extracted runtime diagnosis.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "rewrite_manifest.json",
+              "sha256": "d3a56078cb757dc3369863b5cd5dea9af1373b9c9e34cf5150f5fbcfcbf9ace0"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_candidate_correctness.sh",
+              "sha256": "492843bab79575e4e37ca0517f37f4445651f6236d8feaf80aa395c6f2a3a0ed"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_nsys.sh",
+              "sha256": "d1f7269160fa70db8aaa2452ff1b7344073b4630b891c2f6506e1d5886cc8b4e"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "nsys_fp32_output_1000/mechanism_analysis.json",
+              "sha256": "1f1afa09d74b448ea07c68793f2801c5b73e9e51d5773cef810b75979b69a330"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "rewrite_manifest.json",
+            "sha256": "d3a56078cb757dc3369863b5cd5dea9af1373b9c9e34cf5150f5fbcfcbf9ace0"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_candidate_correctness.sh",
+            "sha256": "492843bab79575e4e37ca0517f37f4445651f6236d8feaf80aa395c6f2a3a0ed"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_nsys.sh",
+            "sha256": "d1f7269160fa70db8aaa2452ff1b7344073b4630b891c2f6506e1d5886cc8b4e"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "nsys_fp32_output_1000/mechanism_analysis.json",
+            "sha256": "1f1afa09d74b448ea07c68793f2801c5b73e9e51d5773cef810b75979b69a330"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r01",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "rewrite_manifest.json",
+                "sha256": "d3a56078cb757dc3369863b5cd5dea9af1373b9c9e34cf5150f5fbcfcbf9ace0"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_candidate_correctness.sh",
+                "sha256": "492843bab79575e4e37ca0517f37f4445651f6236d8feaf80aa395c6f2a3a0ed"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_nsys.sh",
+                "sha256": "d1f7269160fa70db8aaa2452ff1b7344073b4630b891c2f6506e1d5886cc8b4e"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "nsys_fp32_output_1000/mechanism_analysis.json",
+                "sha256": "1f1afa09d74b448ea07c68793f2801c5b73e9e51d5773cef810b75979b69a330"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "Later archive artifacts remain historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "correctness_output_invariants.json",
+              "sha256": "1a714fbef2e103bda54687fc14f1e52e8d38958b447ea89097018ec5c5e1129a"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "correctness_semantic_iter149_vs_candidate.json",
+              "sha256": "165ded1ad937bd66206e5f165d7456c7b0e86c4ad7eb337ce21047e2e044a6b6"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "correctness.sha256",
+              "sha256": "0882d062c47268aa1c60d10ecfac740f13b02edd440af06b35ed1fea1d9a7c79"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "timing_confirmation_vs_iter149/analysis.json",
+              "sha256": "a8792322d8a999b76cd96b1bf0d4e61889ed4988cd87bf3bc2820c0f43a4278e"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "timing_confirmation_vs_iter149/evidence.sha256",
+              "sha256": "9d1fb8d4a0f8aa183eeb18dc7ee97d701ec456b76a2c28eba99d842fdce2483f"
+            }
+          ]
+        },
+        "label_source_sha256": "16148dc16586b96c273d789b35a9d769442f0ad4dc18352c945eadf440dd0b96"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "aggregate_timing_only",
+          "missing_execution_window",
+          "missing_node_boundaries",
+          "missing_execution_topology"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
+      "case_id": "R02",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "iter_173_pdl_gap_audit",
+          "source_manifest_sha256": "c94180d690a85c9a88207665eb5a26f5cc2220ee387567cb524db0fb17d9ca19",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Archive has no extracted runtime diagnosis.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "analysis.json",
+              "sha256": "add354f824ea53fd6c97574febfd3e3347154ac257916ad9b7864c97eec18f5c"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_nsys_v3.sh",
+              "sha256": "2e2d4876084f91c264ac435224ba4c977a1adcb29ebb7f5c7b68a083f288cb4e"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_correctness_v3.sh",
+              "sha256": "e4aa2a4f9417e75b559f3a8a33f2ad56cf5ef761836bfa4cce72e46f1b9e55d9"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "analysis.json",
+            "sha256": "add354f824ea53fd6c97574febfd3e3347154ac257916ad9b7864c97eec18f5c"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_nsys_v3.sh",
+            "sha256": "2e2d4876084f91c264ac435224ba4c977a1adcb29ebb7f5c7b68a083f288cb4e"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_correctness_v3.sh",
+            "sha256": "e4aa2a4f9417e75b559f3a8a33f2ad56cf5ef761836bfa4cce72e46f1b9e55d9"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r02",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "analysis.json",
+                "sha256": "add354f824ea53fd6c97574febfd3e3347154ac257916ad9b7864c97eec18f5c"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_nsys_v3.sh",
+                "sha256": "2e2d4876084f91c264ac435224ba4c977a1adcb29ebb7f5c7b68a083f288cb4e"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_correctness_v3.sh",
+                "sha256": "e4aa2a4f9417e75b559f3a8a33f2ad56cf5ef761836bfa4cce72e46f1b9e55d9"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "Decision text remains historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "DECISION.md",
+              "sha256": "5f98769fdbd96b4e356b94eddc7ba6216b83810ff14f9447feb3a7ace3f8ff53"
+            }
+          ]
+        },
+        "label_source_sha256": "8105d07ed5a5d6a52693f1a1d9e17fd8e21a014ac108efa1e9bdf1674fcac804"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "aggregate_timing_only",
+          "missing_execution_window",
+          "missing_node_boundaries",
+          "missing_execution_topology"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
+      "case_id": "R03",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "iter_182_stack_upgrade_iter161",
+          "source_manifest_sha256": "34358eb61524781bb011f85f659d4514e74977a678e315fa352d82dbfeab3e32",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Archive has no extracted runtime diagnosis.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "DESIGN.md",
+              "sha256": "433b1d3d8686316a84f3922df73af503babd517502399eea836391c362fa97ea"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "layer_analysis.json",
+              "sha256": "5ca87fec99dd13ba169db2e4a495e223274e053ac22940c7df18294fc0800725"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "DESIGN.md",
+            "sha256": "433b1d3d8686316a84f3922df73af503babd517502399eea836391c362fa97ea"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "layer_analysis.json",
+            "sha256": "5ca87fec99dd13ba169db2e4a495e223274e053ac22940c7df18294fc0800725"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r03",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "DESIGN.md",
+                "sha256": "433b1d3d8686316a84f3922df73af503babd517502399eea836391c362fa97ea"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "layer_analysis.json",
+                "sha256": "5ca87fec99dd13ba169db2e4a495e223274e053ac22940c7df18294fc0800725"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "Correctness closure remains historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "correctness_attempt3/analysis.json",
+              "sha256": "4429b7826e4c3a315bfcf1df0c7e2da24cae6bdca7805eae1521f047ebd069f0"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "exact_attribution_primary/analysis.json",
+              "sha256": "1631884e3d72fe474c1529820716d48f0e869b07b3e514a3b779f34fa8ea48a9"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "exact_attribution_primary/evidence.sha256",
+              "sha256": "5b3e4dc913aebca8a8355afed712feb0e9733bf2ddcadd28884fee6f50d608a3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "exact_deployment_primary/analysis.json",
+              "sha256": "1e70500e861f50a424ae00c600fb6e9e6fe7b8b3fb8dcf5517889bf792ec2920"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "exact_deployment_primary/evidence.sha256",
+              "sha256": "c44ef805834101d20ce57773ed0daaa9ec66ab91c6c3ddeb43d27ed7b9737aa3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "closure.sha256",
+              "sha256": "250bdf3f09a695f2241a82d40fd15e2964b90ceff4b3f0e46e156fa71cd93a1d"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "DECISION.md",
+              "sha256": "c32d2af4fa47fcaf452232e2032956c227b666470eb7ea8f30c072903bbc144c"
+            }
+          ]
+        },
+        "label_source_sha256": "7866eeb115147c2969fc3eafc10996d7d3fab8cbe890ccfb3b59d553401b1db4"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "missing_predecision_timing",
+          "missing_execution_window",
+          "missing_execution_topology"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
+      "case_id": "R04",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "iter_184_fastsort_map_fused",
+          "source_manifest_sha256": "dba15c0f325fe9c4751cc07c935b264a9cc11c4af3c0d53ba8ab96e13db2af41",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Archive has no extracted runtime diagnosis.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "DESIGN.md",
+              "sha256": "ae7e9f2814ed3df542353a47a3a2a8cb5f73d0c9e3bd77c155321727ea4e1124"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_candidate_correctness.sh",
+              "sha256": "fa9b0334725d713be94fea8455caad21016e1446b3d304e9081bb4ab7fd40fc5"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_nsys_mechanism_gate.sh",
+              "sha256": "54d9025bb3d740ee872ed2b62fd248c74aa8e5f19480f3bd501ff5f199c8b856"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "DESIGN.md",
+            "sha256": "ae7e9f2814ed3df542353a47a3a2a8cb5f73d0c9e3bd77c155321727ea4e1124"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_candidate_correctness.sh",
+            "sha256": "fa9b0334725d713be94fea8455caad21016e1446b3d304e9081bb4ab7fd40fc5"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_nsys_mechanism_gate.sh",
+            "sha256": "54d9025bb3d740ee872ed2b62fd248c74aa8e5f19480f3bd501ff5f199c8b856"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r04",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "DESIGN.md",
+                "sha256": "ae7e9f2814ed3df542353a47a3a2a8cb5f73d0c9e3bd77c155321727ea4e1124"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_candidate_correctness.sh",
+                "sha256": "fa9b0334725d713be94fea8455caad21016e1446b3d304e9081bb4ab7fd40fc5"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_nsys_mechanism_gate.sh",
+                "sha256": "54d9025bb3d740ee872ed2b62fd248c74aa8e5f19480f3bd501ff5f199c8b856"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "Mechanism-gate closure remains historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "analysis.json",
+              "sha256": "ef09c710dc83342257a614a209db4846d73794bab4c4ee4c9f9b76e0b0246ee1"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "DECISION.md",
+              "sha256": "ac26fc4aa33a72df68201a0adbe11a822e590acfd917f1afa7d70d9fabf821b7"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "closure.sha256",
+              "sha256": "d56d6233ce3e152782908f447a14f74d0ad10205745305b7ba221cb73dc46939"
+            }
+          ]
+        },
+        "label_source_sha256": "dd0d7ee144e4185256881aa0c5ac46543d9cd6b0d4b11ffb9f42b8ad68cb5501"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "aggregate_timing_only",
+          "missing_execution_window",
+          "missing_node_boundaries",
+          "missing_execution_topology"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
+      "case_id": "R05",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "iter_186_iter161_vs_original_endpoint",
+          "source_manifest_sha256": "f398d7f3f294afbddf3b855381129585467183ba5ed7b501716bcee4840030c1",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Archive has no extracted runtime diagnosis.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "DESIGN.md",
+              "sha256": "60826e9e81f4fea9a498567278831193a7b29e17697bb240f9d9630d7769ce45"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_correctness.sh",
+              "sha256": "3512b479c751f2929651b0e93aa75d8984ffe319f6d6fb50d9e27b3ca4e7e9b2"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_endpoint.sh",
+              "sha256": "c2b30c2f8565c9f77f50a9a0b0f934cf31fd9a6b207950c5ed77b462d3413504"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "DESIGN.md",
+            "sha256": "60826e9e81f4fea9a498567278831193a7b29e17697bb240f9d9630d7769ce45"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_correctness.sh",
+            "sha256": "3512b479c751f2929651b0e93aa75d8984ffe319f6d6fb50d9e27b3ca4e7e9b2"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_endpoint.sh",
+            "sha256": "c2b30c2f8565c9f77f50a9a0b0f934cf31fd9a6b207950c5ed77b462d3413504"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r05",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "DESIGN.md",
+                "sha256": "60826e9e81f4fea9a498567278831193a7b29e17697bb240f9d9630d7769ce45"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_correctness.sh",
+                "sha256": "3512b479c751f2929651b0e93aa75d8984ffe319f6d6fb50d9e27b3ca4e7e9b2"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_endpoint.sh",
+                "sha256": "c2b30c2f8565c9f77f50a9a0b0f934cf31fd9a6b207950c5ed77b462d3413504"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "Endpoint conclusion remains historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "results/correctness_decision.json",
+              "sha256": "29c521b3e6dfaa7f8a466139264e60cab4cb23c6e14ef900a43912dfae684e7f"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "results/fixed_analysis.json",
+              "sha256": "e23d522eeb235dd7e77f85ade72918f2bd4fabfd93953aa4e7a68517c833cf91"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "results/tail_analysis.json",
+              "sha256": "341a624620844b4214e5fec927204254b49588e5c99960e2e0d61137891e46de"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "closure.sha256",
+              "sha256": "7f004c7f43fde5ba2a1322acb5b28d77640d2e33a3e3fddab3abaf4eef05d9d9"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "DECISION.md",
+              "sha256": "7a9ac75c815d93e6a4dbe0cf08df445413d0db614e69f5088263418e70e1dd6f"
+            }
+          ]
+        },
+        "label_source_sha256": "7871725647b56c47f16191aa31083f9d7c5641b4c6ba12a1d79fda21ea3f61b2"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "missing_predecision_timing",
+          "missing_execution_window",
+          "missing_execution_topology"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
+      "case_id": "R06",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "iter_187_stack_upgrade_iter161_adapted",
+          "source_manifest_sha256": "d4a4fc81c63168c338d4f175b8452f8502c52043c4dfb305691ab9a5a978fbf2",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "Archive has no extracted runtime diagnosis.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "DESIGN.md",
+              "sha256": "1d1d1f15a5bbb787a80dd02e6a140491bd31013801e38d7c5363c3692738f7a0"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_correctness_screen.sh",
+              "sha256": "555601bf015642748c7ab7b826ab6234c494a2cf6be73c1092580ab2443e6a76"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_exact_forced2.sh",
+              "sha256": "783a03253a206393a34f7c286309206ebb3b2578e627ca496dd06a34d0ae2804"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_endpoint_versions.sh",
+              "sha256": "1a4f1313fb6e5cd56c2e31d5ce39994583a281c0caa4537722ad66b03dacaca6"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "DESIGN.md",
+            "sha256": "1d1d1f15a5bbb787a80dd02e6a140491bd31013801e38d7c5363c3692738f7a0"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_correctness_screen.sh",
+            "sha256": "555601bf015642748c7ab7b826ab6234c494a2cf6be73c1092580ab2443e6a76"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_exact_forced2.sh",
+            "sha256": "783a03253a206393a34f7c286309206ebb3b2578e627ca496dd06a34d0ae2804"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_endpoint_versions.sh",
+            "sha256": "1a4f1313fb6e5cd56c2e31d5ce39994583a281c0caa4537722ad66b03dacaca6"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-r06",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "DESIGN.md",
+                "sha256": "1d1d1f15a5bbb787a80dd02e6a140491bd31013801e38d7c5363c3692738f7a0"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_correctness_screen.sh",
+                "sha256": "555601bf015642748c7ab7b826ab6234c494a2cf6be73c1092580ab2443e6a76"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_exact_forced2.sh",
+                "sha256": "783a03253a206393a34f7c286309206ebb3b2578e627ca496dd06a34d0ae2804"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_endpoint_versions.sh",
+                "sha256": "1a4f1313fb6e5cd56c2e31d5ce39994583a281c0caa4537722ad66b03dacaca6"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "Migration conclusion remains historical-only.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "correctness_screen_attempt2/analysis.json",
+              "sha256": "f96bc4daf655414076350fd641ae14fbf42a614242d7baf5d967c0f43008b425"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "exact_forced2_primary/analysis.json",
+              "sha256": "3ea07b9804a470e5cb81d30d8c434ab27d6e3ac1ee4fab80ddb43b9d14d66f62"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "exact_forced2_primary/evidence.sha256",
+              "sha256": "a13526a80f613f4542879b917fe2b6627432a3ed1da0a3422796c489bb464b67"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "endpoint_versions_primary/analysis.json",
+              "sha256": "54db3ea8ef12fd6f51f7c36527a1829c248115f0eeee2bcbef8dee9e68d51b2c"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "endpoint_versions_primary/evidence.sha256",
+              "sha256": "c6bb1102ddea4182808ca2d39c5a2f78ff562ca349f7c5857b0588806b3c64b3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "closure.sha256",
+              "sha256": "d38e22a2085707ada424a4a55c107e8932381f8e9c1092a566e23fe2750c9fab"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "DECISION.md",
+              "sha256": "ac1f51b7c3f05de5c946d7f57d73cf2aa3f08f1998a1d66d2ddb2602ace4b5db"
+            }
+          ]
+        },
+        "label_source_sha256": "f23136f1b4eea69a13e3ea4b7c8c5d70c9498eb68af222e60d8ca434823e7b61"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "historical_delta_not_execution_interval",
+          "label_timing_excluded",
+          "missing_execution_window",
+          "missing_execution_topology"
+        ],
+        "status": "partial",
+        "timing_provenance": []
+      },
+      "scoring_group": "triton"
+    },
+    {
+      "case_id": "K01",
+      "input_snapshot": {
+        "commit": "423217d9fda91e0c2d67e4a43bf62f96f6d104f1",
+        "relative_path": "KernelBench/level1/19_ReLU.py",
+        "repository": "ScalingIntelligence/KernelBench",
+        "source_sha256": "cbbfc9409662168ee7a5d3e7f7a59bf56e0faf9d763197e7f6a41fb5942dd63a"
+      },
+      "label": {
+        "label_status": "protocol_only"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "candidate_labels_not_frozen"
+        ],
+        "status": "protocol_only",
+        "timing_provenance": []
+      },
+      "scoring_group": "public_kernel"
+    },
+    {
+      "case_id": "K02",
+      "input_snapshot": {
+        "commit": "423217d9fda91e0c2d67e4a43bf62f96f6d104f1",
+        "relative_path": "KernelBench/level1/92_cumsum_exclusive.py",
+        "repository": "ScalingIntelligence/KernelBench",
+        "source_sha256": "ec1551c196130f5d7fae707f0750016c35b988e76aa3f1657da4347f463ced86"
+      },
+      "label": {
+        "label_status": "protocol_only"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "candidate_labels_not_frozen"
+        ],
+        "status": "protocol_only",
+        "timing_provenance": []
+      },
+      "scoring_group": "public_kernel"
+    },
+    {
+      "case_id": "counterexample-version-mismatch",
+      "input_snapshot": {
+        "counterexample": "counterexample-version-mismatch"
+      },
+      "label": {
+        "expected_behavior": "explanation_only"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "version-mismatch"
+        ],
+        "status": "rejection_only",
+        "timing_provenance": []
+      },
+      "scoring_group": "rejection_only"
+    },
+    {
+      "case_id": "counterexample-missing-evidence",
+      "input_snapshot": {
+        "counterexample": "counterexample-missing-evidence"
+      },
+      "label": {
+        "expected_decisions": [
+          "MEASURE"
+        ]
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "missing-evidence"
+        ],
+        "status": "rejection_only",
+        "timing_provenance": []
+      },
+      "scoring_group": "rejection_only"
+    },
+    {
+      "case_id": "counterexample-duplicate-mechanism",
+      "input_snapshot": {
+        "counterexample": "counterexample-duplicate-mechanism"
+      },
+      "label": {
+        "expected_candidate_count": 1
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "duplicate-mechanism"
+        ],
+        "status": "rejection_only",
+        "timing_provenance": []
+      },
+      "scoring_group": "rejection_only"
+    },
+    {
+      "case_id": "counterexample-unstable-benchmark",
+      "input_snapshot": {
+        "counterexample": "counterexample-unstable-benchmark"
+      },
+      "label": {
+        "expected_decisions": [
+          "REVIEW_REQUIRED",
+          "STOP"
+        ]
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "unstable-benchmark"
+        ],
+        "status": "rejection_only",
+        "timing_provenance": []
+      },
+      "scoring_group": "rejection_only"
+    },
+    {
+      "case_id": "X01",
+      "input_snapshot": {
+        "archive_identity_facts": {
+          "archive_case_directory": "iter_188_full_ensemble_original_vs_iter161",
+          "source_manifest_sha256": "364061d48f4d7c1716ee071d0f1a8bd9a9be8e1998c5f55e50aef11cb8b94c35",
+          "status": "incomplete",
+          "unknown_fields": [
+            "knowledge_identity",
+            "analysis_epoch",
+            "execution_map",
+            "performance_model"
+          ]
+        },
+        "diagnosis": {
+          "authority": "none",
+          "note": "The complete ensemble gate is not available as a scoreable direction replay.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "DESIGN.md",
+              "sha256": "2a19a07697b90305967e3c403ab2be408d4ede6057858cf90bf8736614f4d7e4"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "readiness_input.json",
+              "sha256": "e30c1bd3ebcfda37d1e1e86bb2310d95146351390417ea0caa0837aaa89eb6b3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_correctness.sh",
+              "sha256": "28adeb62851f3d8406240755702abf1ca48a48495761d80ae7dbde937333b1a0"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "run_original_full_ensemble_perf.sh",
+              "sha256": "8785d5cf82cbcf58ea07a86abdc8897161f10a548d811d9329e40df89f68dbe2"
+            }
+          ],
+          "status": "unavailable_for_runtime_replay"
+        },
+        "evidence_summaries": [
+          {
+            "locator": "whole_file",
+            "relative_path": "DESIGN.md",
+            "sha256": "2a19a07697b90305967e3c403ab2be408d4ede6057858cf90bf8736614f4d7e4"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "readiness_input.json",
+            "sha256": "e30c1bd3ebcfda37d1e1e86bb2310d95146351390417ea0caa0837aaa89eb6b3"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_correctness.sh",
+            "sha256": "28adeb62851f3d8406240755702abf1ca48a48495761d80ae7dbde937333b1a0"
+          },
+          {
+            "locator": "whole_file",
+            "relative_path": "run_original_full_ensemble_perf.sh",
+            "sha256": "8785d5cf82cbcf58ea07a86abdc8897161f10a548d811d9329e40df89f68dbe2"
+          }
+        ],
+        "read_only_actions": [
+          {
+            "action_id": "archive-protocol-x01",
+            "authority": "none",
+            "availability": "historical_only",
+            "kind": "archived_protocol_reference",
+            "source_refs": [
+              {
+                "locator": "whole_file",
+                "relative_path": "DESIGN.md",
+                "sha256": "2a19a07697b90305967e3c403ab2be408d4ede6057858cf90bf8736614f4d7e4"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "readiness_input.json",
+                "sha256": "e30c1bd3ebcfda37d1e1e86bb2310d95146351390417ea0caa0837aaa89eb6b3"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_correctness.sh",
+                "sha256": "28adeb62851f3d8406240755702abf1ca48a48495761d80ae7dbde937333b1a0"
+              },
+              {
+                "locator": "whole_file",
+                "relative_path": "run_original_full_ensemble_perf.sh",
+                "sha256": "8785d5cf82cbcf58ea07a86abdc8897161f10a548d811d9329e40df89f68dbe2"
+              }
+            ]
+          }
+        ]
+      },
+      "label": {
+        "historical_outcome": {
+          "authority": "archived_only",
+          "note": "Correctness and performance artifacts are retained only as rejection evidence.",
+          "source_refs": [
+            {
+              "locator": "whole_file",
+              "relative_path": "correctness_attempt3_three_repeat/analysis.json",
+              "sha256": "1de653d8dacfd078a3def9919f5abe7ce2249c96c63e37276b16c0e667688931"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "correctness_attempt3_three_repeat/closure.sha256",
+              "sha256": "4ce71734719e6e0cf4945a07761093594a92f2437b5f921e3dfda14041e42910"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "performance_attempt1_original_script/analysis.json",
+              "sha256": "277d4dca6b6736183ac827df305698056bdd044d1810a39bae265387a3d7d705"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "performance_attempt1_original_script/closure.sha256",
+              "sha256": "cb284223a3e07f5b4c2896c7bd3ccd1504381640d764cdb026fb0e4aae7c68d3"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "closure.sha256",
+              "sha256": "5f010a438c35fc16f6a403c8fbedd25ed7daa5de886f17fa07d2d62b79aa0097"
+            },
+            {
+              "locator": "whole_file",
+              "relative_path": "RESULTS.md",
+              "sha256": "50e1db4be192669e06eaefdbeb8325093bf0df0eeea0d105d79664e3a5e6db47"
+            }
+          ]
+        },
+        "label_source_sha256": "fc13bbb17c5af81a7565605c7a28ffe273cc36786224b3ed4790f99de165ca87"
+      },
+      "replay_eligibility": {
+        "reason_codes": [
+          "correctness_gate_failed",
+          "performance_result_not_promotable"
+        ],
+        "status": "rejection_only",
+        "timing_provenance": []
+      },
+      "scoring_group": "rejection_only"
+    }
+  ],
+  "cases_sha256": "fdda0e70c08377f29f4817a82130da1c825bd45edb8057dc0efe92e1fdbf9df3",
+  "schema_version": "cuda-optimizer/knowledge-replay-v1"
+}

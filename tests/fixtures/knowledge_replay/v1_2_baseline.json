@@ -1,0 +1,59 @@
+{
+  "baseline_cases_sha256": "b03045506efee66f84bfdc256e2224a94b43de6586a7d9ca6253e788ebf7584c",
+  "cases": {
+    "R01": {
+      "reason_codes": [
+        "aggregate_timing_only",
+        "missing_execution_window",
+        "missing_node_boundaries",
+        "missing_execution_topology"
+      ],
+      "status": "unavailable"
+    },
+    "R02": {
+      "reason_codes": [
+        "aggregate_timing_only",
+        "missing_execution_window",
+        "missing_node_boundaries",
+        "missing_execution_topology"
+      ],
+      "status": "unavailable"
+    },
+    "R03": {
+      "reason_codes": [
+        "missing_predecision_timing",
+        "missing_execution_window",
+        "missing_execution_topology"
+      ],
+      "status": "unavailable"
+    },
+    "R04": {
+      "reason_codes": [
+        "aggregate_timing_only",
+        "missing_execution_window",
+        "missing_node_boundaries",
+        "missing_execution_topology"
+      ],
+      "status": "unavailable"
+    },
+    "R05": {
+      "reason_codes": [
+        "missing_predecision_timing",
+        "missing_execution_window",
+        "missing_execution_topology"
+      ],
+      "status": "unavailable"
+    },
+    "R06": {
+      "reason_codes": [
+        "historical_delta_not_execution_interval",
+        "label_timing_excluded",
+        "missing_execution_window",
+        "missing_execution_topology"
+      ],
+      "status": "unavailable"
+    }
+  },
+  "schema_version": "cuda-optimizer/knowledge-replay-baseline-v1",
+  "source_cases_sha256": "fdda0e70c08377f29f4817a82130da1c825bd45edb8057dc0efe92e1fdbf9df3"
+}
