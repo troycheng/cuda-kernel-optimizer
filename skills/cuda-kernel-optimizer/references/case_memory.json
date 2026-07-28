@@ -1,0 +1,131 @@
+{
+  "schema_version": "cuda-optimizer/case-memory-v1",
+  "cases": [
+    {
+      "id": "R01",
+      "replay_case_id": "R01",
+      "replay_status": "partial",
+      "replay_case_sha256": "6fa4152bfa275ef6e1d124a2f0112e4c64981e4b041b9a7fc0e8fd354c132a89",
+      "identity_match": "unknown",
+      "predecision_evidence_sha256": "d745b28037163d8dd4318e125cb14ac310394c2bc6ab112d8a1bc3e262d6037d",
+      "knowledge_identity_sha256": null,
+      "outcome_type": "historical_outcome",
+      "source_ids": [
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "source_verified"
+    },
+    {
+      "id": "R02",
+      "replay_case_id": "R02",
+      "replay_status": "partial",
+      "replay_case_sha256": "53528b2db298081438d5edaf8d588d8aaa7aa57940b29e5f6079c998cc0c9f8b",
+      "identity_match": "unknown",
+      "predecision_evidence_sha256": "d95d4dfec67d9ea91b9028cf51f7a3e8a418702fb3f538850a4807b270a3f0f0",
+      "knowledge_identity_sha256": null,
+      "outcome_type": "historical_outcome",
+      "source_ids": [
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "source_verified"
+    },
+    {
+      "id": "R03",
+      "replay_case_id": "R03",
+      "replay_status": "partial",
+      "replay_case_sha256": "01c4377f4fcbcdc2a5c24f8f3dab7b04a608e8d821770c041bd887d0a91143f3",
+      "identity_match": "unknown",
+      "predecision_evidence_sha256": "737987bc44397580165c489d0267fe3973ba92b057a27ebcafbe341c22c99d66",
+      "knowledge_identity_sha256": null,
+      "outcome_type": "historical_outcome",
+      "source_ids": [
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "source_verified"
+    },
+    {
+      "id": "R04",
+      "replay_case_id": "R04",
+      "replay_status": "partial",
+      "replay_case_sha256": "d3214dab0fb805b8a46216a29c277f9d79486d3703e98d9ca9fb98709f46d73f",
+      "identity_match": "unknown",
+      "predecision_evidence_sha256": "62d48e8ac37eb1c7643e95ec7b877461b7b919d0535b90b0db0de4f816496b4d",
+      "knowledge_identity_sha256": null,
+      "outcome_type": "historical_outcome",
+      "source_ids": [
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "source_verified"
+    },
+    {
+      "id": "R05",
+      "replay_case_id": "R05",
+      "replay_status": "partial",
+      "replay_case_sha256": "74a060bc6a2d436428aac2b29419b340544abb44ff2747dada82d4ad6676ce5e",
+      "identity_match": "unknown",
+      "predecision_evidence_sha256": "2557f627209e39f7880fe2641c1d77f21ffc79db3f0dae31d598f577d8be1e13",
+      "knowledge_identity_sha256": null,
+      "outcome_type": "historical_outcome",
+      "source_ids": [
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "source_verified"
+    },
+    {
+      "id": "R06",
+      "replay_case_id": "R06",
+      "replay_status": "partial",
+      "replay_case_sha256": "2c8f96eb790632c2ed222db2942c9f8d93cf3a6e240619d306de8db0687f5d8b",
+      "identity_match": "unknown",
+      "predecision_evidence_sha256": "f3d35b2d90be32bd633e1d4e8dacbabc48a64ca4096a5989d9b423b01c9dd932",
+      "knowledge_identity_sha256": null,
+      "outcome_type": "historical_outcome",
+      "source_ids": [
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "source_verified"
+    },
+    {
+      "id": "X01",
+      "replay_case_id": "X01",
+      "replay_status": "rejection_only",
+      "replay_case_sha256": "4a008e68f0551106455fc17f9da95ed6d9b702ddea509eb686f528d3d18676f5",
+      "identity_match": "unknown",
+      "predecision_evidence_sha256": "0cd3faf136091c5243142678d710ef9c8ec08d235e270a5ab946bc15c7844110",
+      "knowledge_identity_sha256": null,
+      "outcome_type": "rejection",
+      "source_ids": [
+        "nvidia-nsight-systems"
+      ],
+      "content_status": "source_verified"
+    },
+    {
+      "id": "K01",
+      "replay_case_id": "K01",
+      "replay_status": "protocol_only",
+      "replay_case_sha256": "3bbb6c2466c12efbc7cda610c288dee79728d81464a19f4b33a5283bc8cd21fc",
+      "identity_match": "unknown",
+      "predecision_evidence_sha256": "6e1f3d200ed25a29a4e4a6fa9f0869e62af14d232f53c82d68aa2f9f6a52a163",
+      "knowledge_identity_sha256": null,
+      "outcome_type": "protocol_only",
+      "source_ids": [
+        "triton-tutorials"
+      ],
+      "content_status": "source_verified"
+    },
+    {
+      "id": "K02",
+      "replay_case_id": "K02",
+      "replay_status": "protocol_only",
+      "replay_case_sha256": "cd8d46598e44f002e25ae4a85525e8d04b59701074889beadea063a8b03cae8c",
+      "identity_match": "unknown",
+      "predecision_evidence_sha256": "169f8eec71a38d1798a6de3ed3080efb9ede359a64848a3d057e4d337a7e4c10",
+      "knowledge_identity_sha256": null,
+      "outcome_type": "protocol_only",
+      "source_ids": [
+        "triton-tutorials"
+      ],
+      "content_status": "source_verified"
+    }
+  ]
+}

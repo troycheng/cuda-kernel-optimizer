@@ -192,6 +192,7 @@ class InstalledSelfCheckTests(unittest.TestCase):
         self.assertIn("v2_8_nonstationarity_guard", payload["checks"])
         self.assertIn("v3_control_runtime", payload["checks"])
         self.assertIn("v3_capability_registry", payload["checks"])
+        self.assertIn("v3_1_knowledge_package", payload["checks"])
 
     def test_self_check_fails_closed_for_missing_installation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,6 +232,20 @@ class InstalledSelfCheckTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("playbook hash mismatch", result.stderr.lower())
+
+    def test_self_check_fails_closed_for_tampered_knowledge_source_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            installed = Path(tmp) / "cuda-kernel-optimizer"
+            shutil.copytree(SKILL, installed)
+            source_path = installed / "references" / "knowledge_sources.json"
+            payload = json.loads(source_path.read_text(encoding="utf-8"))
+            payload["sources"][0]["summary"] = "tampered installed summary"
+            source_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            result = _run(SELF_CHECK, "--skill-dir", str(installed))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("summary_sha256", result.stderr.lower())
 
     def test_self_check_detects_diagnostic_kind_contract_drift(self) -> None:
         def conditional(schema):

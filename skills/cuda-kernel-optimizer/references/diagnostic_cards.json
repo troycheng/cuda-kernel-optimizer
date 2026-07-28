@@ -1,118 +1,188 @@
 {
   "schema_version": "cuda-optimizer/diagnostic-cards-v1",
-  "as_of": "2026-07-20",
+  "as_of": "2026-07-28",
   "cards": [
     {
       "id": "diagnostic.cross-layer.triage",
+      "mechanism_key": "cross-layer.unattributed-critical-path",
       "status": "routing_only",
+      "content_status": "source_verified",
       "categories": ["unknown", "mixed"],
+      "execution_layers": ["cpu", "gpu", "framework", "transfer", "communication", "io", "synchronization", "idle"],
       "priority": 0,
       "match_terms": [],
+      "applies_when": ["the current evidence does not attribute the critical-path delay to one observed layer"],
       "mechanism": "The current evidence does not locate delay at one execution layer.",
       "competing_explanations": ["CPU or framework gap", "GPU kernel", "transfer, communication, I/O or idle"],
       "distinguishing_question": "Which observed lane owns the critical-path delay, and which layers were not observed?",
       "preferred_actions": ["nsys-global-timeline"],
+      "cheapest_falsifier": {
+        "action_id": "nsys-global-timeline",
+        "rationale": "Capture one bounded cross-layer timeline before selecting a layer-specific mechanism."
+      },
+      "required_evidence": ["an identity-bound timeline with explicit layer coverage and analysis-window boundaries"],
       "positive_signals": ["one layer accounts for an observed critical-path interval"],
       "counter_signals": ["coverage is missing or overlapping lanes prevent attribution"],
       "invalidators": ["timeline window is boundary ambiguous"],
       "source_ids": ["nvidia-nsight-systems"],
-      "last_reviewed": "2026-07-20"
+      "case_ids": [],
+      "last_reviewed": "2026-07-28"
     },
     {
       "id": "diagnostic.framework.launch-gaps",
+      "mechanism_key": "framework.launch-gaps",
       "status": "routing_only",
+      "content_status": "source_verified",
       "categories": ["framework"],
+      "execution_layers": ["cpu", "framework", "gpu", "synchronization", "idle"],
       "priority": 1,
       "match_terms": ["cudalaunchkernel", "launch", "cuda graph", "short kernel"],
+      "applies_when": ["repeated CPU runtime or framework intervals precede short GPU kernels in the same identity-bound window"],
       "mechanism": "CPU submission, synchronization or graph breaks leave gaps between short GPU kernels.",
       "competing_explanations": ["kernel execution dominates", "input starvation", "profiler overhead"],
       "distinguishing_question": "Do CPU launch or sync intervals explain GPU gaps after profiler overhead is excluded?",
       "preferred_actions": ["pytorch-operator-trace", "nsys-os-runtime-slice"],
+      "cheapest_falsifier": {
+        "action_id": "pytorch-operator-trace",
+        "rationale": "Check operator, graph-break, and launch attribution before requesting a broader system trace."
+      },
+      "required_evidence": ["CPU runtime or operator events correlated with the affected GPU intervals", "a stable workload shape and profiler identity"],
       "positive_signals": ["repeated CPU-side gaps precede short kernels", "graph or compile breaks align with gaps"],
       "counter_signals": ["GPU kernels occupy the critical path", "gaps disappear without instrumentation"],
       "invalidators": ["trace lacks CPU runtime events", "workload shape distribution changed"],
       "source_ids": ["nvidia-nsight-systems", "pytorch-compile-profiling"],
-      "last_reviewed": "2026-07-20"
+      "case_ids": [],
+      "last_reviewed": "2026-07-28"
     },
     {
       "id": "diagnostic.kernel.resource-or-memory",
+      "mechanism_key": "kernel.resource-or-memory",
       "status": "routing_only",
+      "content_status": "source_verified",
       "categories": ["kernel"],
+      "execution_layers": ["gpu"],
       "priority": 1,
       "match_terms": ["kernel", "gemm", "attention", "norm", "rope", "moe"],
+      "applies_when": ["an identity-stable GPU kernel occupies enough observed critical-path time to clear the local minimum-effect floor"],
       "mechanism": "A hot kernel may be limited by instruction throughput, memory traffic, latency hiding or resource pressure.",
       "competing_explanations": ["launch-bound workload", "unrepresentative shape", "replay perturbation"],
       "distinguishing_question": "Which small counter set separates compute, memory, latency and occupancy explanations for the hot range?",
       "preferred_actions": ["ncu-targeted-kernel", "compiler-sass-inspection"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Inspect generated code and static resources before paying for counter replay."
+      },
+      "required_evidence": ["an identity-bound hot-kernel interval", "stable kernel identity and generated-code evidence"],
       "positive_signals": ["targeted counters and generated code agree on one mechanism"],
       "counter_signals": ["kernel has low end-to-end time share", "counter values vary across replay passes"],
       "invalidators": ["NCU replay is nondeterministic", "target kernel identity changed"],
       "source_ids": ["nvidia-nsight-compute", "nvidia-cuda-best-practices"],
-      "last_reviewed": "2026-07-20"
+      "case_ids": [],
+      "last_reviewed": "2026-07-28"
     },
     {
       "id": "diagnostic.cpu-data.starvation",
+      "mechanism_key": "cpu-data.input-starvation",
       "status": "routing_only",
+      "content_status": "source_verified",
       "categories": ["cpu_data"],
+      "execution_layers": ["cpu", "framework", "io", "idle"],
       "priority": 1,
       "match_terms": ["data", "preprocess", "dataloader", "queue"],
+      "applies_when": ["GPU idle intervals align with input preparation, data loading, or host queue work"],
       "mechanism": "Input preparation or queueing prevents representative work from reaching the GPU.",
       "competing_explanations": ["framework launch gap", "I/O wait", "intentional request sparsity"],
       "distinguishing_question": "Does a bounded preloaded-input intervention remove the idle interval without changing inference work?",
       "preferred_actions": ["pytorch-operator-trace"],
+      "cheapest_falsifier": {
+        "action_id": "pytorch-operator-trace",
+        "rationale": "Attribute host input work and the corresponding GPU idle interval in one bounded trace."
+      },
+      "required_evidence": ["host input or queue intervals correlated with GPU idle time", "unchanged representative input shapes and request distribution"],
       "positive_signals": ["preloaded input removes the same GPU idle interval"],
       "counter_signals": ["idle persists with input preparation bypassed"],
       "invalidators": ["preloaded inputs change shape or request distribution"],
       "source_ids": ["pytorch-profiler"],
-      "last_reviewed": "2026-07-20"
+      "case_ids": [],
+      "last_reviewed": "2026-07-28"
     },
     {
       "id": "diagnostic.transfer.h2d",
+      "mechanism_key": "transfer.host-device-serialization",
       "status": "routing_only",
+      "content_status": "source_verified",
       "categories": ["transfer"],
+      "execution_layers": ["transfer", "gpu", "synchronization"],
       "priority": 1,
       "match_terms": ["memcpy", "h2d", "dtoh", "transfer"],
+      "applies_when": ["host-device copy intervals are correlated with the workload and overlap is absent or incomplete"],
       "mechanism": "Host-device copies serialize with compute or move more bytes than the workload requires.",
       "competing_explanations": ["input pipeline wait", "synchronization", "measurement window truncation"],
       "distinguishing_question": "What share of the critical path is attributable to copies, and is overlap actually possible?",
       "preferred_actions": ["nsys-os-runtime-slice"],
+      "cheapest_falsifier": {
+        "action_id": "nsys-os-runtime-slice",
+        "rationale": "Measure copy, runtime, and synchronization intervals in the same contained timeline slice."
+      },
+      "required_evidence": ["copy intervals with byte counts and correlation identifiers", "critical-path overlap accounting"],
       "positive_signals": ["copy intervals serialize with the hot path and byte counts match the input"],
       "counter_signals": ["copies overlap compute or are outside the critical path"],
       "invalidators": ["copy and kernel correlation IDs are unavailable"],
       "source_ids": ["nvidia-nsight-systems", "nvidia-cuda-best-practices"],
-      "last_reviewed": "2026-07-20"
+      "case_ids": [],
+      "last_reviewed": "2026-07-28"
     },
     {
       "id": "diagnostic.communication.collective",
+      "mechanism_key": "communication.collective-critical-path",
       "status": "routing_only",
+      "content_status": "source_verified",
       "categories": ["communication"],
+      "execution_layers": ["communication", "gpu", "synchronization"],
       "priority": 1,
       "match_terms": ["nccl", "allreduce", "alltoall", "collective"],
+      "applies_when": ["a collective or rank-arrival interval lies on the observed distributed critical path"],
       "mechanism": "Collective duration, rank imbalance or missing overlap limits the distributed critical path.",
       "competing_explanations": ["kernel imbalance", "CPU scheduling", "topology limitation"],
       "distinguishing_question": "Do per-rank traces show the same collective delay and the same arrival skew?",
       "preferred_actions": ["nsys-os-runtime-slice"],
+      "cheapest_falsifier": {
+        "action_id": "nsys-os-runtime-slice",
+        "rationale": "Compare aligned rank arrival, collective, and upstream intervals before changing communication."
+      },
+      "required_evidence": ["aligned per-rank collective and arrival intervals", "stable rank, topology, and workload identities"],
       "positive_signals": ["collective is on the critical path across ranks"],
       "counter_signals": ["one rank arrives late because of upstream compute"],
       "invalidators": ["rank clocks or trace windows are not aligned"],
       "source_ids": ["nvidia-nsight-systems"],
-      "last_reviewed": "2026-07-20"
+      "case_ids": [],
+      "last_reviewed": "2026-07-28"
     },
     {
       "id": "diagnostic.io.request-path",
+      "mechanism_key": "io.request-path",
       "status": "routing_only",
+      "content_status": "source_verified",
       "categories": ["io", "environment"],
+      "execution_layers": ["io", "cpu", "idle"],
       "priority": 1,
       "match_terms": ["io", "serialize", "request", "storage", "socket"],
+      "applies_when": ["endpoint latency remains outside accounted GPU and preprocessing intervals"],
       "mechanism": "Request handling, serialization, storage or host state dominates latency outside GPU work.",
       "competing_explanations": ["CPU preprocessing", "queueing policy", "shared-host noise"],
       "distinguishing_question": "Which bounded request-path interval remains after GPU and preprocessing time are removed?",
       "preferred_actions": ["nsys-os-runtime-slice"],
+      "cheapest_falsifier": {
+        "action_id": "nsys-os-runtime-slice",
+        "rationale": "Bound the request-path interval while retaining GPU and host-runtime correlation."
+      },
+      "required_evidence": ["request-path and host-runtime intervals in the same workload window", "an unchanged request corpus and load regime"],
       "positive_signals": ["component timing explains the endpoint latency gap"],
       "counter_signals": ["request-path time is overlapped or outside the critical path"],
       "invalidators": ["request corpus or load changed between observations"],
       "source_ids": ["nvidia-nsight-systems"],
-      "last_reviewed": "2026-07-20"
+      "case_ids": [],
+      "last_reviewed": "2026-07-28"
     }
   ]
 }

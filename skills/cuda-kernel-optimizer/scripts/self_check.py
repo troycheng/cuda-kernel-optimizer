@@ -653,6 +653,19 @@ def check_installation(skill_dir: Path | str) -> dict:
     _validate_active_diagnosis_schema_contract(root)
     checks.append("v3_1_active_diagnosis")
 
+    knowledge = ModuleType("installed_diagnostic_knowledge")
+    knowledge.__file__ = str(root / "scripts" / "diagnostic_knowledge.py")
+    exec(
+        compile(
+            _read_safe_file(root, Path("scripts") / "diagnostic_knowledge.py"),
+            knowledge.__file__,
+            "exec",
+        ),
+        knowledge.__dict__,
+    )
+    knowledge.validate_knowledge_package(root / "references")
+    checks.append("v3_1_knowledge_package")
+
     return {
         "schema_version": "cuda-evidence/self-check-v1",
         "status": "PASS",
