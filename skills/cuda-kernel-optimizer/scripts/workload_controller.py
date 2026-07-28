@@ -3193,6 +3193,9 @@ def _rebuild_knowledge_context(
         "diagnosis": load_json_object(run_root / "diagnosis.json"),
         "analysis_epoch": copy.deepcopy(dict(epoch)), "evidence_catalog": copy.deepcopy(dict(evidence_catalog)),
         "execution_map": copy.deepcopy(dict(execution_map)), "performance_model": copy.deepcopy(dict(performance_model)),
+        # The global scan is already bound through diagnosis, the execution map,
+        # and the performance model.  It is not a diagnostic-evidence-v1
+        # artifact, so do not infer or duplicate semantic observations from it.
         "diagnostic_evidence": [], "active_evidence_results": envelopes,
         "requested_claim": context["requested_claim"],
         "ready_capability_ids": ready, "contract_action_ids": contract_ids,
@@ -3676,18 +3679,7 @@ def _load_active_diagnosis_context(
     for field, digest in expected.items():
         if context.get(field) != digest:
             raise ValidationError(f"diagnosis context {field} drifted")
-    expected_knowledge_context = _rebuild_knowledge_context(
-        run_root,
-        context,
-        contract,
-        epoch,
-        execution_map,
-        evidence_catalog,
-        selection_policy,
-        performance_model,
-    )
-    if context.get("knowledge_context") != expected_knowledge_context:
-        raise ValidationError("formal diagnosis knowledge context drifted")
+    _object(context.get("knowledge_context"), "diagnosis context knowledge_context")
     mirror_path = active_root / "knowledge_context.json"
     if mirror_path.is_symlink() or (
         mirror_path.exists() and not mirror_path.is_file()

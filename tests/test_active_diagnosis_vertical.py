@@ -3065,7 +3065,14 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             ledger_before_repair = (
                 helper.controller._verify_active_diagnosis_ledger(run_dir)
             )
-            repaired_state = helper.controller.resume_run(run_dir)
+            with mock.patch.object(
+                helper.controller,
+                "_load_diagnostic_knowledge_module",
+                side_effect=AssertionError(
+                    "state-bound mirror repair must not re-query the knowledge package"
+                ),
+            ):
+                repaired_state = helper.controller.resume_run(run_dir)
             self.assertEqual(repaired_state, state_before_repair)
             self.assertEqual(
                 helper.controller._verify_active_diagnosis_ledger(run_dir),
