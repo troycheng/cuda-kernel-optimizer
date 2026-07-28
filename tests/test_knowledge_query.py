@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+from tests.test_diagnostic_knowledge import _frozen_inputs
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +24,28 @@ def load_module():
 
 
 class KnowledgeQueryTests(unittest.TestCase):
+    def test_query_frozen_delegates_to_identity_bound_context(self) -> None:
+        frozen = _frozen_inputs()
+        result = load_module().query_frozen(frozen, limit=3)
+        self.assertEqual(result["promotion_authority"], "none")
+        self.assertEqual(result["candidates"], [])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frozen.json"
+            path.write_text(json.dumps(frozen), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--frozen-input",
+                    str(path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["promotion_authority"], "none")
+
     def test_query_returns_small_arch_compatible_method_set(self) -> None:
         result = load_module().query(arch="sm_120", axis="compute", limit=3)
         self.assertLessEqual(len(result["methods"]), 3)

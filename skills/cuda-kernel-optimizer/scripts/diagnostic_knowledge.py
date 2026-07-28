@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import datetime
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -31,6 +32,7 @@ _LAYERS = {
     "synchronization",
     "idle",
 }
+_REQUESTED_CLAIMS = {"kernel", "workload", "serving"}
 _DIAGNOSTIC_PRODUCERS = {
     "nsys_timeline": "nsys-timeline-adapter",
     "pytorch_profile": "pytorch-profile-adapter",
@@ -64,6 +66,18 @@ _ACTIVE_ACTIONS = {
     "nsys-os-runtime-slice": "os_runtime",
     "pytorch-operator-trace": "framework_trace",
 }
+_KNOWLEDGE_IDENTITY_FIELDS = {
+    "schema_version",
+    "gpu_architecture",
+    "driver_version",
+    "cuda_runtime_version",
+    "framework_versions",
+    "compiler_versions",
+    "profiler_versions",
+    "workload_contract_sha256",
+    "source_sha256",
+    "environment_sha256",
+}
 
 
 def _closed(value: object, fields: set[str], label: str) -> dict:
@@ -96,6 +110,19 @@ def _strings(
     if allowed is not None and not set(value).issubset(allowed):
         raise ValueError(f"{label} contains unsupported values")
     return value
+
+
+def _canonical_strings(
+    value: object,
+    label: str,
+    *,
+    nonempty: bool = True,
+    allowed: set[str] | None = None,
+) -> list[str]:
+    items = _strings(value, label, nonempty=nonempty, allowed=allowed)
+    if items != sorted(items):
+        raise ValueError(f"{label} must be sorted")
+    return items
 
 
 def _iso_date(value: object, label: str) -> datetime.date:
@@ -193,6 +220,68 @@ def _canonical_sha256(value: object) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _load_sibling(filename: str, name: str):
+    path = Path(__file__).with_name(filename)
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load knowledge dependency: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _validate_identity_fact(value: object, label: str) -> dict:
+    fact = _closed(
+        value,
+        {"value", "status", "source_kind", "source_sha256"},
+        label,
+    )
+    if fact["status"] == "verified":
+        _text(fact["value"], f"{label}.value")
+        if fact["source_kind"] == "unknown":
+            raise ValueError(f"{label}.source_kind cannot be unknown when verified")
+        _text(fact["source_kind"], f"{label}.source_kind")
+        _sha256(fact["source_sha256"], f"{label}.source_sha256")
+    elif fact["status"] == "unknown":
+        if (
+            fact["value"] is not None
+            or fact["source_kind"] != "unknown"
+            or fact["source_sha256"] is not None
+        ):
+            raise ValueError(f"{label} unknown fact must not invent an identity")
+    else:
+        raise ValueError(f"{label}.status is unsupported")
+    return copy.deepcopy(fact)
+
+
+def _validate_knowledge_identity(value: object, epoch: Mapping[str, object]) -> dict:
+    identity = _closed(value, _KNOWLEDGE_IDENTITY_FIELDS, "knowledge_identity")
+    if identity["schema_version"] != "cuda-optimizer/knowledge-identity-v1":
+        raise ValueError("knowledge_identity schema is unsupported")
+    for field in ("gpu_architecture", "driver_version", "cuda_runtime_version"):
+        _validate_identity_fact(identity[field], f"knowledge_identity.{field}")
+    for group in ("framework_versions", "compiler_versions", "profiler_versions"):
+        versions = identity[group]
+        if type(versions) is not dict:
+            raise ValueError(f"knowledge_identity.{group} must be an object")
+        for name, fact in versions.items():
+            _observation_identifier(name, f"knowledge_identity.{group} key")
+            _validate_identity_fact(
+                fact, f"knowledge_identity.{group}.{name}"
+            )
+    bindings = {
+        "workload_contract_sha256": "workload_contract_sha256",
+        "source_sha256": "source_sha256",
+        "environment_sha256": "environment_sha256",
+    }
+    epoch_identities = epoch["identities"]
+    for field, epoch_field in bindings.items():
+        digest = _sha256(identity[field], f"knowledge_identity.{field}")
+        if digest != epoch_identities[epoch_field]:
+            raise ValueError(f"knowledge_identity {field} does not match epoch")
+    return copy.deepcopy(identity)
 
 
 def _observation_identifier(value: object, label: str) -> str:
@@ -297,6 +386,48 @@ def _validate_observation_rules(value: object, label: str) -> None:
                     f"{seen_match_keys[match_key]}"
                 )
             seen_match_keys[match_key] = f"{label}.{group}"
+
+
+def _validate_identity_constraints(value: object, label: str) -> None:
+    constraints = _closed(
+        value,
+        {
+            "match",
+            "gpu_architecture",
+            "driver_version",
+            "cuda_runtime_version",
+            "framework_versions",
+            "compiler_versions",
+            "profiler_versions",
+        },
+        label,
+    )
+    if constraints["match"] != "exact_only":
+        raise ValueError(f"{label}.match must be exact_only")
+    for field in (
+        "gpu_architecture",
+        "driver_version",
+        "cuda_runtime_version",
+    ):
+        _strings(
+            constraints[field],
+            f"{label}.{field}",
+            nonempty=False,
+        )
+    for field in (
+        "framework_versions",
+        "compiler_versions",
+        "profiler_versions",
+    ):
+        versions = constraints[field]
+        if type(versions) is not dict:
+            raise ValueError(f"{label}.{field} must be an object")
+        for component, allowed_values in versions.items():
+            _observation_identifier(component, f"{label}.{field} component")
+            _strings(
+                allowed_values,
+                f"{label}.{field}.{component}",
+            )
 
 
 def normalize_observations(
@@ -530,6 +661,696 @@ def normalize_observations(
     ]
 
 
+def _diagnosis_categories(value: object) -> list[str]:
+    if type(value) is not dict:
+        raise ValueError("diagnosis must be an object")
+    categories = []
+    primary = value.get("primary_category")
+    if isinstance(primary, str):
+        categories.append(primary)
+    ranked = value.get("ranked_categories")
+    if type(ranked) is not list:
+        raise ValueError("diagnosis.ranked_categories must be an array")
+    for index, item in enumerate(ranked):
+        if type(item) is not dict or not isinstance(item.get("category"), str):
+            raise ValueError(f"diagnosis.ranked_categories[{index}] is invalid")
+        categories.append(item["category"])
+    return list(dict.fromkeys(categories or ["unknown"]))
+
+
+def _identity_constraint_result(
+    constraints: Mapping[str, object], identity: Mapping[str, object]
+) -> tuple[str, list[str]]:
+    unknown = []
+    mismatch = []
+    for field in ("gpu_architecture", "driver_version", "cuda_runtime_version"):
+        allowed = constraints[field]
+        if not allowed:
+            continue
+        fact = identity[field]
+        if fact["status"] != "verified":
+            unknown.append(field)
+        elif fact["value"] not in allowed:
+            mismatch.append(field)
+    for group in ("framework_versions", "compiler_versions", "profiler_versions"):
+        for component, allowed in constraints[group].items():
+            label = f"{group}.{component}"
+            fact = identity[group].get(component)
+            if fact is None or fact["status"] != "verified":
+                unknown.append(label)
+            elif fact["value"] not in allowed:
+                mismatch.append(label)
+    if mismatch:
+        return "mismatch", sorted(mismatch)
+    if unknown:
+        return "unknown", sorted(unknown)
+    return "matched", []
+
+
+def _rule_matches(rule: Mapping[str, object], observation: Mapping[str, object]) -> bool:
+    if (
+        observation["semantic_id"] != rule["semantic_id"]
+        or observation["status"] not in rule["statuses"]
+        or observation["unit"] != rule["unit"]
+        or observation["aggregation"] != rule["aggregation"]
+        or not set(rule["scope_all"]).issubset(observation["scope"])
+    ):
+        return False
+    comparison = rule["comparison"]
+    if comparison is None:
+        return True
+    value = observation["value"]
+    if type(value) not in {int, float} or not math.isfinite(value):
+        return False
+    threshold = comparison["value"]
+    return {
+        "eq": value == threshold,
+        "lt": value < threshold,
+        "lte": value <= threshold,
+        "gt": value > threshold,
+        "gte": value >= threshold,
+    }[comparison["op"]]
+
+
+def _rule_evidence(
+    rules: Sequence[Mapping[str, object]],
+    observations: Sequence[Mapping[str, object]],
+) -> tuple[list[dict], list[dict]]:
+    matched = []
+    missing = []
+    for rule in rules:
+        hits = [item for item in observations if _rule_matches(rule, item)]
+        if hits:
+            matched.extend(
+                {
+                    "semantic_id": item["semantic_id"],
+                    "source_digest": item["source_digest"],
+                }
+                for item in hits
+            )
+        else:
+            missing.append({"semantic_id": rule["semantic_id"]})
+    unique_matches = {
+        (item["semantic_id"], item["source_digest"]): item for item in matched
+    }
+    unique_missing = {item["semantic_id"]: item for item in missing}
+    return (
+        [unique_matches[key] for key in sorted(unique_matches)],
+        [unique_missing[key] for key in sorted(unique_missing)],
+    )
+
+
+def _dominates(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
+    left_dims = left["_dimensions"]
+    right_dims = right["_dimensions"]
+    no_worse = (
+        left_dims["benefit"] >= right_dims["benefit"]
+        and left_dims["grade"] >= right_dims["grade"]
+        and left_dims["cost"] <= right_dims["cost"]
+        and left_dims["risk"] <= right_dims["risk"]
+    )
+    strictly_better = (
+        left_dims["benefit"] > right_dims["benefit"]
+        or left_dims["grade"] > right_dims["grade"]
+        or left_dims["cost"] < right_dims["cost"]
+        or left_dims["risk"] < right_dims["risk"]
+    )
+    return no_worse and strictly_better
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _validate_action_timing_estimates(value: object) -> None:
+    if type(value) is not dict:
+        raise ValueError("performance_model.action_timing_estimates must be an object")
+    for action_id, raw in value.items():
+        _observation_identifier(
+            action_id, "performance_model.action_timing_estimates action_id"
+        )
+        estimate = _closed(
+            raw,
+            {"sample_count", "p50_seconds", "p90_seconds", "basis"},
+            f"performance_model.action_timing_estimates.{action_id}",
+        )
+        if (
+            type(estimate["sample_count"]) is not int
+            or isinstance(estimate["sample_count"], bool)
+            or estimate["sample_count"] < 1
+        ):
+            raise ValueError(f"action timing {action_id} sample_count is invalid")
+        for field in ("p50_seconds", "p90_seconds"):
+            if (
+                type(estimate[field]) not in {int, float}
+                or not math.isfinite(estimate[field])
+                or estimate[field] <= 0
+            ):
+                raise ValueError(f"action timing {action_id} {field} is invalid")
+        if estimate["p90_seconds"] < estimate["p50_seconds"]:
+            raise ValueError(f"action timing {action_id} percentile order is invalid")
+        if estimate["basis"] != "identity_matched_history":
+            raise ValueError(f"action timing {action_id} basis is unsupported")
+
+
+def build_knowledge_context(
+    frozen_inputs: Mapping[str, object],
+    *,
+    limit: int = 3,
+    max_bytes: int = 12 * 1024,
+) -> dict:
+    """Return a deterministic, identity-bound, evidence-only knowledge context."""
+    if type(frozen_inputs) is not dict:
+        raise ValueError("frozen_inputs must be an object")
+    fields = {
+        "knowledge_identity",
+        "diagnosis",
+        "analysis_epoch",
+        "evidence_catalog",
+        "execution_map",
+        "performance_model",
+        "diagnostic_evidence",
+        "active_evidence_results",
+        "requested_claim",
+        "ready_capability_ids",
+        "contract_action_ids",
+        "available_actions",
+        "closed_mechanism_keys",
+        "candidate_history",
+    }
+    _closed(frozen_inputs, fields, "frozen_inputs")
+    if type(limit) is not int or isinstance(limit, bool) or not 1 <= limit <= 3:
+        raise ValueError("limit must be between 1 and 3")
+    if (
+        type(max_bytes) is not int
+        or isinstance(max_bytes, bool)
+        or max_bytes < 1024
+    ):
+        raise ValueError("max_bytes must be an integer of at least 1024")
+
+    epoch_module = _load_sibling(
+        "analysis_epoch.py", "cuda_optimizer_epoch_knowledge_runtime"
+    )
+    map_module = _load_sibling(
+        "execution_map.py", "cuda_optimizer_map_knowledge_runtime"
+    )
+    model_module = _load_sibling(
+        "performance_model.py", "cuda_optimizer_model_knowledge_runtime"
+    )
+    hypothesis_module = _load_sibling(
+        "hypothesis_space.py", "cuda_optimizer_hypothesis_knowledge_runtime"
+    )
+    epoch = epoch_module.validate_epoch(frozen_inputs["analysis_epoch"])
+    identity = _validate_knowledge_identity(
+        frozen_inputs["knowledge_identity"], epoch
+    )
+    identity_sha = _canonical_sha256(identity)
+    validated_map = map_module.validate_execution_map(
+        frozen_inputs["execution_map"],
+        epoch=epoch,
+        evidence_catalog=frozen_inputs["evidence_catalog"],
+    )["execution_map"]
+    map_module.execution_map_digest(
+        validated_map,
+        epoch=epoch,
+        evidence_catalog=frozen_inputs["evidence_catalog"],
+    )
+    supplied_model = frozen_inputs["performance_model"]
+    if type(supplied_model) is not dict:
+        raise ValueError("performance_model must be an object")
+    minimum_effect = supplied_model.get("minimum_effect_us")
+    rebuilt_model = model_module.build_performance_model(
+        validated_map,
+        minimum_effect_us=minimum_effect,
+    )
+    _validate_action_timing_estimates(
+        supplied_model.get("action_timing_estimates")
+    )
+    comparable_model = copy.deepcopy(supplied_model)
+    comparable_model["action_timing_estimates"] = {}
+    if _canonical_sha256(rebuilt_model) != _canonical_sha256(comparable_model):
+        raise ValueError("performance_model does not match execution_map")
+    performance_model_sha = _canonical_sha256(supplied_model)
+
+    package = validate_knowledge_package(REFERENCE_DIR)
+    source_document = _read_reference(REFERENCE_DIR, "knowledge_sources.json")
+    card_document = _read_reference(REFERENCE_DIR, "diagnostic_cards.json")
+    case_document = _read_reference(REFERENCE_DIR, "case_memory.json")
+    action_document = _read_reference(
+        REFERENCE_DIR, "evidence_action_catalog.json"
+    )
+    reread_package = {
+        "sources": source_document,
+        "cards": card_document,
+        "cases": case_document,
+        "actions": action_document,
+    }
+    if _canonical_sha256(reread_package) != package["content_sha256"]:
+        raise ValueError("knowledge package changed after validation")
+    cards = card_document["cards"]
+    cases = {item["id"]: item for item in case_document["cases"]}
+    actions = {item["action_id"]: item for item in action_document["actions"]}
+    eligible_card_ids = set(package["runtime_candidate_card_ids"])
+
+    requested_claim = _text(
+        frozen_inputs["requested_claim"], "frozen_inputs.requested_claim"
+    )
+    if requested_claim not in _REQUESTED_CLAIMS:
+        raise ValueError("frozen_inputs.requested_claim is unsupported")
+    ready_capability_ids = set(
+        _canonical_strings(
+            frozen_inputs["ready_capability_ids"],
+            "frozen_inputs.ready_capability_ids",
+            nonempty=False,
+        )
+    )
+    contract_action_ids = set(
+        _canonical_strings(
+            frozen_inputs["contract_action_ids"],
+            "frozen_inputs.contract_action_ids",
+            nonempty=False,
+        )
+    )
+    unknown_contract_actions = contract_action_ids - set(actions)
+    if unknown_contract_actions:
+        raise ValueError(
+            f"unknown contract action ids: {sorted(unknown_contract_actions)}"
+        )
+    available_actions = _canonical_strings(
+        frozen_inputs["available_actions"],
+        "frozen_inputs.available_actions",
+        nonempty=False,
+    )
+    available_action_ids = set(available_actions)
+    unknown_available_actions = available_action_ids - set(actions)
+    if unknown_available_actions:
+        raise ValueError(
+            f"unknown available action ids: {sorted(unknown_available_actions)}"
+        )
+    derived_available_actions = sorted(
+        action_id
+        for action_id, action in actions.items()
+        if action_id in contract_action_ids
+        and action["control_scope"] == "read_only"
+        and set(action["required_capability_ids"]).issubset(ready_capability_ids)
+    )
+    if available_actions != derived_available_actions:
+        raise ValueError("available_actions must equal derived availability")
+    closed_keys = {
+        hypothesis_module.canonical_mechanism_key(item)
+        for item in _strings(
+            frozen_inputs["closed_mechanism_keys"],
+            "frozen_inputs.closed_mechanism_keys",
+            nonempty=False,
+        )
+    }
+    history = frozen_inputs["candidate_history"]
+    if type(history) is not list:
+        raise ValueError("candidate_history must be an array")
+    for index, item in enumerate(history):
+        item = _closed(
+            item,
+            {
+                "hypothesis_id",
+                "action_id",
+                "implementation_status",
+                "identity_digest",
+                "elapsed_seconds",
+                "candidate_digest",
+                "decision_digest",
+                "failure_reason",
+            },
+            f"candidate_history[{index}]",
+        )
+        for field in ("hypothesis_id", "action_id", "failure_reason"):
+            _observation_identifier(
+                item[field], f"candidate_history[{index}].{field}"
+            )
+        if item["implementation_status"] != "failed":
+            raise ValueError(
+                f"candidate_history[{index}].implementation_status must be failed"
+            )
+        for field in ("identity_digest", "candidate_digest", "decision_digest"):
+            _sha256(item[field], f"candidate_history[{index}].{field}")
+        elapsed = item["elapsed_seconds"]
+        if (
+            type(elapsed) not in {int, float}
+            or not math.isfinite(elapsed)
+            or elapsed < 0
+        ):
+            raise ValueError(
+                f"candidate_history[{index}].elapsed_seconds is invalid"
+            )
+
+    observations = normalize_observations(
+        diagnostic_evidence=frozen_inputs["diagnostic_evidence"],
+        active_evidence_results=frozen_inputs["active_evidence_results"],
+    )
+    evidence_sha = _canonical_sha256(observations)
+    categories = _diagnosis_categories(frozen_inputs["diagnosis"])
+    observed_layers = {
+        item["layer"]
+        for item in validated_map["coverage"]
+        if item["status"] == "observed"
+    }
+    layer_directions = {
+        item["layer"]: item for item in rebuilt_model["layer_directions"]
+    }
+    cost_rank = {"low": 0, "medium": 1, "high": 2}
+    risk_rank = {"none": 0, "low": 1, "medium": 2, "high": 3}
+    filtered_counts = {
+        "category_mismatch": 0,
+        "task_mismatch": 0,
+        "identity_mismatch": 0,
+        "identity_unverified": 0,
+        "closed_mechanism": 0,
+        "execution_layer_unobserved": 0,
+        "invalidator_observed": 0,
+        "content_status": 0,
+        "read_only_action_unavailable": 0,
+        "below_minimum_effect": 0,
+        "canonical_duplicate": 0,
+        "pareto_dominated": 0,
+        "byte_trimmed": 0,
+    }
+    explanations = []
+    rejections = []
+    records = []
+
+    for card in cards:
+        canonical_key = hypothesis_module.canonical_mechanism_key(
+            card["mechanism_key"]
+        )
+        base = {"card_id": card["id"], "mechanism_key": canonical_key}
+        if canonical_key in closed_keys:
+            rejections.append({**base, "reason": "closed_mechanism", "details": []})
+            filtered_counts["closed_mechanism"] += 1
+            continue
+        if not set(card["categories"]) & set(categories):
+            rejections.append({**base, "reason": "category_mismatch", "details": []})
+            filtered_counts["category_mismatch"] += 1
+            continue
+        if (
+            card["requested_claims"]
+            and requested_claim not in card["requested_claims"]
+        ):
+            rejections.append(
+                {
+                    **base,
+                    "reason": "task_mismatch",
+                    "details": [requested_claim],
+                }
+            )
+            filtered_counts["task_mismatch"] += 1
+            continue
+        identity_status, identity_details = _identity_constraint_result(
+            card["identity_constraints"], identity
+        )
+        if identity_status == "mismatch":
+            rejections.append(
+                {**base, "reason": "identity_mismatch", "details": identity_details}
+            )
+            filtered_counts["identity_mismatch"] += 1
+            continue
+        if identity_status == "unknown":
+            explanations.append(
+                {
+                    **base,
+                    "reason": "identity_unverified",
+                    "details": identity_details,
+                }
+            )
+            filtered_counts["identity_unverified"] += 1
+            continue
+        if not set(card["execution_layers"]) & observed_layers:
+            rejections.append(
+                {
+                    **base,
+                    "reason": "execution_layer_unobserved",
+                    "details": [],
+                }
+            )
+            filtered_counts["execution_layer_unobserved"] += 1
+            continue
+        positive, missing = _rule_evidence(
+            card["observation_rules"]["positive"], observations
+        )
+        counter, _ = _rule_evidence(
+            card["observation_rules"]["counter"], observations
+        )
+        invalidators, _ = _rule_evidence(
+            card["observation_rules"]["invalidators"], observations
+        )
+        if invalidators:
+            rejections.append(
+                {
+                    **base,
+                    "reason": "invalidator_observed",
+                    "details": sorted(
+                        {item["semantic_id"] for item in invalidators}
+                    ),
+                }
+            )
+            filtered_counts["invalidator_observed"] += 1
+            continue
+        action_id = card["cheapest_falsifier"]["action_id"]
+        action = actions[action_id]
+        action_available = (
+            action_id in available_action_ids
+            and action["control_scope"] == "read_only"
+        )
+        candidate_eligible = card["id"] in eligible_card_ids
+        if not candidate_eligible:
+            record_kind = "explanation"
+            explanation_reason = "content_status"
+            explanation_details = [card["content_status"]]
+        elif not action_available:
+            record_kind = "explanation"
+            explanation_reason = "read_only_action_unavailable"
+            explanation_details = [action_id]
+        else:
+            record_kind = "candidate"
+            explanation_reason = None
+            explanation_details = []
+
+        card_cases = [cases[case_id] for case_id in card["case_ids"]]
+        exact_case_ids = sorted(
+            item["id"]
+            for item in card_cases
+            if item["identity_match"] == "exact"
+            and item["knowledge_identity_sha256"] == identity_sha
+            and item["content_status"] == "locally_measured"
+        )
+        analogous_case_ids = sorted(
+            item["id"] for item in card_cases if item["identity_match"] == "analogous"
+        )
+        if positive and exact_case_ids:
+            grade, grade_name = 4, "current_local_exact_case"
+        elif positive:
+            grade, grade_name = 3, "current_local"
+        elif missing:
+            grade, grade_name = 2, "plausible_missing_observation"
+        else:
+            grade, grade_name = 1, "source_or_analogous_case_only"
+        layer_options = [
+            layer_directions[layer]
+            for layer in card["execution_layers"]
+            if layer in layer_directions
+        ]
+        layer_options.sort(
+            key=lambda item: (-item["benefit_ceiling_us"], item["layer"])
+        )
+        direction = layer_options[0] if layer_options else None
+        benefit = float(direction["benefit_ceiling_us"]) if direction else 0.0
+        qualifies_minimum_effect = bool(
+            direction and direction["qualifies_minimum_effect"]
+        )
+        if record_kind == "candidate" and not qualifies_minimum_effect:
+            record_kind = "explanation"
+            explanation_reason = "below_minimum_effect"
+            explanation_details = [
+                direction["layer"] if direction else "no_current_direction"
+            ]
+        scope_node_ids = sorted(
+            item["node_id"]
+            for item in validated_map["nodes"]
+            if direction is not None
+            and item["layer"] == direction["layer"]
+            and item["node_id"] in validated_map["hot_path"]
+        )
+        benefit_reference = {
+            "performance_model_sha256": performance_model_sha,
+            "layer": direction["layer"] if direction else None,
+            "benefit_ceiling_us": benefit,
+            "qualifies_minimum_effect": qualifies_minimum_effect,
+            "basis": direction["basis"] if direction else "no_current_direction",
+        }
+        record = {
+            **base,
+            "statement": card["mechanism"],
+            "execution_layers": list(card["execution_layers"]),
+            "scope_node_ids": scope_node_ids,
+            "content_status": card["content_status"],
+            "confidence": "inconclusive",
+            "promotion_authority": "none",
+            "evidence_grade": grade_name,
+            "evidence": {
+                "positive": positive,
+                "counter": counter,
+                "missing": missing,
+            },
+            "case_support": {
+                "exact": exact_case_ids,
+                "analogous": analogous_case_ids,
+            },
+            "benefit_ceiling": benefit_reference,
+            "cheapest_falsifier": {
+                "action_id": action_id,
+                "rationale": card["cheapest_falsifier"]["rationale"],
+                "cost": action["cost"],
+                "risk": action["risk"],
+                "control_scope": action["control_scope"],
+            },
+            "source_ids": list(card["source_ids"]),
+            "case_ids": list(card["case_ids"]),
+            "_kind": record_kind,
+            "_explanation_reason": explanation_reason,
+            "_explanation_details": explanation_details,
+            "_dimensions": {
+                "benefit": benefit,
+                "grade": grade,
+                "cost": cost_rank[action["cost"]],
+                "risk": risk_rank[action["risk"]],
+            },
+        }
+        records.append(record)
+
+    grouped: dict[str, list[dict]] = {}
+    for record in records:
+        grouped.setdefault(record["mechanism_key"], []).append(record)
+    deduplicated = []
+    for key in sorted(grouped):
+        group = grouped[key]
+        group.sort(
+            key=lambda item: (
+                0 if item["_kind"] == "candidate" else 1,
+                -item["_dimensions"]["grade"],
+                item["card_id"],
+            )
+        )
+        deduplicated.append(group[0])
+        for duplicate in group[1:]:
+            rejections.append(
+                {
+                    "card_id": duplicate["card_id"],
+                    "mechanism_key": key,
+                    "reason": "canonical_duplicate",
+                    "details": [group[0]["card_id"]],
+                }
+            )
+            filtered_counts["canonical_duplicate"] += 1
+
+    for record in deduplicated:
+        if record["_kind"] != "explanation":
+            continue
+        reason = record["_explanation_reason"]
+        explanations.append(
+            {
+                "card_id": record["card_id"],
+                "mechanism_key": record["mechanism_key"],
+                "reason": reason,
+                "details": record["_explanation_details"],
+            }
+        )
+        filtered_counts[reason] += 1
+
+    candidate_records = [
+        item for item in deduplicated if item["_kind"] == "candidate"
+    ]
+    frontier = []
+    for candidate in candidate_records:
+        dominators = [
+            other
+            for other in candidate_records
+            if other is not candidate and _dominates(other, candidate)
+        ]
+        if dominators:
+            rejections.append(
+                {
+                    "card_id": candidate["card_id"],
+                    "mechanism_key": candidate["mechanism_key"],
+                    "reason": "pareto_dominated",
+                    "details": sorted(item["card_id"] for item in dominators),
+                }
+            )
+            filtered_counts["pareto_dominated"] += 1
+        else:
+            frontier.append(candidate)
+    frontier.sort(key=lambda item: (item["mechanism_key"], item["card_id"]))
+    selected = []
+    used_layers = set()
+    for candidate in frontier:
+        layer = candidate["benefit_ceiling"]["layer"]
+        if layer not in used_layers:
+            selected.append(candidate)
+            used_layers.add(layer)
+        if len(selected) == limit:
+            break
+    if len(selected) < limit:
+        for candidate in frontier:
+            if candidate not in selected:
+                selected.append(candidate)
+            if len(selected) == limit:
+                break
+
+    public_candidates = []
+    for candidate in selected:
+        public = {
+            key: copy.deepcopy(value)
+            for key, value in candidate.items()
+            if not key.startswith("_")
+        }
+        public_candidates.append(public)
+    explanations.sort(key=lambda item: (item["mechanism_key"], item["card_id"]))
+    rejections.sort(
+        key=lambda item: (item["reason"], item["mechanism_key"], item["card_id"])
+    )
+    context = {
+        "schema_version": "cuda-optimizer/knowledge-context-v1",
+        "input_sha256": _canonical_sha256(frozen_inputs),
+        "knowledge_package": {
+            "version": package["package_version"],
+            "sha256": package["content_sha256"],
+        },
+        "knowledge_identity_sha256": identity_sha,
+        "evidence_sha256": evidence_sha,
+        "performance_model_sha256": performance_model_sha,
+        "categories": categories,
+        "candidates": public_candidates,
+        "explanations": explanations,
+        "rejections": rejections,
+        "filtered_counts": filtered_counts,
+        "promotion_authority": "none",
+    }
+    while len(_canonical_bytes(context)) > max_bytes:
+        removed = False
+        for field in ("explanations", "rejections", "candidates"):
+            if context[field]:
+                context[field].pop()
+                context["filtered_counts"]["byte_trimmed"] += 1
+                removed = True
+                break
+        if not removed:
+            raise ValueError("max_bytes is too small for the closed context")
+    return context
+
+
 def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
     """Read and cross-check the offline knowledge references without side effects."""
     sources = _read_reference(reference_dir, "knowledge_sources.json")
@@ -714,6 +1535,8 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
         "status",
         "content_status",
         "observation_rules",
+        "identity_constraints",
+        "requested_claims",
         "categories",
         "execution_layers",
         "priority",
@@ -756,6 +1579,16 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
         _validate_observation_rules(
             item["observation_rules"],
             f"diagnostic card {card_id} observation_rules",
+        )
+        _validate_identity_constraints(
+            item["identity_constraints"],
+            f"diagnostic card {card_id} identity_constraints",
+        )
+        _canonical_strings(
+            item["requested_claims"],
+            f"diagnostic card {card_id} requested_claims",
+            nonempty=False,
+            allowed=_REQUESTED_CLAIMS,
         )
         _strings(item["categories"], f"diagnostic card {card_id} categories")
         _strings(

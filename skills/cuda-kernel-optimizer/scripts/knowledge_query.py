@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -12,6 +14,18 @@ from typing import Any, Dict, List, Optional
 REFERENCE_DIR = Path(__file__).resolve().parent.parent / "references"
 REGISTRY_PATH = REFERENCE_DIR / "method_registry.json"
 WORKLOAD_PATH = REFERENCE_DIR / "workload_methods.json"
+
+
+def _load_diagnostic_knowledge():
+    path = Path(__file__).with_name("diagnostic_knowledge.py")
+    spec = importlib.util.spec_from_file_location(
+        "cuda_optimizer_diagnostic_knowledge_query", path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load diagnostic knowledge runtime: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load(path: Path) -> Dict[str, Any]:
@@ -138,20 +152,47 @@ def query(
     }
 
 
+def query_frozen(
+    frozen_inputs: Mapping[str, object], *, limit: int = 3
+) -> Dict[str, Any]:
+    return _load_diagnostic_knowledge().build_knowledge_context(
+        frozen_inputs,
+        limit=limit,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Query a bounded set of offline GPU optimization knowledge cards."
     )
-    parser.add_argument("--arch", required=True, help="Exact architecture, for example sm_120")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--arch", help="Exact architecture, for example sm_120")
+    mode.add_argument("--frozen-input", help="Closed V1.3 frozen-input JSON file")
     parser.add_argument("--layer", choices=("kernel", "workload"), default="kernel")
     parser.add_argument("--axis", choices=("compute", "memory", "latency"))
     parser.add_argument("--bottleneck")
     parser.add_argument(
         "--metrics", help="Optional JSON object mapping profiler metric names to values"
     )
-    parser.add_argument("--limit", type=int, default=5)
+    parser.add_argument("--limit", type=int)
     args = parser.parse_args()
     try:
+        if args.frozen_input:
+            if (
+                args.axis is not None
+                or args.bottleneck is not None
+                or args.metrics is not None
+                or args.layer != "kernel"
+            ):
+                parser.error(
+                    "--frozen-input cannot be combined with legacy query filters"
+                )
+            result = query_frozen(
+                _load(Path(args.frozen_input)),
+                limit=3 if args.limit is None else args.limit,
+            )
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
         observed_metrics = _load(Path(args.metrics)) if args.metrics else {}
         if not isinstance(observed_metrics, dict) or not all(
             isinstance(value, (int, float)) for value in observed_metrics.values()
@@ -162,7 +203,7 @@ def main() -> int:
             layer=args.layer,
             axis=args.axis,
             bottleneck=args.bottleneck,
-            limit=args.limit,
+            limit=5 if args.limit is None else args.limit,
             observed_metrics=observed_metrics,
         )
     except ValueError as exc:

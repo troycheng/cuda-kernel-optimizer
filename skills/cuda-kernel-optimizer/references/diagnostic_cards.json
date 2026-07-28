@@ -7,10 +7,20 @@
       "mechanism_key": "cross-layer.unattributed-critical-path",
       "status": "routing_only",
       "content_status": "source_verified",
+      "requested_claims": [],
       "observation_rules": {
         "positive": [],
         "counter": [],
         "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
       },
       "categories": ["unknown", "mixed"],
       "execution_layers": ["cpu", "gpu", "framework", "transfer", "communication", "io", "synchronization", "idle"],
@@ -38,6 +48,7 @@
       "mechanism_key": "framework.launch-gaps",
       "status": "routing_only",
       "content_status": "source_verified",
+      "requested_claims": [],
       "observation_rules": {
         "positive": [
           {
@@ -68,6 +79,15 @@
         "counter": [],
         "invalidators": []
       },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
       "categories": ["framework"],
       "execution_layers": ["cpu", "framework", "gpu", "synchronization", "idle"],
       "priority": 1,
@@ -94,10 +114,20 @@
       "mechanism_key": "kernel.resource-or-memory",
       "status": "routing_only",
       "content_status": "source_verified",
+      "requested_claims": [],
       "observation_rules": {
         "positive": [],
         "counter": [],
         "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
       },
       "categories": ["kernel"],
       "execution_layers": ["gpu"],
@@ -125,10 +155,20 @@
       "mechanism_key": "cpu-data.input-starvation",
       "status": "routing_only",
       "content_status": "source_verified",
+      "requested_claims": [],
       "observation_rules": {
         "positive": [],
         "counter": [],
         "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
       },
       "categories": ["cpu_data"],
       "execution_layers": ["cpu", "framework", "io", "idle"],
@@ -156,10 +196,20 @@
       "mechanism_key": "transfer.host-device-serialization",
       "status": "routing_only",
       "content_status": "source_verified",
+      "requested_claims": [],
       "observation_rules": {
         "positive": [],
         "counter": [],
         "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
       },
       "categories": ["transfer"],
       "execution_layers": ["transfer", "gpu", "synchronization"],
@@ -187,10 +237,20 @@
       "mechanism_key": "communication.collective-critical-path",
       "status": "routing_only",
       "content_status": "source_verified",
+      "requested_claims": [],
       "observation_rules": {
         "positive": [],
         "counter": [],
         "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
       },
       "categories": ["communication"],
       "execution_layers": ["communication", "gpu", "synchronization"],
@@ -218,10 +278,20 @@
       "mechanism_key": "io.request-path",
       "status": "routing_only",
       "content_status": "source_verified",
+      "requested_claims": [],
       "observation_rules": {
         "positive": [],
         "counter": [],
         "invalidators": []
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
       },
       "categories": ["io", "environment"],
       "execution_layers": ["io", "cpu", "idle"],
