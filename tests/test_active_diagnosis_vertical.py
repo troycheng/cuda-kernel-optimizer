@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -353,6 +354,560 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
         )
         self.assertEqual(decision["decision"], "MEASURE")
         self.assertNotEqual(decision["next_action"]["action_id"], "implement-candidate")
+
+    def test_raw_measurement_allows_model_direction_without_knowledge_match(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            helper = workload_fixtures.WorkloadRoundTests()
+            helper.setUp()
+            control, run_dir, project = helper._workspace(root)
+            workload_fixtures._enable_v2_readiness(
+                control,
+                root,
+                capability_ids=(
+                    "gpu-execute",
+                    "cuda.disassembler",
+                    "ncu.counter_access",
+                ),
+            )
+            workload_fixtures._enable_active_diagnosis(control, root)
+
+            scan_adapter = project / "active_diagnosis_scan.py"
+            scan_adapter.write_text(
+                scan_adapter.read_text(encoding="utf-8").replace(
+                    '"gpu_busy_pct": 42,\n'
+                    '                "cpu_busy_pct": 91,\n'
+                    '                "data_wait_pct": 45,',
+                    '"gpu_busy_pct": 80,\n'
+                    '                "kernel_time_pct": 80,\n'
+                    '                "cpu_busy_pct": 20,\n'
+                    '                "data_wait_pct": 0,',
+                ),
+                encoding="utf-8",
+            )
+            readiness_path = Path(control["readiness_contract"])
+            readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
+            readiness["requested_claim"] = "serving"
+            readiness_path.write_text(json.dumps(readiness), encoding="utf-8")
+            (project / "readiness_probe.py").write_text(
+                "import json, os, sys\n"
+                "payload = {\n"
+                " 'schema_version': 'cuda-workload-optimizer/readiness-probe-v1',\n"
+                " 'requirement_id': sys.argv[1], 'status': 'ready',\n"
+                " 'observations': {'sm_arch': 'sm_120', "
+                "'cuda_runtime_version': '13.0'}, 'artifacts': []}\n"
+                "open(os.environ['CUDA_OPTIMIZER_READINESS_OUTPUT'], 'w').write(json.dumps(payload))\n",
+                encoding="utf-8",
+            )
+            evidence_adapter = project / "collect_framework_evidence.py"
+            evidence_adapter.write_text(
+                "import json, os\n"
+                "request = json.load(open(os.environ['CUDA_OPTIMIZER_EVIDENCE_REQUEST']))\n"
+                "payload = {\n"
+                " 'schema_version': 'cuda-optimizer/evidence-result-v1',\n"
+                " 'request_signature': request['request_signature'],\n"
+                " 'status': 'observed', 'outcome_id': 'inconclusive',\n"
+                " 'observations': {'sass_summary': 'no mechanism classified'},\n"
+                " 'artifacts': []}\n"
+                "open(os.environ['CUDA_OPTIMIZER_EVIDENCE_OUTPUT'], 'w').write(json.dumps(payload))\n",
+                encoding="utf-8",
+            )
+            contract_path = Path(control["analysis_contract"])
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            contract["source"]["adapter_sha256"] = hashlib.sha256(
+                scan_adapter.read_bytes()
+            ).hexdigest()
+            contract["actions"] = []
+            evidence_adapter_sha = hashlib.sha256(
+                evidence_adapter.read_bytes()
+            ).hexdigest()
+            for action_id in (
+                "compiler-sass-inspection",
+                "ncu-targeted-kernel",
+            ):
+                contract["actions"].append(
+                    {
+                        "action_id": action_id,
+                        "adapter_path": str(evidence_adapter),
+                        "adapter_sha256": evidence_adapter_sha,
+                        "argv": [sys.executable, str(evidence_adapter)],
+                        "timeout_seconds": 5,
+                        "cost_bound": {
+                            "p50_seconds": 1.0,
+                            "p90_seconds": 2.0,
+                            "basis": "user_authorized_upper_bound",
+                        },
+                    }
+                )
+            contract["selection_policy"]["available_capability_ids"] = [
+                "cuda.disassembler",
+                "ncu.counter_access",
+                "nsys.timeline",
+            ]
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+            helper.controller.start_run(control, run_dir)
+            helper._authorize_active_run(
+                control,
+                run_dir,
+                "grant-model-direction-after-raw-measurement",
+            )
+            active = run_dir / "active_diagnosis"
+            epoch = json.loads((active / "epoch.json").read_text("utf-8"))
+            context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            self.assertEqual(
+                [item.get("admission") for item in context["knowledge_context"]["candidates"]],
+                ["measure_only"],
+            )
+            empty_hypotheses = {
+                "schema_version": "cuda-optimizer/hypothesis-set-v1",
+                "set_id": "raw-measurement-hypotheses",
+                "epoch_id": epoch["epoch_id"],
+                "epoch_sha256": context["epoch_sha256"],
+                "execution_map_sha256": context["execution_map_sha256"],
+                "hypotheses": [],
+                "relationships": [],
+            }
+            empty_requests = {
+                "schema_version": "cuda-optimizer/evidence-request-set-v1",
+                "request_set_id": "raw-measurement-requests",
+                "epoch_id": epoch["epoch_id"],
+                "epoch_sha256": context["epoch_sha256"],
+                "hypothesis_set_sha256": "0" * 64,
+                "requests": [],
+            }
+
+            (
+                _preview_hypotheses,
+                preview_requests,
+                _preview_adaptation,
+            ) = helper.controller._adapt_controller_knowledge(
+                {},
+                contract=helper.controller._load_frozen_analysis_contract(
+                    run_dir,
+                    helper.controller.read_run_state(run_dir),
+                ),
+                execution_map=json.loads(
+                    (active / "execution_map.json").read_text("utf-8")
+                ),
+                action_catalog=json.loads(
+                    (active / "action_catalog.json").read_text("utf-8")
+                ),
+                selection_policy=json.loads(
+                    (active / "selection_policy.json").read_text("utf-8")
+                ),
+                knowledge_identity=context["knowledge_identity"],
+                local_knowledge_context=context["knowledge_context"],
+                hypothesis_set=empty_hypotheses,
+                request_set=empty_requests,
+            )
+            injected_requests = copy.deepcopy(empty_requests)
+            injected_request = copy.deepcopy(preview_requests["requests"][0])
+            injected_request["request_id"] = "a-model-injected-measure"
+            injected_requests["requests"] = [injected_request]
+            state_before_injected = helper.controller.read_run_state(run_dir)
+            ledger_before_injected = (
+                helper.controller._verify_active_diagnosis_ledger(run_dir)
+            )
+            with self.assertRaisesRegex(
+                helper.controller.ValidationError,
+                "reserved measure-only request",
+            ):
+                helper.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    empty_hypotheses,
+                    injected_requests,
+                )
+            self.assertEqual(
+                helper.controller.read_run_state(run_dir),
+                state_before_injected,
+            )
+            self.assertEqual(
+                helper.controller._verify_active_diagnosis_ledger(run_dir),
+                ledger_before_injected,
+            )
+            self.assertFalse((active / "evidence_selection.json").exists())
+
+            first = helper.controller.register_active_diagnosis_proposal(
+                control,
+                run_dir,
+                empty_hypotheses,
+                empty_requests,
+            )
+            first_selection = json.loads(
+                (active / "evidence_selection.json").read_text("utf-8")
+            )
+            self.assertEqual(first["next_action"], "collect_evidence")
+            self.assertEqual(
+                first_selection["selected_request"]["action_id"],
+                "compiler-sass-inspection",
+            )
+            prior_hypotheses = json.loads(
+                (active / "hypothesis_result.json").read_text("utf-8")
+            )["hypothesis_set"]["hypotheses"]
+            self.assertEqual(len(prior_hypotheses), 1)
+            unmodeled = prior_hypotheses[0]
+            self.assertEqual(unmodeled["kind"], "unmodeled")
+
+            collected = helper.controller.collect_active_diagnosis_evidence(
+                control,
+                run_dir,
+            )
+            self.assertEqual(collected["next_action"], "propose_hypotheses")
+            refreshed = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            self.assertEqual(refreshed["knowledge_context"]["candidates"], [])
+            self.assertEqual(
+                refreshed["evidence_results"][-1]["outcome_id"],
+                "inconclusive",
+            )
+            evidence_id = refreshed["evidence_results"][-1]["evidence_id"]
+            evidence_catalog = json.loads(
+                (active / "evidence_catalog.json").read_text("utf-8")
+            )
+            self.assertEqual(
+                evidence_catalog[evidence_id].get("supports_hypothesis_ids"),
+                [],
+            )
+            self.assertEqual(
+                evidence_catalog[evidence_id].get("opposes_hypothesis_ids"),
+                [],
+            )
+
+            def published_snapshot() -> dict:
+                paths = [
+                    run_dir / "diagnosis_context.json",
+                    active / "hypothesis_result.json",
+                    active / "request_set.json",
+                    active / "evidence_selection.json",
+                    active / "decision.json",
+                    active / "investment_brief.json",
+                ]
+                generations = [
+                    active / "hypothesis_generations",
+                    active / "proposal_generations",
+                ]
+                return {
+                    "files": {
+                        str(path.relative_to(run_dir)): hashlib.sha256(
+                            path.read_bytes()
+                        ).hexdigest()
+                        for path in paths
+                    },
+                    "generations": {
+                        str(root_path.relative_to(run_dir)): [
+                            (
+                                path.name,
+                                hashlib.sha256(path.read_bytes()).hexdigest(),
+                            )
+                            for path in sorted(root_path.glob("*.json"))
+                        ]
+                        for root_path in generations
+                    },
+                    "publish_intent_exists": (
+                        active / "diagnosis_publish_intent.json"
+                    ).exists(),
+                }
+
+            completion_path = (
+                active
+                / "evidence"
+                / refreshed["evidence_results"][-1]["request_signature"]
+                / "complete.json"
+            )
+            completion_bytes = completion_path.read_bytes()
+            state_before_missing_completion = (
+                helper.controller.read_run_state(run_dir)
+            )
+            ledger_before_missing_completion = (
+                helper.controller._verify_active_diagnosis_ledger(run_dir)
+            )
+            publish_before_missing_completion = published_snapshot()
+            completion_path.unlink()
+            try:
+                with mock.patch.object(
+                    helper.controller,
+                    "_review_diagnostic_direction",
+                    side_effect=AssertionError(
+                        "review must not run before evidence integrity validation"
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        helper.controller.ValidationError,
+                        "no sealed completion marker",
+                    ):
+                        helper.controller.register_active_diagnosis_proposal(
+                            control,
+                            run_dir,
+                            empty_hypotheses,
+                            empty_requests,
+                        )
+            finally:
+                completion_path.write_bytes(completion_bytes)
+            self.assertEqual(
+                helper.controller.read_run_state(run_dir),
+                state_before_missing_completion,
+            )
+            self.assertEqual(
+                helper.controller._verify_active_diagnosis_ledger(run_dir),
+                ledger_before_missing_completion,
+            )
+            self.assertEqual(
+                published_snapshot(),
+                publish_before_missing_completion,
+            )
+
+            completion = json.loads(completion_bytes)
+            completion["unsealed_extra"] = True
+            helper.controller._atomic_json(completion_path, completion)
+            try:
+                with mock.patch.object(
+                    helper.controller,
+                    "_review_diagnostic_direction",
+                    side_effect=AssertionError(
+                        "review must not run before completion schema validation"
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        helper.controller.ValidationError,
+                        "unknown fields",
+                    ):
+                        helper.controller.register_active_diagnosis_proposal(
+                            control,
+                            run_dir,
+                            empty_hypotheses,
+                            empty_requests,
+                        )
+            finally:
+                completion_path.write_bytes(completion_bytes)
+            self.assertEqual(
+                helper.controller.read_run_state(run_dir),
+                state_before_missing_completion,
+            )
+            self.assertEqual(
+                published_snapshot(),
+                publish_before_missing_completion,
+            )
+
+            stop_run_dir = root / "run-no-model-direction"
+            shutil.copytree(run_dir, stop_run_dir)
+            no_direction_hypotheses = copy.deepcopy(empty_hypotheses)
+            no_direction_hypotheses.update(
+                {
+                    "set_id": "no-model-direction",
+                    "execution_map_sha256": refreshed[
+                        "execution_map_sha256"
+                    ],
+                    "hypotheses": [copy.deepcopy(unmodeled)],
+                }
+            )
+            no_direction_hypotheses["hypotheses"][0].update(
+                {
+                    "disposition": "undifferentiable",
+                    "missing_evidence_kinds": [],
+                }
+            )
+            no_direction_requests = copy.deepcopy(empty_requests)
+            no_direction_requests["request_set_id"] = (
+                "no-model-direction-requests"
+            )
+            stopped = helper.controller.register_active_diagnosis_proposal(
+                control,
+                stop_run_dir,
+                no_direction_hypotheses,
+                no_direction_requests,
+            )
+            self.assertEqual(stopped["next_action"], "done")
+            self.assertEqual(
+                stopped["terminal_reason"],
+                "no_active_hypothesis",
+            )
+
+            retained_unmodeled = {
+                "schema_version": "cuda-optimizer/hypothesis-set-v1",
+                "set_id": "retained-unmodeled-hypotheses",
+                "epoch_id": epoch["epoch_id"],
+                "epoch_sha256": context["epoch_sha256"],
+                "execution_map_sha256": refreshed["execution_map_sha256"],
+                "hypotheses": [copy.deepcopy(unmodeled)],
+                "relationships": [],
+            }
+            retained_unmodeled["hypotheses"][0].update(
+                {
+                    "missing_evidence_kinds": ["ncu_kernel"],
+                    "falsification_question": "Does NCU classify the same unresolved interval?",
+                }
+            )
+            retained_request = {
+                "schema_version": "cuda-optimizer/evidence-request-set-v1",
+                "request_set_id": "retained-unmodeled-requests",
+                "epoch_id": epoch["epoch_id"],
+                "epoch_sha256": context["epoch_sha256"],
+                "hypothesis_set_sha256": "0" * 64,
+                "requests": [
+                    {
+                        "request_id": "req-retained-unmodeled",
+                        "action_id": "ncu-targeted-kernel",
+                        "question": "Does NCU classify the same unresolved interval?",
+                        "target_hypothesis_ids": [unmodeled["hypothesis_id"]],
+                        "exclusive_pairs": [],
+                        "outcomes": [
+                            {
+                                "outcome_id": "classified",
+                                "supports": [unmodeled["hypothesis_id"]],
+                                "opposes": [],
+                            },
+                            {
+                                "outcome_id": "not-classified",
+                                "supports": [],
+                                "opposes": [unmodeled["hypothesis_id"]],
+                            },
+                        ],
+                    }
+                ],
+            }
+            state_before_retained = helper.controller.read_run_state(run_dir)
+            ledger_before_retained = helper.controller._verify_active_diagnosis_ledger(
+                run_dir
+            )
+            publish_before_retained = published_snapshot()
+            with self.assertRaisesRegex(
+                helper.controller.ValidationError,
+                "requires closing the prior unmodeled",
+            ):
+                helper.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    retained_unmodeled,
+                    retained_request,
+                )
+            self.assertEqual(
+                helper.controller.read_run_state(run_dir),
+                state_before_retained,
+            )
+            self.assertEqual(
+                helper.controller._verify_active_diagnosis_ledger(run_dir),
+                ledger_before_retained,
+            )
+            self.assertEqual(published_snapshot(), publish_before_retained)
+
+            model_hypotheses = {
+                "schema_version": "cuda-optimizer/hypothesis-set-v1",
+                "set_id": "model-direction-hypotheses",
+                "epoch_id": epoch["epoch_id"],
+                "epoch_sha256": context["epoch_sha256"],
+                "execution_map_sha256": refreshed["execution_map_sha256"],
+                "hypotheses": [
+                    {
+                        "hypothesis_id": "h-model-kernel-stall",
+                        "kind": "mechanism",
+                        "scope_node_ids": copy.deepcopy(
+                            unmodeled["scope_node_ids"]
+                        ),
+                        "statement": "A kernel stall may dominate the measured GPU path.",
+                        "mechanism": "model_proposed_kernel_stall",
+                        "claim_layer": "kernel",
+                        "disposition": "active",
+                        "confidence": "inconclusive",
+                        "support_evidence_ids": [],
+                        "oppose_evidence_ids": [],
+                        "missing_evidence_kinds": ["ncu_kernel"],
+                        "falsification_question": "Does NCU reject the proposed stall?",
+                    }
+                ],
+                "relationships": [],
+            }
+            model_requests = {
+                "schema_version": "cuda-optimizer/evidence-request-set-v1",
+                "request_set_id": "model-direction-requests",
+                "epoch_id": epoch["epoch_id"],
+                "epoch_sha256": context["epoch_sha256"],
+                "hypothesis_set_sha256": "0" * 64,
+                "requests": [
+                    {
+                        "request_id": "req-model-kernel-stall",
+                        "action_id": "ncu-targeted-kernel",
+                        "question": "Does NCU reject the proposed stall?",
+                        "target_hypothesis_ids": ["h-model-kernel-stall"],
+                        "exclusive_pairs": [],
+                        "outcomes": [
+                            {
+                                "outcome_id": "kernel-stall-present",
+                                "supports": ["h-model-kernel-stall"],
+                                "opposes": [],
+                            },
+                            {
+                                "outcome_id": "kernel-stall-absent",
+                                "supports": [],
+                                "opposes": ["h-model-kernel-stall"],
+                            },
+                        ],
+                    }
+                ],
+            }
+            state_before_invalid = helper.controller.read_run_state(run_dir)
+            ledger_before_invalid = helper.controller._verify_active_diagnosis_ledger(
+                run_dir
+            )
+            publish_before_invalid = published_snapshot()
+            repeated_kind = copy.deepcopy(model_requests)
+            repeated_kind["request_set_id"] = "repeated-raw-evidence-kind"
+            repeated_kind["requests"][0]["action_id"] = "compiler-sass-inspection"
+            with self.assertRaisesRegex(
+                helper.controller.ValidationError,
+                "different evidence kind",
+            ):
+                helper.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    model_hypotheses,
+                    repeated_kind,
+                )
+            self.assertEqual(
+                helper.controller.read_run_state(run_dir),
+                state_before_invalid,
+            )
+            self.assertEqual(
+                helper.controller._verify_active_diagnosis_ledger(run_dir),
+                ledger_before_invalid,
+            )
+            self.assertEqual(published_snapshot(), publish_before_invalid)
+
+            admitted = helper.controller.register_active_diagnosis_proposal(
+                control,
+                run_dir,
+                model_hypotheses,
+                model_requests,
+            )
+            admitted_hypotheses = json.loads(
+                (active / "hypothesis_result.json").read_text("utf-8")
+            )["hypothesis_set"]["hypotheses"]
+            self.assertEqual(
+                [item["hypothesis_id"] for item in admitted_hypotheses],
+                ["h-model-kernel-stall"],
+            )
+            self.assertEqual(
+                admitted_hypotheses[0]["support_evidence_ids"],
+                [],
+            )
+            selection = json.loads(
+                (active / "evidence_selection.json").read_text("utf-8")
+            )
+            decision = json.loads(
+                (active / "decision.json").read_text("utf-8")
+            )
+            self.assertEqual(admitted["next_action"], "collect_evidence")
+            self.assertEqual(decision["decision"], "MEASURE")
+            self.assertEqual(
+                selection["selected_request"]["action_id"],
+                "ncu-targeted-kernel",
+            )
 
     def _controller_with_two_supported_directions(self, root: Path):
         helper = workload_fixtures.WorkloadRoundTests()

@@ -185,6 +185,42 @@ class EvidenceSelectorTests(unittest.TestCase):
         self.assertEqual(result["selected_request"]["controller_action"]["cost"], "low")
         self.assertNotIn("probability", str(result).lower())
 
+    def test_no_active_hypothesis_returns_terminal_evidence_gap(self) -> None:
+        hypothesis = hypothesis_fixture(
+            self.hypothesis_module,
+            self.map_module,
+        )
+        hypothesis["set_id"] = "hypotheses-none-active"
+        hypothesis["hypotheses"] = [hypothesis["hypotheses"][0]]
+        hypothesis["hypotheses"][0].update(
+            {
+                "disposition": "undifferentiable",
+                "confidence": "inconclusive",
+                "missing_evidence_kinds": [],
+            }
+        )
+        hypothesis["relationships"] = []
+        hypothesis_result = self.hypothesis_module.validate_hypothesis_set(
+            hypothesis,
+            epoch=self.epoch,
+            execution_map=self.execution_map,
+            evidence_catalog=self.evidence,
+        )
+        value = self.requests()
+        value["hypothesis_set_sha256"] = hypothesis_result[
+            "hypothesis_set_sha256"
+        ]
+        value["requests"] = []
+
+        result = self.select(
+            value,
+            hypothesis_result=hypothesis_result,
+        )
+
+        self.assertEqual(result["status"], "evidence_gap")
+        self.assertIsNone(result["selected_request"])
+        self.assertEqual(result["gap_reason"], "no_active_hypothesis")
+
     def test_model_cannot_supply_cost_risk_or_information_score(self) -> None:
         for field, raw in (("cost", "low"), ("risk", "none"), ("information_gain", 99)):
             value = self.requests()

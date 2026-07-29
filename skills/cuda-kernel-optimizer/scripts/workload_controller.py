@@ -3083,6 +3083,80 @@ def _readiness_knowledge_identity(
     return identity
 
 
+def _verify_evidence_completion(
+    run_root: Path,
+    summary: Mapping[str, Any],
+    result: Mapping[str, Any],
+    execution: Mapping[str, Any],
+    ledger: Sequence[Mapping[str, Any]],
+    *,
+    allow_pending: bool = False,
+) -> None:
+    """Verify that one evidence result has a matching completion and ledger event."""
+    signature = summary["request_signature"]
+    attempt_root = (
+        run_root / "active_diagnosis" / "evidence" / signature
+    )
+    complete_path = attempt_root / "complete.json"
+    if complete_path.is_symlink() or (
+        complete_path.exists() and not complete_path.is_file()
+    ):
+        raise ValidationError("evidence completion path is unsafe")
+    if not complete_path.is_file():
+        if allow_pending:
+            return
+        raise ValidationError("historical evidence has no sealed completion marker")
+    complete = load_json_object(complete_path)
+    completion_fields = {
+        "schema_version",
+        "request_signature",
+        "result_sha256",
+        "execution_sha256",
+        "context_sha256",
+        "completed_at_epoch",
+    }
+    _closed(complete, completion_fields, "evidence completion")
+    _required(complete, completion_fields, "evidence completion")
+    completed_at = complete["completed_at_epoch"]
+    if (
+        type(completed_at) not in {int, float}
+        or not math.isfinite(float(completed_at))
+        or float(completed_at) < 0
+    ):
+        raise ValidationError(
+            "evidence completion completed_at_epoch is invalid"
+        )
+    expected = {
+        "result_sha256": _canonical_digest(result),
+        "execution_sha256": _canonical_digest(execution),
+    }
+    completion_context_sha = complete.get("context_sha256")
+    if (
+        complete.get("schema_version")
+        != "cuda-optimizer/evidence-completion-v1"
+        or complete.get("request_signature") != signature
+        or not isinstance(completion_context_sha, str)
+        or len(completion_context_sha) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in completion_context_sha
+        )
+        or any(complete.get(field) != digest for field, digest in expected.items())
+    ):
+        raise ValidationError("evidence completion digest binding drifted")
+    payload = {
+        "request_signature": signature,
+        **expected,
+        "context_sha256": completion_context_sha,
+    }
+    if not any(
+        event["event_type"] == "evidence"
+        and event["payload_sha256"] == _canonical_digest(payload)
+        for event in ledger
+    ):
+        raise ValidationError("evidence completion has no matching ledger payload")
+
+
 def _rebuild_knowledge_context(
     run_root: Path, context: Mapping[str, Any], contract: Mapping[str, Any],
     epoch: Mapping[str, Any], execution_map: Mapping[str, Any],
@@ -3132,7 +3206,6 @@ def _rebuild_knowledge_context(
         request_path = attempt_root / "request.json"
         execution_path = attempt_root / "execution.json"
         intent_path = attempt_root / "intent.json"
-        complete_path = attempt_root / "complete.json"
         if any(path.is_symlink() or not path.is_file()
                for path in (request_path, execution_path, intent_path)):
             raise ValidationError("sealed evidence provenance path is unsafe")
@@ -3159,31 +3232,19 @@ def _rebuild_knowledge_context(
                 "sealed evidence request, action, or adapter binding drifted: "
                 + ",".join(name for name, valid in bindings.items() if not valid)
             )
-        pending = (pending_summary is not None and index == len(summaries) - 1
-                   and summary == pending_summary)
-        if complete_path.is_file() and not complete_path.is_symlink():
-            complete = load_json_object(complete_path)
-            expected = {
-                "result_sha256": summary["result_sha256"],
-                "execution_sha256": _canonical_digest(execution),
-            }
-            completion_context_sha = complete.get("context_sha256")
-            if (complete.get("schema_version") != "cuda-optimizer/evidence-completion-v1"
-                    or complete.get("request_signature") != summary["request_signature"]
-                    or not isinstance(completion_context_sha, str)
-                    or len(completion_context_sha) != 64
-                    or any(character not in "0123456789abcdef"
-                           for character in completion_context_sha)
-                    or any(complete.get(field) != digest for field, digest in expected.items())):
-                raise ValidationError("evidence completion digest binding drifted")
-            payload = {"request_signature": summary["request_signature"], **expected,
-                       "context_sha256": completion_context_sha}
-            if not any(event["event_type"] == "evidence"
-                       and event["payload_sha256"] == _canonical_digest(payload)
-                       for event in ledger):
-                raise ValidationError("evidence completion has no matching ledger payload")
-        elif not pending:
-            raise ValidationError("historical evidence has no sealed completion marker")
+        pending = (
+            pending_summary is not None
+            and index == len(summaries) - 1
+            and summary == pending_summary
+        )
+        _verify_evidence_completion(
+            run_root,
+            summary,
+            result,
+            execution,
+            ledger,
+            allow_pending=pending,
+        )
         envelopes.append({"action_id": action_id, "evidence_kind": action["evidence_kind"],
                           "adapter_implementation_sha256": contract_action["adapter_sha256"],
                           "result_sha256": summary["result_sha256"], "status": summary["status"],
@@ -3580,6 +3641,17 @@ def _load_active_diagnosis_context(
             raise ValidationError("evidence result content digest does not match context")
         if result.get("request_signature") != summary["request_signature"]:
             raise ValidationError("evidence result request signature does not match context")
+        execution_path = result_path.parent / "execution.json"
+        if execution_path.is_symlink() or not execution_path.is_file():
+            raise ValidationError("evidence execution path is not a regular file")
+        execution = load_json_object(execution_path)
+        _verify_evidence_completion(
+            run_root,
+            summary,
+            result,
+            execution,
+            events,
+        )
         duration = summary["duration_seconds"]
         if (
             type(duration) not in {int, float}
@@ -4173,6 +4245,53 @@ def _start_run_unlocked(
     return state
 
 
+def _controller_knowledge_shadow(
+    candidate: Mapping[str, Any],
+) -> tuple[dict, dict]:
+    """Build the exact hypothesis and request contributed by one knowledge candidate."""
+    shadow_id = f"knowledge-{_canonical_digest(candidate)[:16]}"
+    action = candidate["evidence_action"]
+    hypothesis = {
+        "hypothesis_id": shadow_id,
+        "kind": (
+            "unmodeled"
+            if candidate.get("admission") == "measure_only"
+            else "mechanism"
+        ),
+        "scope_node_ids": copy.deepcopy(candidate["scope_node_ids"]),
+        "statement": candidate["statement"],
+        "mechanism": candidate["mechanism_id"],
+        "claim_layer": "workload",
+        "disposition": "active",
+        "confidence": "inconclusive",
+        "support_evidence_ids": [],
+        "oppose_evidence_ids": [],
+        "missing_evidence_kinds": [action["evidence_kind"]],
+        "falsification_question": candidate["falsification_question"],
+    }
+    request = {
+        "request_id": f"request-{shadow_id}",
+        "action_id": action["action_id"],
+        "question": candidate["falsification_question"],
+        "target_hypothesis_ids": [shadow_id],
+        "exclusive_pairs": [],
+        "outcomes": [
+            {
+                "outcome_id": "falsified",
+                "supports": [],
+                "opposes": [shadow_id],
+            },
+            {
+                "outcome_id": "inconclusive",
+                "supports": [],
+                "opposes": [],
+            },
+        ],
+    }
+    request["outcomes"].sort(key=lambda item: item["outcome_id"])
+    return hypothesis, request
+
+
 def _adapt_controller_knowledge(
     knowledge_inputs: Mapping[str, Any] | None,
     *,
@@ -4409,54 +4528,49 @@ def _adapt_controller_knowledge(
         for item in augmented_hypotheses.get("hypotheses", [])
         if item.get("disposition") == "active"
     }
+    submitted_hypotheses = hypothesis_set.get("hypotheses", [])
+    submitted_requests = request_set.get("requests", [])
+    for candidate in valid_candidates:
+        if candidate.get("admission") != "measure_only":
+            continue
+        reserved_hypothesis, reserved_request = _controller_knowledge_shadow(
+            candidate
+        )
+        reserved_id = reserved_hypothesis["hypothesis_id"]
+        if any(
+            item.get("hypothesis_id") == reserved_id
+            or (
+                item.get("kind") == "unmodeled"
+                and hypothesis_module.canonical_mechanism_key(
+                    item.get("mechanism", "")
+                )
+                == candidate["mechanism_key"]
+            )
+            for item in submitted_hypotheses
+            if isinstance(item, Mapping)
+        ):
+            raise ValidationError(
+                "model proposal uses a reserved measure-only hypothesis"
+            )
+        if any(
+            item.get("request_id") == reserved_request["request_id"]
+            or reserved_id in item.get("target_hypothesis_ids", [])
+            for item in submitted_requests
+            if isinstance(item, Mapping)
+        ):
+            raise ValidationError(
+                "model proposal uses a reserved measure-only request"
+            )
     slots = max(0, 3 - active_count)
     for candidate in valid_candidates:
         mechanism_key = candidate["mechanism_key"]
         if slots <= 0 or mechanism_key in existing_keys:
             continue
-        shadow_id = f"knowledge-{_canonical_digest(candidate)[:16]}"
-        action = candidate["evidence_action"]
-        augmented_hypotheses["hypotheses"].append(
-            {
-                "hypothesis_id": shadow_id,
-                "kind": (
-                    "unmodeled"
-                    if candidate.get("admission") == "measure_only"
-                    else "mechanism"
-                ),
-                "scope_node_ids": copy.deepcopy(candidate["scope_node_ids"]),
-                "statement": candidate["statement"],
-                "mechanism": candidate["mechanism_id"],
-                "claim_layer": "workload",
-                "disposition": "active",
-                "confidence": "inconclusive",
-                "support_evidence_ids": [],
-                "oppose_evidence_ids": [],
-                "missing_evidence_kinds": [action["evidence_kind"]],
-                "falsification_question": candidate["falsification_question"],
-            }
+        shadow_hypothesis, shadow_request = _controller_knowledge_shadow(
+            candidate
         )
-        augmented_requests.setdefault("requests", []).append(
-            {
-                "request_id": f"request-{shadow_id}",
-                "action_id": action["action_id"],
-                "question": candidate["falsification_question"],
-                "target_hypothesis_ids": [shadow_id],
-                "exclusive_pairs": [],
-                "outcomes": [
-                    {
-                        "outcome_id": "falsified",
-                        "supports": [],
-                        "opposes": [shadow_id],
-                    },
-                    {
-                        "outcome_id": "inconclusive",
-                        "supports": [],
-                        "opposes": [],
-                    },
-                ],
-            }
-        )
+        augmented_hypotheses["hypotheses"].append(shadow_hypothesis)
+        augmented_requests.setdefault("requests", []).append(shadow_request)
         existing_keys.add(mechanism_key)
         slots -= 1
     return augmented_hypotheses, augmented_requests, adaptation
@@ -4921,6 +5035,283 @@ def register_active_diagnosis_proposal(
         )
 
 
+def _completed_measure_only_transition(
+    run_root: Path,
+    state: Mapping[str, Any],
+    context: Mapping[str, Any],
+    prior_result: Mapping[str, Any] | None,
+) -> dict | None:
+    """Derive one neutral measure-only transition from sealed prior artifacts."""
+    if prior_result is None or state.get("last_request_signature") is None:
+        return None
+    prior_hypotheses = prior_result["hypothesis_set"]["hypotheses"]
+    active = [
+        item for item in prior_hypotheses if item["disposition"] == "active"
+    ]
+    if len(active) != 1 or active[0]["kind"] != "unmodeled":
+        return None
+    unmodeled = active[0]
+    adaptation = context.get("knowledge_adaptation")
+    if not isinstance(adaptation, Mapping):
+        return None
+    measure_candidates = [
+        item
+        for item in adaptation.get("candidates", [])
+        if isinstance(item, Mapping) and item.get("admission") == "measure_only"
+    ]
+    if len(measure_candidates) != 1:
+        return None
+    measure_candidate = measure_candidates[0]
+    candidate_action = measure_candidate.get("evidence_action")
+    if not isinstance(candidate_action, Mapping):
+        raise ValidationError("measure-only candidate action is invalid")
+    expected_hypothesis, expected_request = _controller_knowledge_shadow(
+        measure_candidate
+    )
+    if unmodeled != expected_hypothesis:
+        raise ValidationError("measure-only hypothesis binding drifted")
+
+    events = _verify_active_diagnosis_ledger(run_root)
+    _verify_committed_active_ledger(state, events)
+    if not events or events[-1]["event_type"] != "evidence":
+        return None
+    summaries = context.get("evidence_results")
+    if type(summaries) is not list or not summaries:
+        raise ValidationError("measure-only evidence has no sealed result summary")
+    summary = summaries[-1]
+    signature = _sha256(
+        state["last_request_signature"],
+        "measure-only request signature",
+    )
+    if summary.get("request_signature") != signature:
+        raise ValidationError("measure-only result is not the latest request")
+
+    selection_path = run_root / "active_diagnosis" / "evidence_selection.json"
+    selection = load_json_object(selection_path)
+    if _canonical_digest(selection) != state.get("evidence_selection_sha256"):
+        raise ValidationError("measure-only evidence selection drifted")
+    selected = selection.get("selected_request")
+    if not isinstance(selected, Mapping):
+        return None
+    if selected.get("request_signature") != signature:
+        return None
+    if any(selected.get(field) != value for field, value in expected_request.items()):
+        raise ValidationError("measure-only request binding drifted")
+    controller_action = selected.get("controller_action")
+    if (
+        not isinstance(controller_action, Mapping)
+        or controller_action.get("evidence_kind")
+        != candidate_action.get("evidence_kind")
+    ):
+        raise ValidationError("measure-only action binding drifted")
+    if summary.get("status") != "observed":
+        return None
+    outcome = next(
+        (
+            item
+            for item in selected.get("outcomes", [])
+            if isinstance(item, Mapping)
+            and item.get("outcome_id") == summary.get("outcome_id")
+        ),
+        None,
+    )
+    if not isinstance(outcome, Mapping):
+        raise ValidationError("measure-only result outcome drifted")
+    if outcome.get("supports") or outcome.get("opposes"):
+        return None
+    return {
+        "hypothesis_id": unmodeled["hypothesis_id"],
+        "scope_node_ids": copy.deepcopy(unmodeled["scope_node_ids"]),
+        "evidence_kind": controller_action["evidence_kind"],
+    }
+
+
+def _validate_sealed_evidence_claims(
+    context: Mapping[str, Any],
+    hypothesis_result: Mapping[str, Any],
+    evidence_catalog: Mapping[str, Any],
+) -> None:
+    """Keep post-hypothesis evidence bound to its sealed outcome."""
+    sealed_evidence_ids = {
+        item.get("evidence_id")
+        for item in context.get("evidence_results", [])
+        if isinstance(item, Mapping) and item.get("evidence_id") is not None
+    }
+    for hypothesis in hypothesis_result["hypothesis_set"]["hypotheses"]:
+        hypothesis_id = hypothesis["hypothesis_id"]
+        for evidence_id in hypothesis["support_evidence_ids"]:
+            if (
+                evidence_id in sealed_evidence_ids
+                and hypothesis_id
+                not in evidence_catalog[evidence_id].get(
+                    "supports_hypothesis_ids", []
+                )
+            ):
+                raise ValidationError(
+                    "sealed evidence does not explicitly support this hypothesis"
+                )
+        for evidence_id in hypothesis["oppose_evidence_ids"]:
+            if (
+                evidence_id in sealed_evidence_ids
+                and hypothesis_id
+                not in evidence_catalog[evidence_id].get(
+                    "opposes_hypothesis_ids", []
+                )
+            ):
+                raise ValidationError(
+                    "sealed evidence does not explicitly oppose this hypothesis"
+                )
+
+
+def _validate_measure_only_transition(
+    prior_result: Mapping[str, Any] | None,
+    current_result: Mapping[str, Any],
+    request_set: Mapping[str, Any],
+    action_catalog: Mapping[str, Any],
+    transition: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """Admit only the immediate unmodeled-to-mechanism refinement."""
+    if transition is None or prior_result is None:
+        return {}
+    prior = {
+        item["hypothesis_id"]: item
+        for item in prior_result["hypothesis_set"]["hypotheses"]
+    }
+    current = {
+        item["hypothesis_id"]: item
+        for item in current_result["hypothesis_set"]["hypotheses"]
+    }
+    unmodeled_id = transition["hypothesis_id"]
+    prior_unmodeled = prior.get(unmodeled_id)
+    if prior_unmodeled is None:
+        raise ValidationError("measure-only transition lost its prior hypothesis")
+    new_hypotheses = [
+        item
+        for hypothesis_id, item in current.items()
+        if hypothesis_id not in prior
+    ]
+    if any(item["disposition"] != "active" for item in new_hypotheses):
+        raise ValidationError(
+            "measure-only transition cannot introduce an inactive hypothesis"
+        )
+    for hypothesis_id, item in current.items():
+        previous = prior.get(hypothesis_id)
+        if (
+            previous is not None
+            and hypothesis_id != unmodeled_id
+            and previous["disposition"] != "active"
+            and item != previous
+        ):
+            raise ValidationError(
+                "measure-only transition cannot rewrite inactive history"
+            )
+    new_directions = [
+        item
+        for item in new_hypotheses
+    ]
+    retained_unmodeled = current.get(unmodeled_id)
+    if (
+        retained_unmodeled is not None
+        and retained_unmodeled["disposition"] == "active"
+    ):
+        raise ValidationError(
+            "measure-only direction requires closing the prior unmodeled hypothesis"
+        )
+    terminal_unmodeled = copy.deepcopy(prior_unmodeled)
+    terminal_unmodeled.update(
+        {
+            "disposition": "undifferentiable",
+            "confidence": "inconclusive",
+            "support_evidence_ids": [],
+            "oppose_evidence_ids": [],
+            "missing_evidence_kinds": [],
+        }
+    )
+    if (
+        retained_unmodeled is not None
+        and retained_unmodeled != terminal_unmodeled
+    ):
+        raise ValidationError(
+            "measure-only transition requires the canonical "
+            "undifferentiable closure"
+        )
+    if not new_directions:
+        requests = request_set.get("requests")
+        if retained_unmodeled is None:
+            raise ValidationError(
+                "measure-only terminal transition must retain the prior unmodeled"
+            )
+        if type(requests) is not list or requests:
+            raise ValidationError(
+                "measure-only terminal transition cannot create a request"
+            )
+        return {}
+    if retained_unmodeled is not None:
+        raise ValidationError(
+            "measure-only direction must replace the prior unmodeled"
+        )
+    if len(new_directions) > 3:
+        raise ValidationError("measure-only direction exceeds the hypothesis limit")
+    allowed_scope = set(transition["scope_node_ids"])
+    for item in new_directions:
+        if (
+            item["kind"] != "mechanism"
+            or item["confidence"] != "inconclusive"
+            or item["support_evidence_ids"]
+            or item["oppose_evidence_ids"]
+            or not set(item["scope_node_ids"]).issubset(allowed_scope)
+        ):
+            raise ValidationError(
+                "measure-only direction must be an unsupported inconclusive "
+                "mechanism inside the prior scope"
+            )
+
+    actions = {
+        item.get("action_id"): item
+        for item in action_catalog.get("actions", [])
+        if isinstance(item, Mapping)
+    }
+    direction_by_id = {
+        item["hypothesis_id"]: item for item in new_directions
+    }
+    covered = set()
+    requests = request_set.get("requests")
+    if type(requests) is not list:
+        raise ValidationError("measure-only direction requests must be an array")
+    for request in requests:
+        if not isinstance(request, Mapping):
+            continue
+        targets = set(request.get("target_hypothesis_ids", []))
+        relevant = targets & set(direction_by_id)
+        if not relevant:
+            continue
+        action = actions.get(request.get("action_id"))
+        if not isinstance(action, Mapping):
+            raise ValidationError(
+                "measure-only direction request cites an unknown action"
+            )
+        evidence_kind = action.get("evidence_kind")
+        if evidence_kind == transition["evidence_kind"]:
+            raise ValidationError(
+                "measure-only direction requires a different evidence kind"
+            )
+        for hypothesis_id in relevant:
+            if evidence_kind not in direction_by_id[hypothesis_id][
+                "missing_evidence_kinds"
+            ]:
+                raise ValidationError(
+                    "measure-only direction request does not match its missing evidence"
+                )
+        covered.update(relevant)
+    if covered != set(direction_by_id):
+        raise ValidationError(
+            "every measure-only direction requires an independent evidence request"
+        )
+    return {
+        hypothesis_id: unmodeled_id for hypothesis_id in direction_by_id
+    }
+
+
 def _validate_hypothesis_evolution(
     prior_result: Mapping[str, Any] | None,
     current_result: Mapping[str, Any],
@@ -4929,16 +5320,16 @@ def _validate_hypothesis_evolution(
     closed_scope_records: Sequence[Mapping[str, Any]] = (),
     evidence_catalog: Mapping[str, Any] | None = None,
     execution_map: Mapping[str, Any] | None = None,
+    measure_only_replacements: Mapping[str, str] | None = None,
 ) -> dict:
     """Keep live identities stable while allowing evidence-closed slots to rotate."""
     module = _load_hypothesis_space_module()
     catalog = {} if evidence_catalog is None else evidence_catalog
-    scoped_evidence = {}
-    if execution_map is not None:
-        scoped_evidence = {
-            item["node_id"]: set(item.get("evidence_ids", []))
-            for item in execution_map.get("nodes", [])
-        }
+    replacements = (
+        {}
+        if measure_only_replacements is None
+        else dict(measure_only_replacements)
+    )
     closed = {module.canonical_mechanism_key(item) for item in closed_mechanism_keys}
     records = [copy.deepcopy(dict(item)) for item in closed_scope_records]
     record_keys = {
@@ -5067,8 +5458,10 @@ def _validate_hypothesis_evolution(
             fresh_support = set(item["support_evidence_ids"]) - set(
                 record["known_evidence_ids"]
             )
-            overlap = item_scope & set(record["scope_node_ids"])
-            has_material_support = False
+            has_material_support = (
+                replacements.get(item["hypothesis_id"])
+                == record["hypothesis_id"]
+            )
             for evidence_id in fresh_support:
                 evidence = catalog.get(evidence_id, {})
                 if item["hypothesis_id"] in evidence.get(
@@ -5076,21 +5469,10 @@ def _validate_hypothesis_evolution(
                 ):
                     has_material_support = True
                     break
-                if evidence.get("supports_hypothesis_ids", []) or evidence.get(
-                    "opposes_hypothesis_ids", []
-                ):
-                    continue
-                if any(
-                    evidence_id in scoped_evidence.get(node_id, set())
-                    for node_id in overlap
-                ):
-                    has_material_support = True
-                    break
             if not has_material_support:
                 raise ValidationError(
                     "new mechanism on a closed scope requires materially new evidence "
-                    "that is outcome-bound to the replacement hypothesis or "
-                    "Controller-scoped to the overlapping execution-map nodes"
+                    "that explicitly supports the replacement hypothesis"
                 )
     records.sort(
         key=lambda item: (
@@ -6664,12 +7046,30 @@ def _register_active_diagnosis_proposal_unlocked(
         ):
             raise ValidationError("frozen hypothesis result drifted from run state")
     try:
+        transition = _completed_measure_only_transition(
+            run_root,
+            state,
+            context,
+            prior_result,
+        )
         hypothesis_result = _load_hypothesis_space_module().validate_hypothesis_set(
             adapted_hypothesis_set,
             epoch=epoch,
             execution_map=execution_map,
             evidence_catalog=evidence_catalog,
             closed_mechanism_keys=context.get("closed_mechanism_keys", []),
+        )
+        _validate_sealed_evidence_claims(
+            context,
+            hypothesis_result,
+            evidence_catalog,
+        )
+        measure_only_replacements = _validate_measure_only_transition(
+            prior_result,
+            hypothesis_result,
+            adapted_request_set,
+            action_catalog,
+            transition,
         )
         evolution = _validate_hypothesis_evolution(
             prior_result,
@@ -6678,6 +7078,7 @@ def _register_active_diagnosis_proposal_unlocked(
             closed_scope_records=context.get("closed_scope_records", []),
             evidence_catalog=evidence_catalog,
             execution_map=execution_map,
+            measure_only_replacements=measure_only_replacements,
         )
         adapted_request_set["hypothesis_set_sha256"] = hypothesis_result[
             "hypothesis_set_sha256"

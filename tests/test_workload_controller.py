@@ -3668,7 +3668,203 @@ class WorkloadRoundTests(unittest.TestCase):
             self.assertNotEqual(model["critical_path"], before["critical_path"])
             self.assertNotEqual(model, before)
 
-    def test_controller_scoped_neutral_evidence_opens_a_distinct_mechanism(self) -> None:
+    def test_measure_only_transition_accepts_only_two_canonical_deltas(self) -> None:
+        prior_unmodeled = {
+            "hypothesis_id": "h-unmodeled",
+            "kind": "unmodeled",
+            "scope_node_ids": ["gpu-kernel"],
+            "statement": "The GPU-hot interval is not classified yet.",
+            "mechanism": "unmodeled_gpu_interval",
+            "claim_layer": "workload",
+            "disposition": "active",
+            "confidence": "inconclusive",
+            "support_evidence_ids": [],
+            "oppose_evidence_ids": [],
+            "missing_evidence_kinds": ["compiler_sass"],
+            "falsification_question": "What mechanism explains this interval?",
+        }
+        prior_closed = {
+            "hypothesis_id": "h-prior-closed",
+            "kind": "mechanism",
+            "scope_node_ids": ["cpu-launch"],
+            "statement": "A prior launch hypothesis was rejected.",
+            "mechanism": "prior_launch_gap",
+            "claim_layer": "workload",
+            "disposition": "rejected",
+            "confidence": "inconclusive",
+            "support_evidence_ids": [],
+            "oppose_evidence_ids": ["ev-prior"],
+            "missing_evidence_kinds": [],
+            "falsification_question": "Is the launch gap still present?",
+        }
+        prior_result = {
+            "hypothesis_set": {
+                "hypotheses": [prior_closed, prior_unmodeled],
+                "relationships": [],
+            }
+        }
+        transition = {
+            "hypothesis_id": "h-unmodeled",
+            "scope_node_ids": ["gpu-kernel"],
+            "evidence_kind": "compiler_sass",
+        }
+        action_catalog = {
+            "actions": [
+                {
+                    "action_id": "ncu-targeted-kernel",
+                    "evidence_kind": "ncu_kernel",
+                }
+            ]
+        }
+
+        terminal_unmodeled = copy.deepcopy(prior_unmodeled)
+        terminal_unmodeled.update(
+            {
+                "disposition": "undifferentiable",
+                "support_evidence_ids": [],
+                "oppose_evidence_ids": [],
+                "missing_evidence_kinds": [],
+            }
+        )
+        terminal_result = {
+            "hypothesis_set": {
+                "hypotheses": [copy.deepcopy(prior_closed), terminal_unmodeled],
+                "relationships": [],
+            }
+        }
+        empty_requests = {"requests": []}
+        self.assertEqual(
+            self.controller._validate_measure_only_transition(
+                prior_result,
+                terminal_result,
+                empty_requests,
+                action_catalog,
+                transition,
+            ),
+            {},
+        )
+
+        rejected_unmodeled = copy.deepcopy(terminal_unmodeled)
+        rejected_unmodeled.update(
+            {
+                "disposition": "rejected",
+                "oppose_evidence_ids": ["ev-global-scan"],
+            }
+        )
+        injected_inactive = copy.deepcopy(prior_closed)
+        injected_inactive.update(
+            {
+                "hypothesis_id": "h-injected-closed",
+                "mechanism": "injected_closed_mechanism",
+            }
+        )
+        changed_history = copy.deepcopy(prior_closed)
+        changed_history["oppose_evidence_ids"] = ["ev-rewritten-history"]
+        invalid_terminal_cases = [
+            (
+                "noncanonical closure",
+                [copy.deepcopy(prior_closed), rejected_unmodeled],
+                empty_requests,
+            ),
+            (
+                "new inactive hypothesis",
+                [
+                    copy.deepcopy(prior_closed),
+                    copy.deepcopy(terminal_unmodeled),
+                    injected_inactive,
+                ],
+                empty_requests,
+            ),
+            (
+                "rewritten inactive history",
+                [changed_history, copy.deepcopy(terminal_unmodeled)],
+                empty_requests,
+            ),
+            (
+                "terminal request",
+                [copy.deepcopy(prior_closed), copy.deepcopy(terminal_unmodeled)],
+                {"requests": [{"request_id": "req-after-stop"}]},
+            ),
+        ]
+        for label, hypotheses, requests in invalid_terminal_cases:
+            with self.subTest(label=label):
+                with self.assertRaises(self.controller.ValidationError):
+                    self.controller._validate_measure_only_transition(
+                        prior_result,
+                        {
+                            "hypothesis_set": {
+                                "hypotheses": hypotheses,
+                                "relationships": [],
+                            }
+                        },
+                        requests,
+                        action_catalog,
+                        transition,
+                    )
+
+        direction = {
+            "hypothesis_id": "h-kernel-stall",
+            "kind": "mechanism",
+            "scope_node_ids": ["gpu-kernel"],
+            "statement": "A kernel stall may dominate the interval.",
+            "mechanism": "kernel_stall",
+            "claim_layer": "kernel",
+            "disposition": "active",
+            "confidence": "inconclusive",
+            "support_evidence_ids": [],
+            "oppose_evidence_ids": [],
+            "missing_evidence_kinds": ["ncu_kernel"],
+            "falsification_question": "Does NCU reject the stall?",
+        }
+        direction_requests = {
+            "requests": [
+                {
+                    "request_id": "req-kernel-stall",
+                    "action_id": "ncu-targeted-kernel",
+                    "target_hypothesis_ids": ["h-kernel-stall"],
+                }
+            ]
+        }
+        self.assertEqual(
+            self.controller._validate_measure_only_transition(
+                prior_result,
+                {
+                    "hypothesis_set": {
+                        "hypotheses": [copy.deepcopy(prior_closed), direction],
+                        "relationships": [],
+                    }
+                },
+                direction_requests,
+                action_catalog,
+                transition,
+            ),
+            {"h-kernel-stall": "h-unmodeled"},
+        )
+        invalid_direction_cases = [
+            ("new inactive", injected_inactive),
+            ("terminal unmodeled", terminal_unmodeled),
+        ]
+        for label, extra in invalid_direction_cases:
+            with self.subTest(label=label):
+                with self.assertRaises(self.controller.ValidationError):
+                    self.controller._validate_measure_only_transition(
+                        prior_result,
+                        {
+                            "hypothesis_set": {
+                                "hypotheses": [
+                                    copy.deepcopy(prior_closed),
+                                    direction,
+                                    extra,
+                                ],
+                                "relationships": [],
+                            }
+                        },
+                        direction_requests,
+                        action_catalog,
+                        transition,
+                    )
+
+    def test_controller_scoped_neutral_evidence_cannot_open_a_mechanism(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             control, run_dir, _project = self._workspace(root)
@@ -3835,19 +4031,11 @@ class WorkloadRoundTests(unittest.TestCase):
                     "right": "h-kernel-stall-new",
                 }
             ]
-            third_result = self.controller._load_hypothesis_space_module().validate_hypothesis_set(
-                third_hypothesis,
-                epoch=epoch,
-                execution_map=execution_map,
-                evidence_catalog=evidence_catalog,
-            )
             third_request = copy.deepcopy(second_request)
             third_request.update(
                 {
                     "request_set_id": "requests-new-scoped-mechanism",
-                    "hypothesis_set_sha256": third_result[
-                        "hypothesis_set_sha256"
-                    ],
+                    "hypothesis_set_sha256": "0" * 64,
                     "requests": [
                         {
                             "request_id": "req-new-scoped-mechanism",
@@ -3879,22 +4067,27 @@ class WorkloadRoundTests(unittest.TestCase):
                     ],
                 }
             )
-
-            final_state = self.controller.register_active_diagnosis_proposal(
-                control, run_dir, third_hypothesis, third_request
+            state_before = self.controller.read_run_state(run_dir)
+            ledger_before = self.controller._verify_active_diagnosis_ledger(
+                run_dir
             )
-            admitted = json.loads(
-                (active / "hypothesis_result.json").read_text("utf-8")
-            )
-            self.assertTrue(
-                any(
-                    item["hypothesis_id"] == "h-kernel-stall-new"
-                    for item in admitted["hypothesis_set"]["hypotheses"]
+            with self.assertRaisesRegex(
+                self.controller.ValidationError,
+                "sealed evidence does not explicitly support",
+            ):
+                self.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    third_hypothesis,
+                    third_request,
                 )
+            self.assertEqual(
+                self.controller.read_run_state(run_dir),
+                state_before,
             )
-            self.assertIn(
-                final_state["next_action"],
-                {"collect_evidence", "review_required", "done"},
+            self.assertEqual(
+                self.controller._verify_active_diagnosis_ledger(run_dir),
+                ledger_before,
             )
 
     def test_rejected_mechanism_can_be_replaced_but_cannot_be_renamed_back(self) -> None:
@@ -4290,8 +4483,7 @@ class WorkloadRoundTests(unittest.TestCase):
             execution_map=execution_map,
             evidence_catalog=catalog,
         )
-
-        with self.assertRaisesRegex(ValueError, "outcome-bound"):
+        with self.assertRaisesRegex(ValueError, "explicitly supports"):
             self.controller._validate_hypothesis_evolution(
                 second,
                 third,
@@ -4318,6 +4510,7 @@ class WorkloadRoundTests(unittest.TestCase):
         reused_value["hypotheses"][-1].update(
             {
                 "hypothesis_id": "h-kernel-bound",
+                "support_evidence_ids": [],
                 "oppose_evidence_ids": ["ev-kernel-opposed"],
             }
         )
@@ -4432,7 +4625,9 @@ class WorkloadRoundTests(unittest.TestCase):
                 execution_map=execution_map,
             )
 
-    def test_fresh_controller_scoped_evidence_can_open_a_distinct_mechanism(self) -> None:
+    def test_explicit_controller_scoped_evidence_can_open_a_distinct_mechanism(
+        self,
+    ) -> None:
         from tests.test_analysis_epoch import epoch_fixture
         from tests.test_execution_map import evidence_catalog, map_fixture
         from tests.test_hypothesis_space import hypothesis_fixture
@@ -4499,7 +4694,7 @@ class WorkloadRoundTests(unittest.TestCase):
             "epoch_id": epoch["epoch_id"],
             "kind": "compiler_report",
             "artifact_sha256": "b" * 64,
-            "supports_hypothesis_ids": [],
+            "supports_hypothesis_ids": ["h-kernel-stall-scoped"],
             "opposes_hypothesis_ids": [],
         }
         for node in execution_map["nodes"]:

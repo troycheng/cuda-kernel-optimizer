@@ -300,14 +300,29 @@ def select_evidence_request(
         raise ValidationError("request_set epoch_id does not match Controller")
     if root["hypothesis_set_sha256"] != hypothesis_digest:
         raise ValidationError("request_set hypothesis digest does not match Controller")
-    if type(root["requests"]) is not list or not 1 <= len(root["requests"]) <= 32:
-        raise ValidationError("request_set.requests must contain 1 to 32 entries")
-
     active = {
         item["hypothesis_id"]: item
         for item in hypotheses["hypotheses"]
         if item["disposition"] == "active"
     }
+    if type(root["requests"]) is not list or len(root["requests"]) > 32:
+        raise ValidationError("request_set.requests must contain at most 32 entries")
+    if not active and not root["requests"]:
+        return _selection(
+            "evidence_gap",
+            epoch_id,
+            hypothesis_digest,
+            catalog,
+            controller_policy,
+            None,
+            [],
+            [],
+            "no_active_hypothesis",
+        )
+    if not root["requests"]:
+        raise ValidationError(
+            "request_set.requests must not be empty while hypotheses are active"
+        )
     exclusive = {
         (item["left"], item["right"])
         for item in hypotheses["relationships"]
