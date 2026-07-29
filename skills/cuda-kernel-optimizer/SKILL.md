@@ -130,6 +130,9 @@ ceiling is below `minimum_effect`, or when the decision is `STOP`.
 Bundled knowledge, search, and external AI may only propose a locally
 falsifiable shadow direction. They cannot create benefit facts, execute work,
 or promote a candidate; local correctness and paired evidence remain decisive.
+A missing knowledge-card match does not block a model-proposed mechanism.
+Preserve unresolved execution-map scope, require a different falsifiable
+evidence request, and let the Controller decide whether it is admissible.
 
 Run help instead of loading command inventories:
 

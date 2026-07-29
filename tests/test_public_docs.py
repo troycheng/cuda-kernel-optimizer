@@ -215,17 +215,19 @@ class PublicDocsTests(unittest.TestCase):
         ):
             self.assertIn(marker, text)
 
-    def test_validation_records_v1_3_seed_replay_limits(self) -> None:
+    def test_validation_records_v1_3_retained_case_release_gate(self) -> None:
         text = (ROOT / "docs/validation.md").read_text(encoding="utf-8")
         for marker in (
-            "six Triton decision points",
-            "not an independent",
-            "All six Controller diagnosis traces ended in",
-            "accepted four candidate mechanisms",
-            "rejected two at the 1 us threshold",
-            "V1.3 remains unreleased",
-            "six new Controller decision points",
-            "does not test mechanism",
+            "six retained Triton decision points",
+            "All six observed diagnosis decisions",
+            "promoted four mechanisms",
+            "rejected two below the 1 us threshold",
+            "six retained-case Controller replays",
+            "3 of 4 promoted mechanisms",
+            "0 of 4",
+            "do not prove generalization to a new workload",
+            "db5d19c",
+            "parallel_nms_select_single_warp_latency",
         ):
             self.assertIn(marker, text)
 
@@ -240,6 +242,8 @@ class PublicDocsTests(unittest.TestCase):
             "historical speedup",
             "exact identity",
             "fail closed",
+            "missing knowledge match",
+            "does not block",
         ):
             self.assertIn(marker, text)
 
@@ -271,6 +275,7 @@ class PublicDocsTests(unittest.TestCase):
         for marker in (
             "A run grant is the boundary for the next action, not a target to consume:",
             "Bundled knowledge, search, and external AI may only propose a locally falsifiable shadow direction.",
+            "A missing knowledge-card match does not block a model-proposed mechanism.",
             "GitHub Copilot is for code and repository-specific review.",
         ):
             self.assertIn(marker, skill)

@@ -27,15 +27,27 @@ available check that could falsify it. The context always has
 `promotion_authority: none`: it cannot authorize code changes, create a benefit
 fact, or promote a candidate.
 
+An empty knowledge result is not a finding that the workload has no useful
+direction. If a raw profile identifies a qualifying execution layer but lacks a
+mechanism-level observation, the Controller may allow one low-cost, read-only
+measurement route. A neutral result remains neutral. The model may then propose
+a concrete mechanism from the sealed profile, execution map, and source code.
+A missing knowledge match does not block that proposal; the normal evidence and
+scope checks still apply. If the execution map remains incomplete, its
+unexplained scope is preserved rather than treated as resolved.
+
 Historical speedup numbers are not runtime inputs. A locally measured case may
 support or reject a mechanism only under its exact identity. A previous
 identity-bound rejection prevents the same mechanism from consuming another
 round, while an analogous case can only appear as an explanation.
 
-Missing identity, unavailable tools, unsupported versions, absent semantic
-observations, or the lack of an allowed read-only falsifier fail closed. The
-engine does not infer units from text, convert incompatible metrics, or treat a
-profiler permission error as evidence against a mechanism.
+Corrupted source records, invalid sealed evidence, or an identity mismatch
+claimed as an exact local match fail closed. Missing identity, unavailable
+tools, unsupported versions, absent semantic observations, or the lack of an
+allowed read-only falsifier can remove a knowledge candidate, but do not forbid
+the model from proposing a separately falsifiable direction. The engine does
+not infer units from text, convert incompatible metrics, or treat a profiler
+permission error as evidence against a mechanism.
 
 The Controller-owned file is the authoritative runtime value.
 `knowledge_query.py --frozen-input` is an inspection path for the same closed

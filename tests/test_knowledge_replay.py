@@ -7,6 +7,7 @@ from unittest import mock
 import re
 import hashlib
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from tools import build_knowledge_replay
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "knowledge_replay"
 FRESH_FIXTURE = FIXTURE_DIR / "fresh_controller_cases.json"
+POSTFREEZE_FIXTURE = FIXTURE_DIR / "postfreeze_controller_cases.json"
+POSTFREEZE_BASELINE = FIXTURE_DIR / "v1_2_postfreeze_baseline.json"
 RUNTIME_INPUT_FIELDS = {
     "knowledge_identity",
     "diagnosis",
@@ -114,6 +117,10 @@ class KnowledgeReplayTest(unittest.TestCase):
             "cheapest_valid_action_ids",
             "expected_terminal_decisions",
             "label_source_sha256",
+            "promoted_mechanism_keys",
+            "observed_diagnostic_decision",
+            "candidate_outcome",
+            "source_documents",
             "speedup",
             "verdict",
         }
@@ -302,35 +309,92 @@ class KnowledgeReplayTest(unittest.TestCase):
             hypothesis,
             request,
         )
+        source_files = {
+            "workload_controller_sha256": (
+                Path(__file__).parents[1]
+                / "skills/cuda-kernel-optimizer/scripts/workload_controller.py"
+            ),
+            "evidence_selector_sha256": (
+                Path(__file__).parents[1]
+                / "skills/cuda-kernel-optimizer/scripts/evidence_selector.py"
+            ),
+            "diagnostic_knowledge_sha256": (
+                Path(__file__).parents[1]
+                / "skills/cuda-kernel-optimizer/scripts/diagnostic_knowledge.py"
+            ),
+            "diagnostic_cards_sha256": (
+                Path(__file__).parents[1]
+                / "skills/cuda-kernel-optimizer/references/diagnostic_cards.json"
+            ),
+            "case_memory_sha256": (
+                Path(__file__).parents[1]
+                / "skills/cuda-kernel-optimizer/references/case_memory.json"
+            ),
+        }
+        source_repo_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).parents[1],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        (run_dir / "source-state.json").write_text(
+            json.dumps(
+                {
+                    "source_repo_head": source_repo_head,
+                    **{
+                        field: hashlib.sha256(path.read_bytes()).hexdigest()
+                        for field, path in source_files.items()
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         outcome_path = run_dir / "validation" / "outcome.json"
         outcome_path.parent.mkdir()
         outcome = {
             "accepted_mechanism_keys": ["frameworklaunchoverhead"],
+            "bootstrap_95_benefit_ci_us": [1.5, 2.5],
             "cheapest_valid_action_ids": ["pytorch-operator-trace"],
-            "expected_terminal_decisions": ["MEASURE"],
+            "correctness_passed": True,
+            "mean_benefit_us": 2.0,
+            "minimum_mechanism_effect_us": 1.0,
+            "pair_count": 6,
+            "validation_result": "confirmed_above_mechanism_threshold",
+            "wins": 6,
         }
-        outcome_path.write_text(json.dumps(outcome), encoding="utf-8")
+        outcome_path.write_text(
+            json.dumps(outcome, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         label_path = run_dir / "validation" / "label.json"
-        relative_outcome = outcome_path.relative_to(run_dir).as_posix()
+        decision_path = run_dir / "active_diagnosis" / "decision.json"
         label_path.write_text(
             json.dumps(
                 {
-                    "schema_version": "cuda-optimizer/knowledge-replay-label-v1",
+                    "schema_version": "cuda-optimizer/knowledge-replay-label-v2",
                     "case_id": "T01",
-                    **outcome,
-                    "field_sources": {
-                        field: {
-                            "relative_path": relative_outcome,
-                            "source_sha256": hashlib.sha256(
-                                outcome_path.read_bytes()
-                            ).hexdigest(),
-                            "locator": f"/{field}",
-                        }
-                        for field in outcome
+                    "diagnostic_decision_source": {
+                        "relative_path": "active_diagnosis/decision.json",
+                        "source_sha256": hashlib.sha256(
+                            decision_path.read_bytes()
+                        ).hexdigest(),
                     },
-                }
-            ),
+                    "candidate_validation_source": {
+                        "relative_path": "validation/outcome.json",
+                        "source_sha256": hashlib.sha256(
+                            outcome_path.read_bytes()
+                        ).hexdigest(),
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
         case = build_knowledge_replay.extract_scoreable_controller_case(
@@ -350,11 +414,19 @@ class KnowledgeReplayTest(unittest.TestCase):
             self.assertEqual(case["replay_eligibility"]["status"], "scoreable")
             self.assertTrue(case["replay_eligibility"]["timing_provenance"])
             self.assertEqual(
-                case["label"]["accepted_mechanism_keys"],
+                case["label"]["promoted_mechanism_keys"],
                 ["frameworklaunchoverhead"],
             )
+            self.assertEqual(
+                case["label"]["observed_diagnostic_decision"],
+                case["controller_decision"]["decision"],
+            )
+            self.assertEqual(
+                case["label"]["candidate_outcome"]["status"],
+                "promoted",
+            )
             self.assertNotIn(
-                "accepted_mechanism_keys",
+                "promoted_mechanism_keys",
                 nested_keys(case["input_snapshot"]),
             )
             build_knowledge_replay.validate_scoreable_case(case)
@@ -365,7 +437,10 @@ class KnowledgeReplayTest(unittest.TestCase):
                 "cases_sha256": build_knowledge_replay.canonical_sha256([case]),
             }
             baseline = build_knowledge_replay.build_baseline(suite)["cases"]["T01"]
-            self.assertTrue(baseline["valid_for_scoring"])
+            self.assertTrue(baseline["valid_for_ranking_scoring"])
+            self.assertTrue(baseline["valid_for_action_id_scoring"])
+            self.assertFalse(baseline["valid_for_measured_cost_scoring"])
+            self.assertFalse(baseline["valid_for_terminal_scoring"])
             self.assertEqual(
                 baseline["diagnostic_terminal_decision"],
                 {
@@ -376,6 +451,29 @@ class KnowledgeReplayTest(unittest.TestCase):
             self.assertTrue(baseline["ranked_mechanism_keys"])
             self.assertTrue(baseline["next_actions"])
             self.assertRegex(baseline["route_output_sha256"], r"[0-9a-f]{64}\Z")
+
+    def test_scoreable_case_rejects_unverifiable_source_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, _outcome_path, _label_path = self._scoreable_controller_case(
+                Path(directory).resolve()
+            )
+            case["input_snapshot"]["archive_identity_facts"][
+                "controller_source_identity"
+            ]["source_repo_head"] = "1" * 40
+            with self.assertRaisesRegex(ValueError, "Controller source commit"):
+                build_knowledge_replay.validate_scoreable_case(case)
+
+    def test_scoreable_case_rejects_embedded_label_evidence_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, _outcome_path, _label_path = self._scoreable_controller_case(
+                Path(directory).resolve()
+            )
+            tampered = copy.deepcopy(case)
+            tampered["label"]["source_documents"]["candidate_validation"][
+                "raw_json"
+            ] = "{}\n"
+            with self.assertRaisesRegex(ValueError, "label evidence"):
+                build_knowledge_replay.validate_scoreable_case(tampered)
 
     def test_scoreable_case_rejects_identity_map_or_model_tampering(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -413,21 +511,59 @@ class KnowledgeReplayTest(unittest.TestCase):
                 build_knowledge_replay.validate_scoreable_case(tampered)
 
             tampered = copy.deepcopy(case)
+            tampered["input_snapshot"]["archive_identity_facts"][
+                "controller_source_identity"
+            ]["workload_controller_sha256"] = "f" * 64
+            with self.assertRaisesRegex(ValueError, "controller source"):
+                build_knowledge_replay.validate_scoreable_case(tampered)
+
+            tampered = copy.deepcopy(case)
             tampered["replay_eligibility"]["timing_provenance"][0][
                 "locator"
             ] = "/wrong"
             with self.assertRaisesRegex(ValueError, "locator"):
                 build_knowledge_replay.validate_scoreable_case(tampered)
 
+    def test_scoreable_extractor_requires_current_controller_source_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            _case, _outcome_path, label_path = self._scoreable_controller_case(root)
+            run_dir = root / "run"
+            source_state = run_dir / "source-state.json"
+            source_state.unlink()
+            with self.assertRaisesRegex(ValueError, "source-state"):
+                build_knowledge_replay.extract_scoreable_controller_case(
+                    run_dir,
+                    label_path,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            _case, _outcome_path, label_path = self._scoreable_controller_case(root)
+            run_dir = root / "run"
+            source_state = json.loads(
+                (run_dir / "source-state.json").read_text(encoding="utf-8")
+            )
+            source_state["diagnostic_cards_sha256"] = "f" * 64
+            (run_dir / "source-state.json").write_text(
+                json.dumps(source_state),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "source-state"):
+                build_knowledge_replay.extract_scoreable_controller_case(
+                    run_dir,
+                    label_path,
+                )
+
     def test_scoreable_extractor_rejects_label_source_tampering(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             _case, outcome_path, label_path = self._scoreable_controller_case(root)
             outcome = json.loads(outcome_path.read_text("utf-8"))
-            outcome["expected_terminal_decisions"] = ["STOP"]
+            outcome["mean_benefit_us"] = 99.0
             outcome_path.write_text(json.dumps(outcome), encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "label source digest"):
+            with self.assertRaisesRegex(ValueError, "source digest"):
                 build_knowledge_replay.extract_scoreable_controller_case(
                     root / "run",
                     label_path,
@@ -484,6 +620,10 @@ class FreshControllerReplayTest(unittest.TestCase):
             "cheapest_valid_action_ids",
             "expected_terminal_decisions",
             "label_source_sha256",
+            "promoted_mechanism_keys",
+            "observed_diagnostic_decision",
+            "candidate_outcome",
+            "source_documents",
         }
         for case in self.suite["cases"]:
             self.assertTrue(
@@ -515,13 +655,6 @@ class FreshControllerReplayTest(unittest.TestCase):
             },
             {"PURSUE"},
         )
-        self.assertEqual(
-            sum(
-                case["label"]["expected_terminal_decisions"] == ["PURSUE"]
-                for case in self.suite["cases"]
-            ),
-            4,
-        )
         self.assertTrue(
             all(
                 context["promotion_authority"] == "none"
@@ -543,6 +676,233 @@ class FreshControllerReplayTest(unittest.TestCase):
             }
             self.assertIn("exact_case_rejection", reasons)
 
+
+class PostFreezeControllerReplayTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.suite = json.loads(POSTFREEZE_FIXTURE.read_text())
+        cls.baseline = json.loads(POSTFREEZE_BASELINE.read_text())
+        scripts = (
+            Path(__file__).parents[1]
+            / "skills/cuda-kernel-optimizer/scripts"
+        )
+
+        def load(filename, name):
+            path = scripts / filename
+            spec = importlib.util.spec_from_file_location(name, path)
+            if spec is None or spec.loader is None:
+                raise ImportError(path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+
+        cls.knowledge = load(
+            "diagnostic_knowledge.py",
+            "cuda_optimizer_postfreeze_replay_knowledge",
+        )
+
+    @staticmethod
+    def _runtime_input(case):
+        return {
+            key: value
+            for key, value in case["input_snapshot"].items()
+            if key in RUNTIME_INPUT_FIELDS
+        }
+
+    def test_six_retained_cases_are_distinct_controller_replays(self):
+        self.assertEqual(len(self.suite["cases"]), 6)
+        self.assertEqual(
+            self.suite["cases_sha256"],
+            build_knowledge_replay.canonical_sha256(self.suite["cases"]),
+        )
+        manifests = set()
+        epochs = set()
+        decisions = set()
+        for case in self.suite["cases"]:
+            with self.subTest(case=case["case_id"]):
+                build_knowledge_replay.validate_scoreable_case(case)
+                self.assertEqual(
+                    case["replay_eligibility"]["status"],
+                    "scoreable",
+                )
+                source = case["input_snapshot"]["archive_identity_facts"][
+                    "controller_source_identity"
+                ]
+                self.assertEqual(
+                    source["source_repo_head"],
+                    "db5d19c8a03a6f8350294e582dd9f283259262f4",
+                )
+                manifests.add(
+                    case["input_snapshot"]["archive_identity_facts"][
+                        "source_manifest_sha256"
+                    ]
+                )
+                epochs.add(case["controller_decision"]["epoch_id"])
+                decisions.add(
+                    case["label"]["source_documents"][
+                        "diagnostic_decision"
+                    ]["source_sha256"]
+                )
+        self.assertEqual(len(manifests), 6)
+        self.assertEqual(len(epochs), 6)
+        self.assertEqual(len(decisions), 6)
+
+    def test_postfreeze_labels_separate_diagnosis_from_candidate_outcome(self):
+        for case in self.suite["cases"]:
+            with self.subTest(case=case["case_id"]):
+                decision = case["controller_decision"]
+                primary = decision["primary_diagnosis"]
+                catalog = case["input_snapshot"]["evidence_catalog"]
+                support_kinds = {
+                    catalog[evidence_id]["kind"]
+                    for evidence_id in primary["support_evidence_ids"]
+                }
+                self.assertEqual(
+                    case["label"]["observed_diagnostic_decision"],
+                    decision["decision"],
+                )
+                self.assertEqual(decision["decision"], "PURSUE")
+                self.assertEqual(
+                    primary["confidence"],
+                    "direction_supported",
+                )
+                self.assertGreaterEqual(len(support_kinds), 2)
+                self.assertTrue(decision["benefit_ceiling"]["qualifies"])
+                self.assertTrue(
+                    decision["investment_brief"]["knowledge_adaptation"][
+                        "advisory_only"
+                    ]
+                )
+        outcomes = [
+            case["label"]["candidate_outcome"]["status"]
+            for case in self.suite["cases"]
+        ]
+        self.assertEqual(outcomes.count("promoted"), 4)
+        self.assertEqual(outcomes.count("rejected"), 2)
+
+    def test_postfreeze_v1_3_direction_and_action_metrics_improve_v1_2(self):
+        promoted = [
+            case
+            for case in self.suite["cases"]
+            if case["label"]["promoted_mechanism_keys"]
+        ]
+        self.assertEqual(len(promoted), 4)
+        v1_3_top1 = 0
+        v1_3_top3 = 0
+        v1_3_valid_actions = 0
+        v1_3_profiler_actions = 0
+        v1_2_top1 = 0
+        v1_2_top3 = 0
+        v1_2_valid_actions = 0
+        v1_2_profiler_actions = 0
+        for case in promoted:
+            context = self.knowledge.build_knowledge_context(
+                self._runtime_input(case),
+                limit=3,
+            )
+            ranked = [
+                item["mechanism_key"] for item in context["candidates"]
+            ]
+            actions = [
+                item["cheapest_falsifier"]["action_id"]
+                for item in context["candidates"]
+            ]
+            expected_mechanisms = set(
+                case["label"]["promoted_mechanism_keys"]
+            )
+            expected_actions = set(
+                case["label"]["cheapest_valid_action_ids"]
+            )
+            v1_3_top1 += bool(ranked[:1] and ranked[0] in expected_mechanisms)
+            v1_3_top3 += bool(expected_mechanisms & set(ranked[:3]))
+            v1_3_valid_actions += bool(expected_actions & set(actions))
+            v1_3_profiler_actions += sum(
+                action.startswith("ncu") or action.startswith("nsys")
+                for action in actions
+            )
+
+            baseline = self.baseline["cases"][case["case_id"]]
+            self.assertTrue(baseline["valid_for_ranking_scoring"])
+            self.assertTrue(baseline["valid_for_action_id_scoring"])
+            self.assertFalse(baseline["valid_for_measured_cost_scoring"])
+            self.assertFalse(baseline["valid_for_terminal_scoring"])
+            baseline_ranked = baseline["ranked_mechanism_keys"]
+            baseline_actions = baseline["next_actions"]
+            v1_2_top1 += bool(
+                baseline_ranked[:1]
+                and baseline_ranked[0] in expected_mechanisms
+            )
+            v1_2_top3 += bool(
+                expected_mechanisms & set(baseline_ranked[:3])
+            )
+            v1_2_valid_actions += bool(
+                expected_actions
+                & {item["action_id"] for item in baseline_actions}
+            )
+            v1_2_profiler_actions += sum(
+                item["is_profiler"] for item in baseline_actions
+            )
+
+        self.assertEqual(
+            (
+                v1_3_top1,
+                v1_3_top3,
+                v1_3_valid_actions,
+                v1_3_profiler_actions,
+            ),
+            (3, 3, 3, 0),
+        )
+        self.assertEqual(
+            (
+                v1_2_top1,
+                v1_2_top3,
+                v1_2_valid_actions,
+                v1_2_profiler_actions,
+            ),
+            (0, 0, 0, 4),
+        )
+
+    def test_postfreeze_knowledge_stays_advisory_and_bounded(self):
+        for case in self.suite["cases"]:
+            with self.subTest(case=case["case_id"]):
+                context = self.knowledge.build_knowledge_context(
+                    self._runtime_input(case),
+                    limit=3,
+                )
+                self.assertEqual(context["promotion_authority"], "none")
+                self.assertTrue(
+                    all(
+                        item["confidence"] == "inconclusive"
+                        and item["promotion_authority"] == "none"
+                        for item in context["candidates"]
+                    )
+                )
+                self.assertLessEqual(
+                    len(
+                        json.dumps(
+                            context,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ),
+                    12 * 1024,
+                )
+        by_id = {case["case_id"]: case for case in self.suite["cases"]}
+        for case_id in (
+            "R11-postfreeze-20260729",
+            "R12-postfreeze-20260729",
+        ):
+            context = self.knowledge.build_knowledge_context(
+                self._runtime_input(by_id[case_id]),
+                limit=3,
+            )
+            self.assertFalse(context["candidates"])
+            self.assertIn(
+                "exact_case_rejection",
+                {item["reason"] for item in context["rejections"]},
+            )
 
 if __name__ == "__main__":
     unittest.main()

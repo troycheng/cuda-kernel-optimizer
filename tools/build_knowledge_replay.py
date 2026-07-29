@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 
@@ -26,6 +27,13 @@ V1_2_ROUTER_SNAPSHOT = (
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _TERMINAL_DECISIONS = {"MEASURE", "PURSUE", "REVIEW_REQUIRED", "STOP"}
+_CONTROLLER_SOURCE_FILES = {
+    "workload_controller_sha256": SCRIPTS / "workload_controller.py",
+    "evidence_selector_sha256": SCRIPTS / "evidence_selector.py",
+    "diagnostic_knowledge_sha256": SCRIPTS / "diagnostic_knowledge.py",
+    "diagnostic_cards_sha256": REFERENCES / "diagnostic_cards.json",
+    "case_memory_sha256": REFERENCES / "case_memory.json",
+}
 _V1_2_ROUTER_CARDS_SHA256 = (
     "152da6fd51bb68affc1e2903910aeb1990fc98dc0f2b1c0a600ff5d5073675e7"
 )
@@ -47,6 +55,58 @@ def canonical_sha256(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     ).hexdigest()
+
+
+def _validate_controller_source_identity(
+    value: object,
+    *,
+    verify_commit: bool = False,
+) -> dict:
+    required = {"source_repo_head", *_CONTROLLER_SOURCE_FILES}
+    if type(value) is not dict or set(value) != required:
+        raise ValueError("Controller source-state fields are invalid")
+    source = copy.deepcopy(value)
+    if re.fullmatch(r"[0-9a-f]{40}", source["source_repo_head"]) is None:
+        raise ValueError("Controller source-state commit is invalid")
+    for field, path in _CONTROLLER_SOURCE_FILES.items():
+        digest = source[field]
+        if (
+            type(digest) is not str
+            or _SHA256.fullmatch(digest) is None
+            or digest != hashlib.sha256(path.read_bytes()).hexdigest()
+        ):
+            raise ValueError("Controller source-state digest is invalid")
+        if verify_commit:
+            relative_path = path.relative_to(ROOT).as_posix()
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(ROOT),
+                    "show",
+                    f"{source['source_repo_head']}:{relative_path}",
+                ],
+                check=False,
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                raise ValueError("Controller source commit is unavailable")
+            if hashlib.sha256(result.stdout).hexdigest() != digest:
+                raise ValueError(
+                    "Controller source commit does not reproduce recorded files"
+                )
+    return source
+
+
+def _load_controller_source_identity(run_root: Path) -> dict:
+    path = run_root / "source-state.json"
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Controller scoreable source-state.json is missing")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("Controller source-state.json is invalid") from error
+    return _validate_controller_source_identity(value)
 
 
 def _load_v1_2_router_snapshot() -> dict:
@@ -223,24 +283,138 @@ def _canonical_strings(value: object, label: str) -> list[str]:
     return list(value)
 
 
+def _label_source_document(
+    run_root: Path,
+    source: object,
+    label: str,
+) -> tuple[dict, dict]:
+    if type(source) is not dict or set(source) != {
+        "relative_path",
+        "source_sha256",
+    }:
+        raise ValueError(f"{label} must name one sealed JSON source")
+    path = _contained_path(run_root, source["relative_path"], label)
+    try:
+        raw_bytes = path.read_bytes()
+        raw_json = raw_bytes.decode("utf-8")
+        value = json.loads(raw_json)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is not valid JSON") from error
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    if source["source_sha256"] != digest:
+        raise ValueError(f"{label} source digest drifted")
+    if type(value) is not dict:
+        raise ValueError(f"{label} must contain a JSON object")
+    return value, {
+        "relative_path": path.relative_to(run_root).as_posix(),
+        "source_sha256": digest,
+        "raw_json": raw_json,
+    }
+
+
+def _candidate_outcome_from_validation(value: object) -> dict:
+    if type(value) is not dict:
+        raise ValueError("candidate validation must be an object")
+    required = {
+        "accepted_mechanism_keys",
+        "bootstrap_95_benefit_ci_us",
+        "cheapest_valid_action_ids",
+        "correctness_passed",
+        "mean_benefit_us",
+        "minimum_mechanism_effect_us",
+        "pair_count",
+        "validation_result",
+        "wins",
+    }
+    if not required.issubset(value):
+        raise ValueError("candidate validation is missing scored fields")
+    promoted = _canonical_strings(
+        value["accepted_mechanism_keys"],
+        "candidate validation accepted_mechanism_keys",
+    )
+    actions = _canonical_strings(
+        value["cheapest_valid_action_ids"],
+        "candidate validation cheapest_valid_action_ids",
+    )
+    if not actions:
+        raise ValueError("candidate validation has no cheapest valid action")
+    interval = value["bootstrap_95_benefit_ci_us"]
+    if (
+        type(interval) is not list
+        or len(interval) != 2
+        or any(
+            type(item) not in {int, float} or not math.isfinite(item)
+            for item in interval
+        )
+        or interval[0] > interval[1]
+    ):
+        raise ValueError("candidate validation confidence interval is invalid")
+    mean = value["mean_benefit_us"]
+    threshold = value["minimum_mechanism_effect_us"]
+    if (
+        type(mean) not in {int, float}
+        or not math.isfinite(mean)
+        or type(threshold) not in {int, float}
+        or not math.isfinite(threshold)
+        or threshold <= 0
+        or type(value["correctness_passed"]) is not bool
+        or type(value["pair_count"]) is not int
+        or value["pair_count"] <= 0
+        or type(value["wins"]) is not int
+        or not 0 <= value["wins"] <= value["pair_count"]
+        or not interval[0] <= mean <= interval[1]
+    ):
+        raise ValueError("candidate validation measurement summary is invalid")
+    result = value["validation_result"]
+    if (
+        result == "confirmed_above_mechanism_threshold"
+        and value["correctness_passed"]
+        and promoted
+        and interval[0] >= threshold
+    ):
+        status = "promoted"
+    elif (
+        result == "benefit_below_mechanism_threshold"
+        and value["correctness_passed"]
+        and not promoted
+        and interval[1] < threshold
+    ):
+        status = "rejected"
+    else:
+        raise ValueError("candidate validation result is internally inconsistent")
+    return {
+        "status": status,
+        "reason": result,
+        "correctness_passed": value["correctness_passed"],
+        "mean_benefit_us": mean,
+        "bootstrap_95_benefit_ci_us": copy.deepcopy(interval),
+        "minimum_effect_us": threshold,
+        "pair_count": value["pair_count"],
+        "wins": value["wins"],
+    }
+
+
 def _load_machine_mapped_label(run_root: Path, label_path: Path) -> dict:
     label_path = label_path.expanduser().resolve(strict=False)
     try:
         label_path.relative_to(run_root)
     except ValueError as error:
         raise ValueError("label source must be inside the Controller run") from error
-    value = _load_json(label_path, "label source")
+    try:
+        label_raw_bytes = label_path.read_bytes()
+        label_raw_json = label_raw_bytes.decode("utf-8")
+        value = json.loads(label_raw_json)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("label source is invalid") from error
     fields = {
         "schema_version",
         "case_id",
-        "accepted_mechanism_keys",
-        "cheapest_valid_action_ids",
-        "expected_terminal_decisions",
-        "field_sources",
+        "diagnostic_decision_source",
+        "candidate_validation_source",
     }
     if set(value) != fields:
         raise ValueError("label source fields are not closed")
-    if value["schema_version"] != "cuda-optimizer/knowledge-replay-label-v1":
+    if value["schema_version"] != "cuda-optimizer/knowledge-replay-label-v2":
         raise ValueError("label source schema is unsupported")
     if (
         type(value["case_id"]) is not str
@@ -248,59 +422,48 @@ def _load_machine_mapped_label(run_root: Path, label_path: Path) -> dict:
         is None
     ):
         raise ValueError("label source case_id is invalid")
-    for field in (
-        "accepted_mechanism_keys",
-        "cheapest_valid_action_ids",
-        "expected_terminal_decisions",
-    ):
-        _canonical_strings(value[field], f"label source {field}")
-    if not set(value["expected_terminal_decisions"]).issubset(_TERMINAL_DECISIONS):
-        raise ValueError("label source expected_terminal_decisions is unsupported")
-    sources = value["field_sources"]
-    label_fields = {
-        "accepted_mechanism_keys",
-        "cheapest_valid_action_ids",
-        "expected_terminal_decisions",
-    }
-    if type(sources) is not dict or set(sources) != label_fields:
-        raise ValueError("label source field_sources must map every scored field")
-    normalized_sources = {}
-    for field in sorted(label_fields):
-        source = sources[field]
-        if type(source) is not dict or set(source) != {
-            "relative_path",
-            "source_sha256",
-            "locator",
-        }:
-            raise ValueError(f"label source mapping for {field} is not closed")
-        path = _contained_path(
-            run_root,
-            source["relative_path"],
-            f"label source mapping for {field}",
-        )
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        if source["source_sha256"] != digest:
-            raise ValueError(f"label source digest drifted for {field}")
-        source_value = _json_pointer(
-            _load_json(path, f"label source artifact for {field}"),
-            source["locator"],
-            f"label source mapping for {field}",
-        )
-        if source_value != value[field]:
-            raise ValueError(f"label source mapping does not reproduce {field}")
-        normalized_sources[field] = copy.deepcopy(source)
+    decision, decision_document = _label_source_document(
+        run_root,
+        value["diagnostic_decision_source"],
+        "diagnostic decision label evidence",
+    )
+    outcome, outcome_document = _label_source_document(
+        run_root,
+        value["candidate_validation_source"],
+        "candidate validation label evidence",
+    )
+    diagnostic_decision = decision.get("decision")
+    if diagnostic_decision not in _TERMINAL_DECISIONS:
+        raise ValueError("diagnostic decision label evidence is unsupported")
+    promoted = _canonical_strings(
+        outcome.get("accepted_mechanism_keys"),
+        "candidate validation accepted_mechanism_keys",
+    )
+    actions = _canonical_strings(
+        outcome.get("cheapest_valid_action_ids"),
+        "candidate validation cheapest_valid_action_ids",
+    )
     return {
         "case_id": value["case_id"],
-        "accepted_mechanism_keys": list(value["accepted_mechanism_keys"]),
-        "cheapest_valid_action_ids": list(value["cheapest_valid_action_ids"]),
-        "expected_terminal_decisions": list(value["expected_terminal_decisions"]),
-        "field_sources": normalized_sources,
-        "label_source_sha256": hashlib.sha256(label_path.read_bytes()).hexdigest(),
+        "promoted_mechanism_keys": promoted,
+        "cheapest_valid_action_ids": actions,
+        "observed_diagnostic_decision": diagnostic_decision,
+        "candidate_outcome": _candidate_outcome_from_validation(outcome),
+        "source_documents": {
+            "label_manifest": {
+                "relative_path": label_path.relative_to(run_root).as_posix(),
+                "source_sha256": hashlib.sha256(label_raw_bytes).hexdigest(),
+                "raw_json": label_raw_json,
+            },
+            "diagnostic_decision": decision_document,
+            "candidate_validation": outcome_document,
+        },
     }
 
 
 def _run_source_references(run_root: Path) -> list[dict]:
     fixed = (
+        "source-state.json",
         "control_manifest.json",
         "state.json",
         "state_commit.json",
@@ -429,6 +592,7 @@ def _active_evidence_envelopes(
 def extract_scoreable_controller_case(run_dir: Path, label_path: Path) -> dict:
     """Extract one live, Controller-sealed decision without consulting its label."""
     run_root = run_dir.expanduser().resolve(strict=False)
+    controller_source_identity = _load_controller_source_identity(run_root)
     controller = _load_module(
         "workload_controller.py",
         "cuda_optimizer_controller_replay_extract",
@@ -558,6 +722,7 @@ def extract_scoreable_controller_case(run_dir: Path, label_path: Path) -> dict:
                 "status": "complete",
                 "archive_case_directory": "controller-run",
                 "source_manifest_sha256": canonical_sha256(references),
+                "controller_source_identity": controller_source_identity,
                 "unknown_fields": [],
             },
             **frozen,
@@ -568,14 +733,187 @@ def extract_scoreable_controller_case(run_dir: Path, label_path: Path) -> dict:
         "v1_2_card_to_mechanism": copy.deepcopy(_V1_2_CARD_TO_MECHANISM),
         "label": label,
     }
-    validate_scoreable_case(case)
+    validate_scoreable_case(case, verify_source_commit=False)
     return case
+
+
+def _embedded_label_document(value: object, label: str) -> tuple[dict, dict]:
+    if type(value) is not dict or set(value) != {
+        "relative_path",
+        "source_sha256",
+        "raw_json",
+    }:
+        raise ValueError(f"scoreable label evidence {label} is not closed")
+    relative_path = value["relative_path"]
+    path = Path(relative_path) if type(relative_path) is str else None
+    if (
+        path is None
+        or not relative_path
+        or path.is_absolute()
+        or ".." in path.parts
+        or type(value["source_sha256"]) is not str
+        or _SHA256.fullmatch(value["source_sha256"]) is None
+        or type(value["raw_json"]) is not str
+        or hashlib.sha256(value["raw_json"].encode("utf-8")).hexdigest()
+        != value["source_sha256"]
+    ):
+        raise ValueError(f"scoreable label evidence {label} is invalid")
+    try:
+        document = json.loads(value["raw_json"])
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"scoreable label evidence {label} is invalid JSON"
+        ) from error
+    if type(document) is not dict:
+        raise ValueError(f"scoreable label evidence {label} is not an object")
+    return document, copy.deepcopy(value)
+
+
+def _validate_scoreable_label(case: dict, label: object) -> None:
+    label_fields = {
+        "promoted_mechanism_keys",
+        "cheapest_valid_action_ids",
+        "observed_diagnostic_decision",
+        "candidate_outcome",
+        "source_documents",
+    }
+    if type(label) is not dict or set(label) != label_fields:
+        raise ValueError("scoreable label fields are not closed")
+    promoted = _canonical_strings(
+        label["promoted_mechanism_keys"],
+        "scoreable label promoted_mechanism_keys",
+    )
+    actions = _canonical_strings(
+        label["cheapest_valid_action_ids"],
+        "scoreable label cheapest_valid_action_ids",
+    )
+    observed_decision = label["observed_diagnostic_decision"]
+    if observed_decision not in _TERMINAL_DECISIONS:
+        raise ValueError("scoreable observed diagnostic decision is unsupported")
+    sources = label["source_documents"]
+    if type(sources) is not dict or set(sources) != {
+        "label_manifest",
+        "diagnostic_decision",
+        "candidate_validation",
+    }:
+        raise ValueError("scoreable label evidence sources are not closed")
+    manifest, manifest_source = _embedded_label_document(
+        sources["label_manifest"],
+        "label_manifest",
+    )
+    decision, decision_source = _embedded_label_document(
+        sources["diagnostic_decision"],
+        "diagnostic_decision",
+    )
+    outcome, outcome_source = _embedded_label_document(
+        sources["candidate_validation"],
+        "candidate_validation",
+    )
+    expected_manifest_fields = {
+        "schema_version",
+        "case_id",
+        "diagnostic_decision_source",
+        "candidate_validation_source",
+    }
+    if (
+        set(manifest) != expected_manifest_fields
+        or manifest["schema_version"]
+        != "cuda-optimizer/knowledge-replay-label-v2"
+        or manifest["case_id"] != case.get("case_id")
+        or manifest["diagnostic_decision_source"]
+        != {
+            "relative_path": decision_source["relative_path"],
+            "source_sha256": decision_source["source_sha256"],
+        }
+        or manifest["candidate_validation_source"]
+        != {
+            "relative_path": outcome_source["relative_path"],
+            "source_sha256": outcome_source["source_sha256"],
+        }
+        or manifest_source["relative_path"]
+        in {
+            decision_source["relative_path"],
+            outcome_source["relative_path"],
+        }
+    ):
+        raise ValueError("scoreable label evidence manifest does not close sources")
+    if (
+        decision_source["relative_path"] != "active_diagnosis/decision.json"
+        or decision.get("decision") != observed_decision
+        or decision != case.get("controller_decision")
+    ):
+        raise ValueError("scoreable diagnostic decision label evidence drifted")
+    input_decision_sources = [
+        source
+        for source in case["input_snapshot"]["evidence_summaries"]
+        if source.get("relative_path") == decision_source["relative_path"]
+    ]
+    if (
+        len(input_decision_sources) != 1
+        or input_decision_sources[0].get("sha256")
+        != decision_source["source_sha256"]
+    ):
+        raise ValueError(
+            "scoreable diagnostic decision label evidence is not input-bound"
+        )
+    if (
+        outcome_source["relative_path"] != "validation/outcome.json"
+        or _canonical_strings(
+            outcome.get("accepted_mechanism_keys"),
+            "candidate validation accepted_mechanism_keys",
+        )
+        != promoted
+        or _canonical_strings(
+            outcome.get("cheapest_valid_action_ids"),
+            "candidate validation cheapest_valid_action_ids",
+        )
+        != actions
+        or _candidate_outcome_from_validation(outcome)
+        != label["candidate_outcome"]
+    ):
+        raise ValueError("scoreable candidate label evidence drifted")
+
+
+def _validate_package_regression_label(label: object) -> None:
+    label_fields = {
+        "accepted_mechanism_keys",
+        "cheapest_valid_action_ids",
+        "expected_terminal_decisions",
+        "field_sources",
+        "label_source_sha256",
+    }
+    if type(label) is not dict or set(label) != label_fields:
+        raise ValueError("package-regression label fields are not closed")
+    for field in (
+        "accepted_mechanism_keys",
+        "cheapest_valid_action_ids",
+        "expected_terminal_decisions",
+    ):
+        _canonical_strings(label[field], f"package-regression label {field}")
+    if not set(label["expected_terminal_decisions"]).issubset(
+        _TERMINAL_DECISIONS
+    ):
+        raise ValueError("package-regression label decision is unsupported")
+    if (
+        type(label["label_source_sha256"]) is not str
+        or _SHA256.fullmatch(label["label_source_sha256"]) is None
+    ):
+        raise ValueError("package-regression label_source_sha256 is invalid")
+    for source in label["field_sources"].values():
+        if (
+            type(source) is not dict
+            or set(source) != {"relative_path", "source_sha256", "locator"}
+            or type(source["source_sha256"]) is not str
+            or _SHA256.fullmatch(source["source_sha256"]) is None
+        ):
+            raise ValueError("package-regression label field source is invalid")
 
 
 def _validate_controller_replay_case(
     case: dict,
     *,
     eligibility_status: str,
+    verify_source_commit: bool = False,
 ) -> None:
     if type(case) is not dict or case.get("scoring_group") != "triton":
         raise ValueError("scoreable case must belong to the Triton scoring group")
@@ -615,6 +953,10 @@ def _validate_controller_replay_case(
         "cheapest_valid_action_ids",
         "expected_terminal_decisions",
         "label_source_sha256",
+        "promoted_mechanism_keys",
+        "observed_diagnostic_decision",
+        "candidate_outcome",
+        "source_documents",
     }
 
     def keys(value: object) -> set[str]:
@@ -652,37 +994,10 @@ def _validate_controller_replay_case(
         item["action_id"] for item in snapshot["read_only_actions"]
     ] != snapshot["available_actions"]:
         raise ValueError("read_only_actions do not match available_actions")
-    label = case.get("label")
-    label_fields = {
-        "accepted_mechanism_keys",
-        "cheapest_valid_action_ids",
-        "expected_terminal_decisions",
-        "field_sources",
-        "label_source_sha256",
-    }
-    if type(label) is not dict or set(label) != label_fields:
-        raise ValueError("scoreable label fields are not closed")
-    for field in (
-        "accepted_mechanism_keys",
-        "cheapest_valid_action_ids",
-        "expected_terminal_decisions",
-    ):
-        _canonical_strings(label[field], f"scoreable label {field}")
-    if not set(label["expected_terminal_decisions"]).issubset(_TERMINAL_DECISIONS):
-        raise ValueError("scoreable label terminal decision is unsupported")
-    if (
-        type(label["label_source_sha256"]) is not str
-        or _SHA256.fullmatch(label["label_source_sha256"]) is None
-    ):
-        raise ValueError("scoreable label_source_sha256 is invalid")
-    for source in label["field_sources"].values():
-        if (
-            type(source) is not dict
-            or set(source) != {"relative_path", "source_sha256", "locator"}
-            or type(source["source_sha256"]) is not str
-            or _SHA256.fullmatch(source["source_sha256"]) is None
-        ):
-            raise ValueError("scoreable label field source is invalid")
+    if eligibility_status == "scoreable":
+        _validate_scoreable_label(case, case.get("label"))
+    else:
+        _validate_package_regression_label(case.get("label"))
     source_by_path = {}
     for source in snapshot["evidence_summaries"]:
         relative_path = (
@@ -709,6 +1024,19 @@ def _validate_controller_replay_case(
         "source_manifest_sha256"
     ) != canonical_sha256(snapshot["evidence_summaries"]):
         raise ValueError("scoreable source manifest digest drifted")
+    source_identity = snapshot["archive_identity_facts"].get(
+        "controller_source_identity"
+    )
+    if eligibility_status == "scoreable" or source_identity is not None:
+        try:
+            _validate_controller_source_identity(
+                source_identity,
+                verify_commit=verify_source_commit,
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"{eligibility_status} controller source identity drifted: {error}"
+            ) from error
     for record in eligibility["timing_provenance"]:
         if type(record) is not dict or set(record) != {
             "target",
@@ -759,8 +1087,16 @@ def _validate_controller_replay_case(
             raise ValueError("scoreable timing provenance value drifted")
 
 
-def validate_scoreable_case(case: dict) -> None:
-    _validate_controller_replay_case(case, eligibility_status="scoreable")
+def validate_scoreable_case(
+    case: dict,
+    *,
+    verify_source_commit: bool = True,
+) -> None:
+    _validate_controller_replay_case(
+        case,
+        eligibility_status="scoreable",
+        verify_source_commit=verify_source_commit,
+    )
 
 
 def validate_package_regression_case(case: dict) -> None:
@@ -812,7 +1148,10 @@ def _build_scoreable_v1_2_baseline(case: dict) -> dict:
             "reason": "v1_2_controller_terminal_not_replayed",
         },
         "promotion_authority": route["promotion_authority"],
-        "valid_for_scoring": True,
+        "valid_for_ranking_scoring": True,
+        "valid_for_action_id_scoring": True,
+        "valid_for_measured_cost_scoring": False,
+        "valid_for_terminal_scoring": False,
         "route_output_sha256": canonical_sha256(route),
     }
 

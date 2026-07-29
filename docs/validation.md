@@ -5,7 +5,7 @@ predict the speedup of a new workload.
 
 ## Automated checks
 
-Current branch validation on 2026-07-29 covered 1,346 tests: 1,335 passed and
+Current branch validation on 2026-07-29 covered 1,360 tests: 1,349 passed and
 11 physical RTX 5090 opt-in tests were skipped. Ten require a GPU; the remaining
 read-only replay test requires the 5090 archive to be mounted locally. The suite covers input validation, state recovery,
 evidence binding, shared-host guards, timeouts, restoration, capability retrieval,
@@ -20,48 +20,45 @@ validate the reader's CUDA environment.
 
 ## Physical GPU lane
 
-The V1.3 development lane ran six Triton decision points on a physical RTX 5090
-on 2026-07-28 using container image
+The V1.3 release regression used six retained Triton decision points on a
+physical RTX 5090 with container image
 `ngc.nju.edu.cn/nvidia/tritonserver@sha256:07c340d3b2de4139ca196ff014ded951bbfec475394c3916aa577c6aac15b308`.
-The lane was rerun after the readiness probe was corrected to seal `sm_120`,
-CUDA 13.0, and the current driver as verified identity facts.
+The six retained-case Controller replays were sealed after the source was
+frozen at `db5d19c`. Their source manifests, epochs, and decision artifacts are
+distinct. The current knowledge route ranked 3 of 4 promoted mechanisms at
+Top-1 and Top-3, supplied the valid lowest-cost action in 3 of 4, and proposed
+0 profiler actions. The frozen V1.2 route scored 0 of 4 on the first three
+measures and proposed 4 profiler actions. V1.2 has neither measured action
+duration nor a replayed diagnostic terminal decision for these cases, so the
+release makes no time or terminal comparison.
 
-These six cases seed the same knowledge package that replays them. They are
-therefore development and package-regression material, not an independent
-release gate, and their earlier Top-1, Top-3, action-count, and profiler-count
-comparison is not a release claim. All six Controller diagnosis traces ended in
-`PURSUE`; subsequent workload validation accepted four candidate mechanisms and
-rejected two at the 1 us threshold. That distinction is retained instead of
-rewriting the two diagnosis outcomes as `STOP`.
+All six observed diagnosis decisions were `PURSUE`. Each was backed by at least
+two kinds of local evidence and a benefit ceiling above 1 us. Later candidate
+validation promoted four mechanisms and rejected two below the 1 us threshold.
+The two rejections are candidate outcomes; they are not rewritten as diagnosis
+stage `STOP`. In R10, the knowledge package returned no candidate, but the model
+still proposed auxiliary-stream overlap and the Controller admitted it only
+after local direction-experiment and Nsys evidence.
 
-V1.3 remains unreleased until at least six new Controller decision points are
-collected after the knowledge package is frozen, excluded from that package,
-and replayed through the full Controller trace with evidence-derived labels.
-The existing harness supplies a predeclared semantic observation for a known
-mechanism, so it tests evidence-to-card routing; it does not test mechanism
-extraction from an unfamiliar raw profile. No driver, clock, service, or host
-policy was changed.
+These are known cases that also appear in the bundled knowledge package. They
+prove retained-case regression, provenance, and stage behavior; they do not prove generalization to a new workload.
 
-The first post-freeze Iter0 serving run on 2026-07-29 did exercise that missing
-bootstrap path. Three fresh complete-service baseline blocks produced a median
-343.549 QPS with 0.615% CV, without changing GPU clocks. Nsys identified
-`ParallelNMSSelect<half>` as the largest observed kernel-time contributor. Two
-independently proposed source mechanisms were then rejected by staged
-complete-service checks: deferred output materialization measured +0.084% in
-the short pair, and native warp minimum reduction measured +0.043% across the
-two completed formal pairs, both below the 0.5% service threshold. The run
-stopped before NCU, the remaining formal pair, and promotion.
+A separate Iter0 serving run exercised the unfamiliar-profile path. Three
+complete-service baseline blocks produced a median 343.549 QPS with 0.615% CV.
+Nsys identified `ParallelNMSSelect<half>` as the largest observed kernel-time
+contributor. Deferred output materialization measured +0.084% in the short
+pair, and native warp minimum reduction measured +0.043% across two formal
+pairs. Both were below the 0.5% service threshold and were rejected before NCU
+or promotion.
 
-Unblinding the frozen V1.3 knowledge package exposed a routing defect: the
-traditional diagnosis remained `unknown` despite a qualifying GPU layer
-direction, and the Triton cards excluded the `serving` claim. Those two filters
-have targeted regression coverage. With them corrected, the same frozen input
-lists six relevant mechanism explanations, but still produces no executable
-knowledge candidate because no mechanism-specific semantic observation exists
-at bootstrap. This run therefore validates early rejection and bounded work,
-but not faster discovery of a useful direction; it does not satisfy the V1.3
-release gate. NCU remained outside the declared unprivileged host policy, and
-no host setting or unrelated service was changed.
+After the bootstrap fixes, a clean Controller run preserved the unresolved
+execution-map scope and admitted the model-proposed
+`parallel_nms_select_single_warp_latency` direction even though the knowledge
+package had no matching candidate. NCU capability was unavailable, so the run
+returned `REVIEW_REQUIRED` without starting NCU. This run verifies that raw
+evidence can start a model direction, and that unavailable tooling stops safely;
+it does not show that V1.3 found a useful new-workload optimization. No driver,
+clock, service, or host policy was changed.
 
 The V1.1 lane passed 24 of 24 checks in 134.726 seconds on a physical RTX 5090
 on 2026-07-22. It used immutable compatibility image

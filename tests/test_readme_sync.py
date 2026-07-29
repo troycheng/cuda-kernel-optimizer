@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unittest
@@ -103,7 +104,7 @@ class ReadmeSyncTests(unittest.TestCase):
                 "### Start formal optimization",
                 "### How optimization directions are formed",
                 "### How candidate changes advance",
-                "### V1.3 (in development)",
+                "### V1.3.0",
                 "### V1.2.0",
                 "### V1.1.0",
                 "### V1.0.1",
@@ -293,22 +294,23 @@ class ReadmeSyncTests(unittest.TestCase):
         ):
             self.assertIn(marker, english)
 
-    def test_readmes_publish_v1_2_and_mark_v1_3_as_development(self) -> None:
-        development_headings = (
-            (self.chinese, "### V1.3（开发中）"),
-            (self.english, "### V1.3 (in development)"),
+    def test_readmes_publish_v1_3(self) -> None:
+        release_headings = (
+            (self.chinese, "### V1.3.0"),
+            (self.english, "### V1.3.0"),
         )
-        for text, heading in development_headings:
+        for text, heading in release_headings:
             self.assertEqual(text.count(heading), 1)
-            self.assertNotIn("### V1.3.0", text)
+            self.assertNotIn("开发中", text)
+            self.assertNotIn("in development", text.lower())
             self.assertEqual(text.count("### V1.2.0"), 1)
             self.assertEqual(text.count("### V1.1.0"), 1)
             self.assertEqual(text.count("### V1.0.1"), 1)
             self.assertEqual(text.count("### V1.0.0"), 1)
             self.assertNotRegex(text, r"(?m)^### V(?:2|3)\.")
 
-    def test_v1_3_release_requires_independent_post_freeze_replays(self) -> None:
-        suite = json.loads(
+    def test_v1_3_release_is_backed_by_retained_controller_replays(self) -> None:
+        package_suite = json.loads(
             (
                 ROOT
                 / "tests"
@@ -317,10 +319,56 @@ class ReadmeSyncTests(unittest.TestCase):
                 / "fresh_controller_cases.json"
             ).read_text(encoding="utf-8")
         )
+        postfreeze_suite = json.loads(
+            (
+                ROOT
+                / "tests"
+                / "fixtures"
+                / "knowledge_replay"
+                / "postfreeze_controller_cases.json"
+            ).read_text(encoding="utf-8")
+        )
         package_regressions = sum(
             case["scoring_group"] == "triton"
             and case["replay_eligibility"]["status"] == "package_regression"
-            for case in suite["cases"]
+            for case in package_suite["cases"]
+        )
+        scoreable = [
+            case
+            for case in postfreeze_suite["cases"]
+            if case["scoring_group"] == "triton"
+            and case["replay_eligibility"]["status"] == "scoreable"
+        ]
+        source_manifests = {
+            case["input_snapshot"]["archive_identity_facts"][
+                "source_manifest_sha256"
+            ]
+            for case in scoreable
+        }
+        source_commits = {
+            case["input_snapshot"]["archive_identity_facts"][
+                "controller_source_identity"
+            ]["source_repo_head"]
+            for case in scoreable
+        }
+        package_case_numbers = {
+            case["case_id"].split("-", 1)[0]
+            for case in package_suite["cases"]
+        }
+        replay_case_numbers = {
+            case["case_id"].split("-", 1)[0]
+            for case in scoreable
+        }
+        self.assertEqual(
+            postfreeze_suite["cases_sha256"],
+            hashlib.sha256(
+                json.dumps(
+                    postfreeze_suite["cases"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode()
+            ).hexdigest(),
         )
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
         public_paths = (
@@ -344,10 +392,21 @@ class ReadmeSyncTests(unittest.TestCase):
             for path in public_paths
         )
         self.assertEqual(package_regressions, 6)
-        self.assertEqual(version, "1.2.0")
-        self.assertFalse(
+        self.assertEqual(len(scoreable), 6)
+        self.assertEqual(len(source_manifests), 6)
+        self.assertEqual(
+            package_case_numbers,
+            replay_case_numbers,
+            "the V1.3 release set is an explicit retained-case regression",
+        )
+        self.assertEqual(
+            source_commits,
+            {"db5d19c8a03a6f8350294e582dd9f283259262f4"},
+        )
+        self.assertEqual(version, "1.3.0")
+        self.assertTrue(
             v1_3_release_claimed,
-            "the six package seeds are not an independent V1.3 release gate",
+            "the release must be stated only after six scoreable retained-case replays exist",
         )
 
     def test_readmes_explain_v1_3_evidence_bound_knowledge(self) -> None:
@@ -356,6 +415,7 @@ class ReadmeSyncTests(unittest.TestCase):
             "最多三个可证伪方向",
             "历史收益数字",
             "active_diagnosis/knowledge_context.json",
+            "知识库没有匹配不会阻止模型提出方向",
         ):
             self.assertIn(marker, self.chinese)
         english = " ".join(self.english.split())
@@ -364,6 +424,7 @@ class ReadmeSyncTests(unittest.TestCase):
             "at most three falsifiable directions",
             "historical speedup numbers",
             "active_diagnosis/knowledge_context.json",
+            "A missing knowledge match does not block a model-proposed direction",
         ):
             self.assertIn(marker, english)
 

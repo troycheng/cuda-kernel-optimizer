@@ -1,0 +1,145 @@
+{
+  "baseline_cases_sha256": "9843e207b1f264d2f37464f6f37c6da6711647bc76a9ff997901e8c06b28093e",
+  "cases": {
+    "R07-postfreeze-20260729": {
+      "diagnostic_terminal_decision": {
+        "reason": "v1_2_controller_terminal_not_replayed",
+        "status": "unavailable"
+      },
+      "next_actions": [
+        {
+          "action_id": "ncu-targeted-kernel",
+          "cost_class": "high",
+          "is_profiler": true,
+          "measured_seconds": null
+        }
+      ],
+      "promotion_authority": "none",
+      "ranked_mechanism_keys": [
+        "kernelresourceormemory"
+      ],
+      "route_output_sha256": "c8695a4db2eaea6d7a3bca1f15615000db8bd50c68f1f648b76b6c2882d81aee",
+      "valid_for_action_id_scoring": true,
+      "valid_for_measured_cost_scoring": false,
+      "valid_for_ranking_scoring": true,
+      "valid_for_terminal_scoring": false
+    },
+    "R08-postfreeze-20260729": {
+      "diagnostic_terminal_decision": {
+        "reason": "v1_2_controller_terminal_not_replayed",
+        "status": "unavailable"
+      },
+      "next_actions": [
+        {
+          "action_id": "ncu-targeted-kernel",
+          "cost_class": "high",
+          "is_profiler": true,
+          "measured_seconds": null
+        }
+      ],
+      "promotion_authority": "none",
+      "ranked_mechanism_keys": [
+        "kernelresourceormemory"
+      ],
+      "route_output_sha256": "c8695a4db2eaea6d7a3bca1f15615000db8bd50c68f1f648b76b6c2882d81aee",
+      "valid_for_action_id_scoring": true,
+      "valid_for_measured_cost_scoring": false,
+      "valid_for_ranking_scoring": true,
+      "valid_for_terminal_scoring": false
+    },
+    "R09-postfreeze-20260729": {
+      "diagnostic_terminal_decision": {
+        "reason": "v1_2_controller_terminal_not_replayed",
+        "status": "unavailable"
+      },
+      "next_actions": [
+        {
+          "action_id": "ncu-targeted-kernel",
+          "cost_class": "high",
+          "is_profiler": true,
+          "measured_seconds": null
+        }
+      ],
+      "promotion_authority": "none",
+      "ranked_mechanism_keys": [
+        "kernelresourceormemory"
+      ],
+      "route_output_sha256": "c8695a4db2eaea6d7a3bca1f15615000db8bd50c68f1f648b76b6c2882d81aee",
+      "valid_for_action_id_scoring": true,
+      "valid_for_measured_cost_scoring": false,
+      "valid_for_ranking_scoring": true,
+      "valid_for_terminal_scoring": false
+    },
+    "R10-postfreeze-20260729": {
+      "diagnostic_terminal_decision": {
+        "reason": "v1_2_controller_terminal_not_replayed",
+        "status": "unavailable"
+      },
+      "next_actions": [
+        {
+          "action_id": "ncu-targeted-kernel",
+          "cost_class": "high",
+          "is_profiler": true,
+          "measured_seconds": null
+        }
+      ],
+      "promotion_authority": "none",
+      "ranked_mechanism_keys": [
+        "kernelresourceormemory"
+      ],
+      "route_output_sha256": "c8695a4db2eaea6d7a3bca1f15615000db8bd50c68f1f648b76b6c2882d81aee",
+      "valid_for_action_id_scoring": true,
+      "valid_for_measured_cost_scoring": false,
+      "valid_for_ranking_scoring": true,
+      "valid_for_terminal_scoring": false
+    },
+    "R11-postfreeze-20260729": {
+      "diagnostic_terminal_decision": {
+        "reason": "v1_2_controller_terminal_not_replayed",
+        "status": "unavailable"
+      },
+      "next_actions": [
+        {
+          "action_id": "ncu-targeted-kernel",
+          "cost_class": "high",
+          "is_profiler": true,
+          "measured_seconds": null
+        }
+      ],
+      "promotion_authority": "none",
+      "ranked_mechanism_keys": [
+        "kernelresourceormemory"
+      ],
+      "route_output_sha256": "c8695a4db2eaea6d7a3bca1f15615000db8bd50c68f1f648b76b6c2882d81aee",
+      "valid_for_action_id_scoring": true,
+      "valid_for_measured_cost_scoring": false,
+      "valid_for_ranking_scoring": true,
+      "valid_for_terminal_scoring": false
+    },
+    "R12-postfreeze-20260729": {
+      "diagnostic_terminal_decision": {
+        "reason": "v1_2_controller_terminal_not_replayed",
+        "status": "unavailable"
+      },
+      "next_actions": [
+        {
+          "action_id": "ncu-targeted-kernel",
+          "cost_class": "high",
+          "is_profiler": true,
+          "measured_seconds": null
+        }
+      ],
+      "promotion_authority": "none",
+      "ranked_mechanism_keys": [
+        "kernelresourceormemory"
+      ],
+      "route_output_sha256": "c8695a4db2eaea6d7a3bca1f15615000db8bd50c68f1f648b76b6c2882d81aee",
+      "valid_for_action_id_scoring": true,
+      "valid_for_measured_cost_scoring": false,
+      "valid_for_ranking_scoring": true,
+      "valid_for_terminal_scoring": false
+    }
+  },
+  "schema_version": "cuda-optimizer/knowledge-replay-baseline-v1",
+  "source_cases_sha256": "5be4a4fecfd31d32b7c9ef9d10856c6d9fbd326677e2c8084a84c95238f42270"
+}

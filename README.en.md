@@ -14,8 +14,7 @@
 
 ## Project overview
 
-`cuda-kernel-optimizer` is a GPU performance optimization skill for ChatGPT's coding agent. The user supplies a test workload
-(dataset, representative requests, or replay), correctness checks (expected outputs, tolerances, or accuracy criteria), the target
+`cuda-kernel-optimizer` is a GPU performance optimization skill for ChatGPT's coding agent. The user supplies a test workload (dataset, representative requests, or replay), correctness checks (expected outputs, tolerances, or accuracy criteria), the target
 environment, and the allowed modification scope. ChatGPT checks the environment, runs the original baseline, analyzes bottlenecks,
 modifies code, and uses correctness and paired performance data to decide whether a change should be kept.
 
@@ -114,7 +113,9 @@ ChatGPT proposes no more than three competing hypotheses from the execution
 map, source code, and relevant knowledge. V1.3 derives directions only from the
 current identity, performance model, and sealed observations; it never treats
 historical speedup numbers as current benefit. A prior failure may prevent a
-repeat only under the same identity. The Controller then checks evidence
+repeat only under the same identity. A missing knowledge match does not block a
+model-proposed direction; the Controller still checks it against the sealed
+profile, execution path, and source. The Controller then checks evidence
 binding, mechanism duplication, and claim layer before selecting the cheapest
 check that can distinguish the hypotheses. New evidence updates the next round
 until a direction is supported or rejected.
@@ -199,11 +200,12 @@ Neither predicts the speedup of a new project.
 
 ## Release notes
 
-### V1.3 (in development)
+### V1.3.0
 
 - The local knowledge engine returns at most three falsifiable directions from the current identity, performance model, and sealed observations.
+- When a raw profile lacks mechanism-level observations, the Controller allows one low-cost read-only check. A neutral result is not support, and an empty knowledge match does not block a model direction.
 - Historical cases support or reject only identity-bound mechanisms; historical gains do not transfer to a new workload.
-- The current six RTX 5090 Triton decision points are package-regression seeds, not release-gate cases; release requires independent post-freeze cases.
+- In the retained RTX 5090 replay, V1.3 matched 3 of 4 promoted mechanisms and reduced profiler suggestions from 4 to 0. This is a known-case regression, not a new-workload hit rate.
 
 ### V1.2.0
 
