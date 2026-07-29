@@ -32,6 +32,13 @@ _LAYERS = {
     "idle",
 }
 _REQUESTED_CLAIMS = {"kernel", "workload", "serving"}
+_LAYER_TO_DIAGNOSIS_CATEGORY = {
+    "communication": "communication",
+    "framework": "framework",
+    "gpu": "kernel",
+    "io": "io",
+    "transfer": "transfer",
+}
 _DIAGNOSTIC_PRODUCERS = {
     "nsys_timeline": "nsys-timeline-adapter",
     "pytorch_profile": "pytorch-profile-adapter",
@@ -677,6 +684,25 @@ def _diagnosis_categories(value: object) -> list[str]:
     return list(dict.fromkeys(categories or ["unknown"]))
 
 
+def _effective_categories(
+    diagnosis: object, performance_model: Mapping[str, object]
+) -> list[str]:
+    categories = _diagnosis_categories(diagnosis)
+    if categories != ["unknown"]:
+        return categories
+    inferred = sorted(
+        {
+            _LAYER_TO_DIAGNOSIS_CATEGORY[item["layer"]]
+            for item in performance_model["layer_directions"]
+            if item["qualifies_minimum_effect"]
+            and item["layer"] in _LAYER_TO_DIAGNOSIS_CATEGORY
+        }
+    )
+    if not inferred:
+        return categories
+    return (["mixed"] if len(inferred) > 1 else []) + inferred
+
+
 def _identity_constraint_result(
     constraints: Mapping[str, object], identity: Mapping[str, object]
 ) -> tuple[str, list[str]]:
@@ -1017,7 +1043,9 @@ def build_knowledge_context(
         active_evidence_results=frozen_inputs["active_evidence_results"],
     )
     evidence_sha = _canonical_sha256(observations)
-    categories = _diagnosis_categories(frozen_inputs["diagnosis"])
+    categories = _effective_categories(
+        frozen_inputs["diagnosis"], rebuilt_model
+    )
     observed_layers = {
         item["layer"]
         for item in validated_map["coverage"]

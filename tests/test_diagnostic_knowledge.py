@@ -297,6 +297,50 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
         self.assertEqual(result["promotion_authority"], "none")
         self.assertTrue(all(card["status"] == "routing_only" for card in result["cards"]))
 
+    def test_qualifying_gpu_direction_routes_kernel_cards_when_diagnosis_is_unknown(
+        self,
+    ) -> None:
+        frozen = _frozen_inputs()
+        frozen["diagnosis"] = {
+            "primary_category": None,
+            "ranked_categories": [],
+        }
+
+        context = self.module.build_knowledge_context(frozen, limit=3)
+
+        self.assertEqual(context["categories"], ["kernel"])
+        self.assertFalse(
+            any(
+                item["card_id"] == "diagnostic.kernel.resource-or-memory"
+                and item["reason"] == "category_mismatch"
+                for item in context["rejections"]
+            )
+        )
+        model_module = _load_script(
+            "performance_model.py", "knowledge_test_no_qualifying_direction"
+        )
+        frozen["performance_model"] = model_module.build_performance_model(
+            frozen["execution_map"],
+            minimum_effect_us=10_000.0,
+        )
+        no_direction = self.module.build_knowledge_context(frozen, limit=3)
+        self.assertEqual(no_direction["categories"], ["unknown"])
+
+    def test_triton_mechanism_cards_cover_complete_service_analysis(self) -> None:
+        package = json.loads(
+            (REFERENCE_DIR / "diagnostic_cards.json").read_text(encoding="utf-8")
+        )
+        triton_cards = [
+            item
+            for item in package["cards"]
+            if item["id"].startswith("diagnostic.triton.")
+        ]
+
+        self.assertTrue(triton_cards)
+        self.assertTrue(
+            all("serving" in item["requested_claims"] for item in triton_cards)
+        )
+
     def test_normalizes_validated_diagnostic_and_active_observations(self) -> None:
         observations = self.module.normalize_observations(
             diagnostic_evidence=[_diagnostic_value()],

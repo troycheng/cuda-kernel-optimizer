@@ -319,7 +319,7 @@
       "mechanism_key": "nms.fp32-output-store",
       "status": "routing_only",
       "content_status": "locally_measured",
-      "requested_claims": ["workload"],
+      "requested_claims": ["serving", "workload"],
       "observation_rules": {
         "positive": [{
           "semantic_id": "mechanism.nms_fp32_output_store",
@@ -374,7 +374,7 @@
       "mechanism_key": "fastsort.store-path",
       "status": "routing_only",
       "content_status": "locally_measured",
-      "requested_claims": ["workload"],
+      "requested_claims": ["serving", "workload"],
       "observation_rules": {
         "positive": [{
           "semantic_id": "mechanism.fastsort_store_path",
@@ -429,7 +429,7 @@
       "mechanism_key": "group.reserve-path",
       "status": "routing_only",
       "content_status": "locally_measured",
-      "requested_claims": ["workload"],
+      "requested_claims": ["serving", "workload"],
       "observation_rules": {
         "positive": [{
           "semantic_id": "mechanism.group_reserve_path",
@@ -484,7 +484,7 @@
       "mechanism_key": "aux-stream.overlap",
       "status": "routing_only",
       "content_status": "locally_measured",
-      "requested_claims": ["workload"],
+      "requested_claims": ["serving", "workload"],
       "observation_rules": {
         "positive": [{
           "semantic_id": "mechanism.aux_stream_overlap",
@@ -539,7 +539,7 @@
       "mechanism_key": "persistent.counters",
       "status": "routing_only",
       "content_status": "locally_measured",
-      "requested_claims": ["workload"],
+      "requested_claims": ["serving", "workload"],
       "observation_rules": {
         "positive": [{
           "semantic_id": "mechanism.persistent_counters",
@@ -594,7 +594,7 @@
       "mechanism_key": "fastsort.map-fusion",
       "status": "routing_only",
       "content_status": "locally_measured",
-      "requested_claims": ["workload"],
+      "requested_claims": ["serving", "workload"],
       "observation_rules": {
         "positive": [{
           "semantic_id": "mechanism.fastsort_map_fusion",

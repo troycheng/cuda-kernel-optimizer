@@ -5,7 +5,7 @@ predict the speedup of a new workload.
 
 ## Automated checks
 
-Current branch validation on 2026-07-28 covered 1,344 tests: 1,333 passed and
+Current branch validation on 2026-07-29 covered 1,346 tests: 1,335 passed and
 11 physical RTX 5090 opt-in tests were skipped. Ten require a GPU; the remaining
 read-only replay test requires the 5090 archive to be mounted locally. The suite covers input validation, state recovery,
 evidence binding, shared-host guards, timeouts, restoration, capability retrieval,
@@ -41,6 +41,27 @@ The existing harness supplies a predeclared semantic observation for a known
 mechanism, so it tests evidence-to-card routing; it does not test mechanism
 extraction from an unfamiliar raw profile. No driver, clock, service, or host
 policy was changed.
+
+The first post-freeze Iter0 serving run on 2026-07-29 did exercise that missing
+bootstrap path. Three fresh complete-service baseline blocks produced a median
+343.549 QPS with 0.615% CV, without changing GPU clocks. Nsys identified
+`ParallelNMSSelect<half>` as the largest observed kernel-time contributor. Two
+independently proposed source mechanisms were then rejected by staged
+complete-service checks: deferred output materialization measured +0.084% in
+the short pair, and native warp minimum reduction measured +0.043% across the
+two completed formal pairs, both below the 0.5% service threshold. The run
+stopped before NCU, the remaining formal pair, and promotion.
+
+Unblinding the frozen V1.3 knowledge package exposed a routing defect: the
+traditional diagnosis remained `unknown` despite a qualifying GPU layer
+direction, and the Triton cards excluded the `serving` claim. Those two filters
+have targeted regression coverage. With them corrected, the same frozen input
+lists six relevant mechanism explanations, but still produces no executable
+knowledge candidate because no mechanism-specific semantic observation exists
+at bootstrap. This run therefore validates early rejection and bounded work,
+but not faster discovery of a useful direction; it does not satisfy the V1.3
+release gate. NCU remained outside the declared unprivileged host policy, and
+no host setting or unrelated service was changed.
 
 The V1.1 lane passed 24 of 24 checks in 134.726 seconds on a physical RTX 5090
 on 2026-07-22. It used immutable compatibility image
