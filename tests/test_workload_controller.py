@@ -3740,6 +3740,7 @@ class WorkloadRoundTests(unittest.TestCase):
                 empty_requests,
                 action_catalog,
                 transition,
+                requires_unmodeled_hypothesis=False,
             ),
             {},
         )
@@ -3800,6 +3801,7 @@ class WorkloadRoundTests(unittest.TestCase):
                         requests,
                         action_catalog,
                         transition,
+                        requires_unmodeled_hypothesis=False,
                     )
 
         direction = {
@@ -3837,6 +3839,7 @@ class WorkloadRoundTests(unittest.TestCase):
                 direction_requests,
                 action_catalog,
                 transition,
+                requires_unmodeled_hypothesis=False,
             ),
             {"h-kernel-stall": "h-unmodeled"},
         )
@@ -3862,7 +3865,82 @@ class WorkloadRoundTests(unittest.TestCase):
                         direction_requests,
                         action_catalog,
                         transition,
+                        requires_unmodeled_hypothesis=False,
                     )
+
+        residual_result = {
+            "hypothesis_set": {
+                "hypotheses": [
+                    copy.deepcopy(prior_closed),
+                    copy.deepcopy(prior_unmodeled),
+                    copy.deepcopy(direction),
+                ],
+                "relationships": [],
+            }
+        }
+        self.assertEqual(
+            self.controller._validate_measure_only_transition(
+                prior_result,
+                residual_result,
+                direction_requests,
+                action_catalog,
+                transition,
+                requires_unmodeled_hypothesis=True,
+            ),
+            {},
+        )
+        self.assertEqual(
+            self.controller._validate_measure_only_transition(
+                prior_result,
+                {
+                    "hypothesis_set": {
+                        "hypotheses": [
+                            copy.deepcopy(prior_closed),
+                            copy.deepcopy(prior_unmodeled),
+                        ],
+                        "relationships": [],
+                    }
+                },
+                empty_requests,
+                action_catalog,
+                transition,
+                requires_unmodeled_hypothesis=True,
+            ),
+            {},
+        )
+        for label, hypotheses in (
+            (
+                "missing residual",
+                [copy.deepcopy(prior_closed), copy.deepcopy(direction)],
+            ),
+            (
+                "changed residual",
+                [
+                    copy.deepcopy(prior_closed),
+                    {
+                        **copy.deepcopy(prior_unmodeled),
+                        "missing_evidence_kinds": ["ncu_kernel"],
+                    },
+                    copy.deepcopy(direction),
+                ],
+            ),
+        ):
+            with self.subTest(label=label), self.assertRaises(
+                self.controller.ValidationError
+            ):
+                self.controller._validate_measure_only_transition(
+                    prior_result,
+                    {
+                        "hypothesis_set": {
+                            "hypotheses": hypotheses,
+                            "relationships": [],
+                        }
+                    },
+                    direction_requests,
+                    action_catalog,
+                    transition,
+                    requires_unmodeled_hypothesis=True,
+                )
 
     def test_controller_scoped_neutral_evidence_cannot_open_a_mechanism(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

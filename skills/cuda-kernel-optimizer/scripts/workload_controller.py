@@ -5169,8 +5169,10 @@ def _validate_measure_only_transition(
     request_set: Mapping[str, Any],
     action_catalog: Mapping[str, Any],
     transition: Mapping[str, Any] | None,
+    *,
+    requires_unmodeled_hypothesis: bool = False,
 ) -> dict[str, str]:
-    """Admit only the immediate unmodeled-to-mechanism refinement."""
+    """Admit one neutral refinement without hiding execution-map residuals."""
     if transition is None or prior_result is None:
         return {}
     prior = {
@@ -5210,13 +5212,6 @@ def _validate_measure_only_transition(
         for item in new_hypotheses
     ]
     retained_unmodeled = current.get(unmodeled_id)
-    if (
-        retained_unmodeled is not None
-        and retained_unmodeled["disposition"] == "active"
-    ):
-        raise ValidationError(
-            "measure-only direction requires closing the prior unmodeled hypothesis"
-        )
     terminal_unmodeled = copy.deepcopy(prior_unmodeled)
     terminal_unmodeled.update(
         {
@@ -5227,17 +5222,31 @@ def _validate_measure_only_transition(
             "missing_evidence_kinds": [],
         }
     )
-    if (
-        retained_unmodeled is not None
-        and retained_unmodeled != terminal_unmodeled
-    ):
-        raise ValidationError(
-            "measure-only transition requires the canonical "
-            "undifferentiable closure"
-        )
+    if requires_unmodeled_hypothesis:
+        if retained_unmodeled != prior_unmodeled:
+            raise ValidationError(
+                "execution-map residual requires the prior unmodeled "
+                "hypothesis to remain unchanged"
+            )
+    else:
+        if (
+            retained_unmodeled is not None
+            and retained_unmodeled["disposition"] == "active"
+        ):
+            raise ValidationError(
+                "measure-only direction requires closing the prior unmodeled hypothesis"
+            )
+        if (
+            retained_unmodeled is not None
+            and retained_unmodeled != terminal_unmodeled
+        ):
+            raise ValidationError(
+                "measure-only transition requires the canonical "
+                "undifferentiable closure"
+            )
     if not new_directions:
         requests = request_set.get("requests")
-        if retained_unmodeled is None:
+        if not requires_unmodeled_hypothesis and retained_unmodeled is None:
             raise ValidationError(
                 "measure-only terminal transition must retain the prior unmodeled"
             )
@@ -5246,11 +5255,12 @@ def _validate_measure_only_transition(
                 "measure-only terminal transition cannot create a request"
             )
         return {}
-    if retained_unmodeled is not None:
+    if not requires_unmodeled_hypothesis and retained_unmodeled is not None:
         raise ValidationError(
             "measure-only direction must replace the prior unmodeled"
         )
-    if len(new_directions) > 3:
+    direction_limit = 2 if requires_unmodeled_hypothesis else 3
+    if len(new_directions) > direction_limit:
         raise ValidationError("measure-only direction exceeds the hypothesis limit")
     allowed_scope = set(transition["scope_node_ids"])
     for item in new_directions:
@@ -5282,6 +5292,10 @@ def _validate_measure_only_transition(
         if not isinstance(request, Mapping):
             continue
         targets = set(request.get("target_hypothesis_ids", []))
+        if requires_unmodeled_hypothesis and unmodeled_id in targets:
+            raise ValidationError(
+                "execution-map residual cannot receive another measure-only request"
+            )
         relevant = targets & set(direction_by_id)
         if not relevant:
             continue
@@ -5307,9 +5321,9 @@ def _validate_measure_only_transition(
         raise ValidationError(
             "every measure-only direction requires an independent evidence request"
         )
-    return {
-        hypothesis_id: unmodeled_id for hypothesis_id in direction_by_id
-    }
+    if requires_unmodeled_hypothesis:
+        return {}
+    return {hypothesis_id: unmodeled_id for hypothesis_id in direction_by_id}
 
 
 def _validate_hypothesis_evolution(
@@ -7070,6 +7084,19 @@ def _register_active_diagnosis_proposal_unlocked(
             adapted_request_set,
             action_catalog,
             transition,
+            requires_unmodeled_hypothesis=bool(
+                context.get("requires_unmodeled_hypothesis")
+            ),
+        )
+        allow_empty_unmodeled_gap = (
+            transition is not None
+            and bool(context.get("requires_unmodeled_hypothesis"))
+            and not adapted_request_set.get("requests")
+            and all(
+                item["kind"] == "unmodeled"
+                for item in hypothesis_result["hypothesis_set"]["hypotheses"]
+                if item["disposition"] == "active"
+            )
         )
         evolution = _validate_hypothesis_evolution(
             prior_result,
@@ -7101,6 +7128,7 @@ def _register_active_diagnosis_proposal_unlocked(
                     encoding="utf-8"
                 )
             ),
+            allow_empty_unmodeled_gap=allow_empty_unmodeled_gap,
         )
         performance_model = load_json_object(
             run_root / "active_diagnosis" / "performance_model.json"
@@ -7572,11 +7600,18 @@ def _refresh_active_diagnosis_context(
             )
         )
     )
-    refreshed["execution_map_sha256"] = (
-        _load_execution_map_module().execution_map_digest(
-            execution_map, epoch=epoch, evidence_catalog=evidence_catalog
-        )
+    map_module = _load_execution_map_module()
+    map_result = map_module.validate_execution_map(
+        execution_map,
+        epoch=epoch,
+        evidence_catalog=evidence_catalog,
     )
+    refreshed["execution_map_sha256"] = map_module.execution_map_digest(
+        execution_map, epoch=epoch, evidence_catalog=evidence_catalog
+    )
+    refreshed["requires_unmodeled_hypothesis"] = map_result[
+        "requires_unmodeled_hypothesis"
+    ]
     evidence_results = refreshed.get("evidence_results", [])
     if type(evidence_results) is not list:
         raise ValidationError("diagnosis context evidence_results is invalid")

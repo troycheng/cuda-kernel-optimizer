@@ -384,6 +384,12 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     '                "kernel_time_pct": 80,\n'
                     '                "cpu_busy_pct": 20,\n'
                     '                "data_wait_pct": 0,',
+                ).replace(
+                    '"boundary_ambiguous": False,',
+                    '"boundary_ambiguous": True,',
+                ).replace(
+                    '"attribution_status": "explained",',
+                    '"attribution_status": "unexplained",',
                 ),
                 encoding="utf-8",
             )
@@ -463,6 +469,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 [item.get("admission") for item in context["knowledge_context"]["candidates"]],
                 ["measure_only"],
             )
+            self.assertTrue(context["requires_unmodeled_hypothesis"])
             empty_hypotheses = {
                 "schema_version": "cuda-optimizer/hypothesis-set-v1",
                 "set_id": "raw-measurement-hypotheses",
@@ -707,12 +714,6 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     "hypotheses": [copy.deepcopy(unmodeled)],
                 }
             )
-            no_direction_hypotheses["hypotheses"][0].update(
-                {
-                    "disposition": "undifferentiable",
-                    "missing_evidence_kinds": [],
-                }
-            )
             no_direction_requests = copy.deepcopy(empty_requests)
             no_direction_requests["request_set_id"] = (
                 "no-model-direction-requests"
@@ -726,7 +727,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             self.assertEqual(stopped["next_action"], "done")
             self.assertEqual(
                 stopped["terminal_reason"],
-                "no_active_hypothesis",
+                "no_admissible_new_direction",
             )
 
             retained_unmodeled = {
@@ -779,7 +780,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             publish_before_retained = published_snapshot()
             with self.assertRaisesRegex(
                 helper.controller.ValidationError,
-                "requires closing the prior unmodeled",
+                "requires the prior unmodeled hypothesis to remain unchanged",
             ):
                 helper.controller.register_active_diagnosis_proposal(
                     control,
@@ -804,6 +805,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 "epoch_sha256": context["epoch_sha256"],
                 "execution_map_sha256": refreshed["execution_map_sha256"],
                 "hypotheses": [
+                    copy.deepcopy(unmodeled),
                     {
                         "hypothesis_id": "h-model-kernel-stall",
                         "kind": "mechanism",
@@ -851,6 +853,43 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                     }
                 ],
             }
+            mechanism_only = copy.deepcopy(model_hypotheses)
+            mechanism_only["set_id"] = "mechanism-without-required-residual"
+            mechanism_only["hypotheses"] = [
+                item
+                for item in mechanism_only["hypotheses"]
+                if item["kind"] == "mechanism"
+            ]
+            state_before_missing_residual = (
+                helper.controller.read_run_state(run_dir)
+            )
+            ledger_before_missing_residual = (
+                helper.controller._verify_active_diagnosis_ledger(run_dir)
+            )
+            publish_before_missing_residual = published_snapshot()
+            with self.assertRaisesRegex(
+                helper.controller.ValidationError,
+                "execution-map gap requires an active unmodeled hypothesis",
+            ):
+                helper.controller.register_active_diagnosis_proposal(
+                    control,
+                    run_dir,
+                    mechanism_only,
+                    model_requests,
+                )
+            self.assertEqual(
+                helper.controller.read_run_state(run_dir),
+                state_before_missing_residual,
+            )
+            self.assertEqual(
+                helper.controller._verify_active_diagnosis_ledger(run_dir),
+                ledger_before_missing_residual,
+            )
+            self.assertEqual(
+                published_snapshot(),
+                publish_before_missing_residual,
+            )
+
             state_before_invalid = helper.controller.read_run_state(run_dir)
             ledger_before_invalid = helper.controller._verify_active_diagnosis_ledger(
                 run_dir
@@ -889,11 +928,21 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 (active / "hypothesis_result.json").read_text("utf-8")
             )["hypothesis_set"]["hypotheses"]
             self.assertEqual(
-                [item["hypothesis_id"] for item in admitted_hypotheses],
-                ["h-model-kernel-stall"],
+                {
+                    item["hypothesis_id"] for item in admitted_hypotheses
+                },
+                {
+                    "h-model-kernel-stall",
+                    unmodeled["hypothesis_id"],
+                },
+            )
+            admitted_direction = next(
+                item
+                for item in admitted_hypotheses
+                if item["hypothesis_id"] == "h-model-kernel-stall"
             )
             self.assertEqual(
-                admitted_hypotheses[0]["support_evidence_ids"],
+                admitted_direction["support_evidence_ids"],
                 [],
             )
             selection = json.loads(

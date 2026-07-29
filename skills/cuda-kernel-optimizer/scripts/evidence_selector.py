@@ -239,8 +239,11 @@ def select_evidence_request(
     policy: Mapping[str, Any],
     request_history: Sequence[str],
     completed_action_ids: Sequence[str] = (),
+    allow_empty_unmodeled_gap: bool = False,
 ) -> dict:
     """Validate AI requests, replay Controller costs, and choose deterministically."""
+    if type(allow_empty_unmodeled_gap) is not bool:
+        raise ValidationError("allow_empty_unmodeled_gap must be a boolean")
     if type(epoch) is not dict:
         raise ValidationError("epoch must be a Controller object")
     epoch_id = _identifier(epoch.get("epoch_id"), "epoch.epoch_id")
@@ -320,6 +323,21 @@ def select_evidence_request(
             "no_active_hypothesis",
         )
     if not root["requests"]:
+        if (
+            allow_empty_unmodeled_gap
+            and all(item["kind"] == "unmodeled" for item in active.values())
+        ):
+            return _selection(
+                "evidence_gap",
+                epoch_id,
+                hypothesis_digest,
+                catalog,
+                controller_policy,
+                None,
+                [],
+                [],
+                "no_admissible_discriminator",
+            )
         raise ValidationError(
             "request_set.requests must not be empty while hypotheses are active"
         )

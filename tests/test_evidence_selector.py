@@ -161,6 +161,7 @@ class EvidenceSelectorTests(unittest.TestCase):
         completed_actions=(),
         hypothesis_result=None,
         execution_map=None,
+        allow_empty_unmodeled_gap=False,
     ):
         return self.module.select_evidence_request(
             value,
@@ -176,6 +177,7 @@ class EvidenceSelectorTests(unittest.TestCase):
             policy=policy_fixture() if policy is None else policy,
             request_history=list(history),
             completed_action_ids=list(completed_actions),
+            allow_empty_unmodeled_gap=allow_empty_unmodeled_gap,
         )
 
     def test_exclusive_discrimination_wins_before_lower_level_falsification(self) -> None:
@@ -220,6 +222,81 @@ class EvidenceSelectorTests(unittest.TestCase):
         self.assertEqual(result["status"], "evidence_gap")
         self.assertIsNone(result["selected_request"])
         self.assertEqual(result["gap_reason"], "no_active_hypothesis")
+
+    def test_unmodeled_residual_without_a_request_returns_terminal_gap(self) -> None:
+        execution_map = copy.deepcopy(self.execution_map)
+        execution_map["nodes"][0]["attribution_status"] = "unexplained"
+        hypothesis = hypothesis_fixture(
+            self.hypothesis_module,
+            self.map_module,
+        )
+        hypothesis["set_id"] = "hypotheses-unmodeled-residual"
+        hypothesis["execution_map_sha256"] = (
+            self.map_module.execution_map_digest(
+                execution_map,
+                epoch=self.epoch,
+                evidence_catalog=self.evidence,
+            )
+        )
+        hypothesis["hypotheses"] = [
+            {
+                "hypothesis_id": "h-unmodeled-residual",
+                "kind": "unmodeled",
+                "scope_node_ids": ["cpu-launch", "gpu-kernel"],
+                "statement": "The current execution map retains an unexplained dependency.",
+                "mechanism": "unmodeled_execution_map_residual",
+                "claim_layer": "workload",
+                "disposition": "active",
+                "confidence": "inconclusive",
+                "support_evidence_ids": [],
+                "oppose_evidence_ids": [],
+                "missing_evidence_kinds": ["os_runtime"],
+                "falsification_question": "Can another bounded trace explain the residual?",
+            }
+        ]
+        hypothesis["relationships"] = []
+        hypothesis_result = self.hypothesis_module.validate_hypothesis_set(
+            hypothesis,
+            epoch=self.epoch,
+            execution_map=execution_map,
+            evidence_catalog=self.evidence,
+        )
+        value = self.requests()
+        value["hypothesis_set_sha256"] = hypothesis_result[
+            "hypothesis_set_sha256"
+        ]
+        value["requests"] = []
+
+        with self.assertRaisesRegex(
+            self.module.ValidationError,
+            "must not be empty while hypotheses are active",
+        ):
+            self.select(
+                value,
+                hypothesis_result=hypothesis_result,
+                execution_map=execution_map,
+            )
+
+        result = self.select(
+            value,
+            hypothesis_result=hypothesis_result,
+            execution_map=execution_map,
+            allow_empty_unmodeled_gap=True,
+        )
+
+        self.assertEqual(result["status"], "evidence_gap")
+        self.assertIsNone(result["selected_request"])
+        self.assertEqual(result["gap_reason"], "no_admissible_discriminator")
+
+    def test_concrete_active_hypothesis_still_requires_a_request(self) -> None:
+        value = self.requests()
+        value["requests"] = []
+
+        with self.assertRaisesRegex(
+            self.module.ValidationError,
+            "must not be empty while hypotheses are active",
+        ):
+            self.select(value, allow_empty_unmodeled_gap=True)
 
     def test_model_cannot_supply_cost_risk_or_information_score(self) -> None:
         for field, raw in (("cost", "low"), ("risk", "none"), ("information_gain", 99)):
