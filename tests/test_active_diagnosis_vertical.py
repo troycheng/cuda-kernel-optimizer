@@ -27,6 +27,9 @@ from tests import test_workload_controller as workload_fixtures
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts"
+FRESH_REPLAY_FIXTURE = (
+    ROOT / "tests/fixtures/knowledge_replay/fresh_controller_cases.json"
+)
 
 
 def _load(filename: str, name: str):
@@ -217,6 +220,139 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             {"max_seconds": 30.0, "max_risk": "high"},
         )
         self.assertEqual(spend, {"elapsed_seconds": 7.0})
+
+    def test_measure_only_knowledge_maps_to_one_unmodeled_measurement(self) -> None:
+        replay = json.loads(FRESH_REPLAY_FIXTURE.read_text(encoding="utf-8"))
+        raw = copy.deepcopy(
+            next(
+                item["input_snapshot"]
+                for item in replay["cases"]
+                if item["case_id"] == "R07-fresh-20260728"
+            )
+        )
+        frozen = {
+            field: raw[field]
+            for field in {
+                "knowledge_identity",
+                "diagnosis",
+                "analysis_epoch",
+                "evidence_catalog",
+                "execution_map",
+                "performance_model",
+                "diagnostic_evidence",
+                "active_evidence_results",
+                "requested_claim",
+                "ready_capability_ids",
+                "contract_action_ids",
+                "available_actions",
+                "closed_mechanism_keys",
+                "candidate_history",
+            }
+        }
+        frozen["active_evidence_results"] = []
+        frozen["requested_claim"] = "serving"
+        knowledge_context = _load(
+            "diagnostic_knowledge.py", "vertical_measure_only_knowledge"
+        ).build_knowledge_context(frozen, limit=3)
+        self.assertEqual(knowledge_context["candidates"][0]["admission"], "measure_only")
+
+        execution_map = self.map_module.validate_execution_map(
+            frozen["execution_map"],
+            epoch=frozen["analysis_epoch"],
+            evidence_catalog=frozen["evidence_catalog"],
+        )["execution_map"]
+        hypothesis_set = {
+            "schema_version": "cuda-optimizer/hypothesis-set-v1",
+            "set_id": "measure-only-hypotheses",
+            "epoch_id": frozen["analysis_epoch"]["epoch_id"],
+            "epoch_sha256": self.map_module.epoch_digest(frozen["analysis_epoch"]),
+            "execution_map_sha256": self.map_module.execution_map_digest(
+                execution_map,
+                epoch=frozen["analysis_epoch"],
+                evidence_catalog=frozen["evidence_catalog"],
+            ),
+            "hypotheses": [],
+            "relationships": [],
+        }
+        request_set = {
+            "schema_version": "cuda-optimizer/evidence-request-set-v1",
+            "request_set_id": "measure-only-requests",
+            "epoch_id": frozen["analysis_epoch"]["epoch_id"],
+            "epoch_sha256": self.map_module.epoch_digest(frozen["analysis_epoch"]),
+            "hypothesis_set_sha256": "0" * 64,
+            "requests": [],
+        }
+        action_catalog = {
+            "schema_version": "cuda-optimizer/evidence-action-catalog-v1",
+            "catalog_id": "fresh-profile-actions",
+            "actions": raw["read_only_actions"],
+        }
+        selection_policy = {
+            "schema_version": "cuda-optimizer/evidence-selection-policy-v1",
+            "max_cost": "low",
+            "max_perturbation": "none",
+            "max_risk": "low",
+            "remaining_profile_actions": 0,
+            "available_capability_ids": ["cuda.disassembler"],
+        }
+        controller = _load("workload_controller.py", "vertical_measure_only_controller")
+        augmented_hypotheses, augmented_requests, adaptation = (
+            controller._adapt_controller_knowledge(
+                {},
+                contract={
+                    "actions": [{"action_id": "compiler-sass-inspection"}],
+                    "selection_policy": {"max_risk": "low"},
+                },
+                execution_map=execution_map,
+                action_catalog=action_catalog,
+                selection_policy=selection_policy,
+                knowledge_identity=frozen["knowledge_identity"],
+                local_knowledge_context=knowledge_context,
+                hypothesis_set=hypothesis_set,
+                request_set=request_set,
+            )
+        )
+
+        self.assertEqual(len(adaptation["candidates"]), 1)
+        self.assertEqual(len(augmented_requests["requests"]), 1)
+        active = [
+            item
+            for item in augmented_hypotheses["hypotheses"]
+            if item["disposition"] == "active"
+        ]
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["kind"], "unmodeled")
+        self.assertEqual(active[0]["confidence"], "inconclusive")
+
+        hypothesis_result = self.hypothesis_module.validate_hypothesis_set(
+            augmented_hypotheses,
+            epoch=frozen["analysis_epoch"],
+            execution_map=execution_map,
+            evidence_catalog=frozen["evidence_catalog"],
+        )
+        augmented_requests["hypothesis_set_sha256"] = hypothesis_result[
+            "hypothesis_set_sha256"
+        ]
+        selection = self.selector_module.select_evidence_request(
+            augmented_requests,
+            epoch=frozen["analysis_epoch"],
+            execution_map=execution_map,
+            hypothesis_result=hypothesis_result,
+            evidence_catalog=frozen["evidence_catalog"],
+            action_catalog=action_catalog,
+            policy=selection_policy,
+            request_history=[],
+        )
+        decision = self.decision_module.decide_next_step(
+            frozen["performance_model"],
+            hypothesis_result,
+            selection,
+            authorization={"max_seconds": 60.0, "max_risk": "low"},
+            spend={"elapsed_seconds": 0.0},
+            knowledge_adaptation=adaptation,
+        )
+        self.assertEqual(decision["decision"], "MEASURE")
+        self.assertNotEqual(decision["next_action"]["action_id"], "implement-candidate")
 
     def _controller_with_two_supported_directions(self, root: Path):
         helper = workload_fixtures.WorkloadRoundTests()
@@ -2418,6 +2554,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 "external-layout-shadow",
                 [item["mechanism"] for item in admitted["hypothesis_set"]["hypotheses"]],
             )
+            self.assertEqual(shadow["kind"], "mechanism")
             self.assertEqual(shadow["confidence"], "inconclusive")
             self.assertEqual(shadow["support_evidence_ids"], [])
             self.assertEqual(selection["selected_request"]["action_id"], "pytorch-operator-trace")

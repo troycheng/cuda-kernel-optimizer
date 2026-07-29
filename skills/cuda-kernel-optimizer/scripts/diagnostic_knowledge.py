@@ -1042,6 +1042,9 @@ def build_knowledge_context(
         diagnostic_evidence=frozen_inputs["diagnostic_evidence"],
         active_evidence_results=frozen_inputs["active_evidence_results"],
     )
+    completed_action_ids = {
+        item["action_id"] for item in frozen_inputs["active_evidence_results"]
+    }
     evidence_sha = _canonical_sha256(observations)
     categories = _effective_categories(
         frozen_inputs["diagnosis"], rebuilt_model
@@ -1189,11 +1192,26 @@ def build_knowledge_context(
             action_id in available_action_ids
             and action["control_scope"] == "read_only"
         )
+        measure_only_eligible = (
+            requested_claim == "serving"
+            and card["content_status"] == "source_verified"
+            and not card["observation_rules"]["positive"]
+            and action_available
+            and action_id not in completed_action_ids
+            and action["cost"] == "low"
+            and action["control_scope"] == "read_only"
+            and action["risk"] in {"none", "low"}
+        )
         candidate_eligible = card["id"] in eligible_card_ids
         if not candidate_eligible:
-            record_kind = "explanation"
-            explanation_reason = "content_status"
-            explanation_details = [card["content_status"]]
+            if measure_only_eligible:
+                record_kind = "measure_only"
+                explanation_reason = None
+                explanation_details = []
+            else:
+                record_kind = "explanation"
+                explanation_reason = "content_status"
+                explanation_details = [card["content_status"]]
         elif card["observation_rules"]["positive"] and not positive:
             record_kind = "explanation"
             explanation_reason = "positive_observation_missing"
@@ -1240,7 +1258,7 @@ def build_knowledge_context(
         qualifies_minimum_effect = bool(
             direction and direction["qualifies_minimum_effect"]
         )
-        if record_kind == "candidate" and not qualifies_minimum_effect:
+        if record_kind in {"candidate", "measure_only"} and not qualifies_minimum_effect:
             record_kind = "explanation"
             explanation_reason = "below_minimum_effect"
             explanation_details = [
@@ -1342,6 +1360,9 @@ def build_knowledge_context(
     candidate_records = [
         item for item in deduplicated if item["_kind"] == "candidate"
     ]
+    measure_only_records = [
+        item for item in deduplicated if item["_kind"] == "measure_only"
+    ]
     frontier = []
     for candidate in candidate_records:
         dominators = [
@@ -1377,6 +1398,11 @@ def build_knowledge_context(
                 selected.append(candidate)
             if len(selected) == limit:
                 break
+    if not selected and measure_only_records:
+        measure_only_records.sort(
+            key=lambda item: (item["mechanism_key"], item["card_id"])
+        )
+        selected.append(measure_only_records[0])
 
     public_candidates = []
     for candidate in selected:
@@ -1385,6 +1411,8 @@ def build_knowledge_context(
             for key, value in candidate.items()
             if not key.startswith("_")
         }
+        if candidate["_kind"] == "measure_only":
+            public["admission"] = "measure_only"
         public_candidates.append(public)
     explanations.sort(key=lambda item: (item["mechanism_key"], item["card_id"]))
     rejections.sort(

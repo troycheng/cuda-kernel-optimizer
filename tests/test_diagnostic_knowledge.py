@@ -341,6 +341,78 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
             all("serving" in item["requested_claims"] for item in triton_cards)
         )
 
+    def test_raw_serving_profile_selects_one_measure_only_route(self) -> None:
+        replay = json.loads(FRESH_REPLAY_FIXTURE.read_text(encoding="utf-8"))
+        frozen = copy.deepcopy(
+            next(
+                item["input_snapshot"]
+                for item in replay["cases"]
+                if item["case_id"] == "R07-fresh-20260728"
+            )
+        )
+        frozen = {
+            field: frozen[field]
+            for field in {
+                "knowledge_identity",
+                "diagnosis",
+                "analysis_epoch",
+                "evidence_catalog",
+                "execution_map",
+                "performance_model",
+                "diagnostic_evidence",
+                "active_evidence_results",
+                "requested_claim",
+                "ready_capability_ids",
+                "contract_action_ids",
+                "available_actions",
+                "closed_mechanism_keys",
+                "candidate_history",
+            }
+        }
+        frozen["active_evidence_results"] = []
+        frozen["requested_claim"] = "serving"
+
+        context = self.module.build_knowledge_context(frozen, limit=3)
+
+        self.assertEqual(
+            sum(
+                item["reason"] == "positive_observation_missing"
+                and item["card_id"].startswith("diagnostic.triton.")
+                for item in context["explanations"]
+            ),
+            6,
+        )
+        self.assertEqual(len(context["candidates"]), 1)
+        candidate = context["candidates"][0]
+        self.assertEqual(candidate["admission"], "measure_only")
+        self.assertEqual(
+            candidate["cheapest_falsifier"]["action_id"],
+            "compiler-sass-inspection",
+        )
+        self.assertEqual(candidate["cheapest_falsifier"]["cost"], "low")
+        self.assertEqual(candidate["cheapest_falsifier"]["control_scope"], "read_only")
+        self.assertEqual(candidate["cheapest_falsifier"]["risk"], "none")
+        self.assertEqual(candidate["confidence"], "inconclusive")
+        self.assertEqual(candidate["promotion_authority"], "none")
+
+        for status in ("observed", "inconclusive"):
+            with self.subTest(status=status):
+                completed = copy.deepcopy(frozen)
+                completed["active_evidence_results"] = [
+                    {
+                        "action_id": "compiler-sass-inspection",
+                        "evidence_kind": "compiler_sass",
+                        "adapter_implementation_sha256": "a" * 64,
+                        "result_sha256": "b" * 64,
+                        "status": status,
+                        "observations": {},
+                    }
+                ]
+                self.assertEqual(
+                    self.module.build_knowledge_context(completed, limit=3)["candidates"],
+                    [],
+                )
+
     def test_normalizes_validated_diagnostic_and_active_observations(self) -> None:
         observations = self.module.normalize_observations(
             diagnostic_evidence=[_diagnostic_value()],

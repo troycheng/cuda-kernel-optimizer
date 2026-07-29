@@ -4213,6 +4213,7 @@ def _adapt_controller_knowledge(
     if type(raw_local_candidates) is not list:
         raise ValidationError("local knowledge context candidates are invalid")
     local_candidates = []
+    measure_only_count = 0
     for index, raw_candidate in enumerate(raw_local_candidates):
         candidate = _object(
             raw_candidate, f"local_knowledge_context.candidates[{index}]"
@@ -4249,6 +4250,18 @@ def _adapt_controller_knowledge(
             raise ValidationError(
                 "formal local knowledge action is outside current authorization"
             )
+        admission = candidate.get("admission")
+        if admission not in {None, "measure_only"}:
+            raise ValidationError("formal local knowledge admission is invalid")
+        if admission == "measure_only":
+            measure_only_count += 1
+            if (
+                measure_only_count > 1
+                or action.get("cost") != "low"
+                or action.get("control_scope") != "read_only"
+                or action.get("risk") not in {"none", "low"}
+            ):
+                raise ValidationError("formal measure-only knowledge is unsafe")
         statement = candidate.get("statement")
         rationale = falsifier.get("rationale")
         if (
@@ -4283,8 +4296,13 @@ def _adapt_controller_knowledge(
                 "claim_layer": "workload",
                 "confidence": "inconclusive",
                 "promotion_authority": "none",
+                "admission": admission,
             }
         )
+    if any(item["admission"] is None for item in local_candidates):
+        local_candidates = [
+            item for item in local_candidates if item["admission"] is None
+        ]
     architecture = knowledge_identity.get("gpu_architecture", {})
     runtime = knowledge_identity.get("cuda_runtime_version", {})
     if architecture.get("status") != "verified" or runtime.get("status") != "verified":
@@ -4401,7 +4419,11 @@ def _adapt_controller_knowledge(
         augmented_hypotheses["hypotheses"].append(
             {
                 "hypothesis_id": shadow_id,
-                "kind": "mechanism",
+                "kind": (
+                    "unmodeled"
+                    if candidate.get("admission") == "measure_only"
+                    else "mechanism"
+                ),
                 "scope_node_ids": copy.deepcopy(candidate["scope_node_ids"]),
                 "statement": candidate["statement"],
                 "mechanism": candidate["mechanism_id"],
