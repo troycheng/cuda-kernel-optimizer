@@ -76,6 +76,58 @@ class KnowledgeQueryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_module().query(arch="sm_999", axis="memory", limit=3)
 
+    def test_min_sm_rejects_method_even_when_feature_name_is_present(self) -> None:
+        module = load_module()
+        registry = {
+            "arch_feature_map": {"sm_80": ["tensor_core", "tma"]},
+            "methods": {
+                "future": {
+                    "axis": "memory",
+                    "priority": 1,
+                    "min_sm": 90,
+                    "name": "future",
+                    "required_features": ["tma"],
+                }
+            },
+        }
+        self.assertEqual(
+            module._kernel_cards(registry, "sm_80", None, None, {}),
+            [],
+        )
+
+    def test_registry_contains_no_transferable_speedup_claims(self) -> None:
+        registry = json.loads(
+            (SCRIPT.parents[1] / "references" / "method_registry.json").read_text()
+        )
+        self.assertFalse(
+            any("typical_speedup" in method for method in registry["methods"].values())
+        )
+
+    def test_kernel_cards_respect_exact_architecture_gates(self) -> None:
+        registry = json.loads(
+            (SCRIPT.parents[1] / "references" / "method_registry.json").read_text()
+        )
+        module = load_module()
+        for arch in (
+            "sm_80",
+            "sm_86",
+            "sm_89",
+            "sm_90",
+            "sm_100",
+            "sm_103",
+            "sm_110",
+            "sm_120",
+            "sm_121",
+        ):
+            with self.subTest(arch=arch):
+                available = set(registry["arch_feature_map"][arch])
+                for card in module._kernel_cards(registry, arch, None, None, {}):
+                    method = registry["methods"][card["id"]]
+                    self.assertLessEqual(method["min_sm"], int(arch.removeprefix("sm_")))
+                    self.assertTrue(
+                        set(card["required_features"]).issubset(available)
+                    )
+
     def test_workload_query_routes_non_kernel_bottlenecks(self) -> None:
         result = load_module().query(
             arch="sm_120", layer="workload", bottleneck="framework", limit=2

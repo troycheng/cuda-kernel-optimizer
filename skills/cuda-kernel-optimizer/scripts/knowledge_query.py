@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,6 +33,13 @@ def _load(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _sm_number(arch: str) -> int:
+    match = re.fullmatch(r"sm_(\d+)", arch)
+    if match is None:
+        raise ValueError(f"Invalid exact architecture: {arch}")
+    return int(match.group(1))
+
+
 def _kernel_cards(
     registry: Dict[str, Any],
     arch: str,
@@ -49,6 +57,8 @@ def _kernel_cards(
     cards = []
     for method_id, method in registry["methods"].items():
         if axis and method.get("axis") != axis:
+            continue
+        if _sm_number(arch) < int(method["min_sm"]):
             continue
         required = set(method.get("required_features", []))
         if not required.issubset(available):
