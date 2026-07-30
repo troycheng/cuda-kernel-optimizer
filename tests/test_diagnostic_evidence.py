@@ -185,13 +185,20 @@ class DiagnosticEvidenceTests(unittest.TestCase):
         self.assertEqual(
             set(contract["derived_semantic_ids"]),
             {
+                "kernel.dependency_scope_unavailable",
+                "kernel.dram_byte_lower_bound_unavailable",
                 "kernel.global_memory_transaction_amplification",
+                "kernel.launch_shape_unavailable",
+                "kernel.memory_access_path_unmodeled",
                 "kernel.redundant_dram_traffic",
                 "kernel.memory_latency_hiding_insufficient",
+                "kernel.precision_contract_unavailable",
                 "kernel.register_or_shared_pressure",
                 "kernel.parallelism_or_wave_tail",
                 "kernel.compute_pipeline_or_dtype_mismatch",
+                "kernel.static_resource_identity_mismatch",
                 "kernel.synchronization_or_atomic_contention",
+                "kernel.warp_stall_mapping_unmodeled",
             },
         )
         self.assertTrue(
@@ -199,6 +206,46 @@ class DiagnosticEvidenceTests(unittest.TestCase):
                 contract["derived_semantic_ids"]
             )
         )
+
+    def test_existing_actions_declare_card_invalidators_as_derived_semantics(
+        self,
+    ) -> None:
+        contract = self.module.semantic_producer_contract()
+        expected = {
+            "ncu-targeted-kernel": {
+                "kernel.memory_access_path_unmodeled",
+                "kernel.dram_byte_lower_bound_unavailable",
+                "kernel.warp_stall_mapping_unmodeled",
+                "kernel.static_resource_identity_mismatch",
+                "kernel.launch_shape_unavailable",
+                "kernel.precision_contract_unavailable",
+                "kernel.dependency_scope_unavailable",
+            },
+            "nsys-global-timeline": {
+                "runtime.timeline_boundary_ambiguous",
+                "transfer.boundary_ambiguous",
+                "communication.rank_timeline_unaligned",
+                "serving.request_corpus_changed",
+            },
+            "nsys-os-runtime-slice": {
+                "runtime.timeline_boundary_ambiguous",
+                "transfer.boundary_ambiguous",
+                "communication.rank_timeline_unaligned",
+                "serving.request_corpus_changed",
+            },
+            "pytorch-operator-trace": {
+                "runtime.timeline_boundary_ambiguous",
+                "runtime.input_workload_changed",
+            },
+        }
+
+        for action_id, invalidators in expected.items():
+            with self.subTest(action_id=action_id):
+                self.assertTrue(
+                    invalidators.issubset(
+                        contract[action_id]["derived_semantic_ids"]
+                    )
+                )
 
     def test_kind_signal_vocabulary_and_raw_metadata_are_closed(self) -> None:
         invalid = [

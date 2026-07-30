@@ -120,13 +120,20 @@ def semantic_producer_contract() -> dict:
             "raw_semantic_ids": ncu_raw_semantics,
             "derived_semantic_ids": sorted(
                 {
+                    "kernel.dependency_scope_unavailable",
+                    "kernel.dram_byte_lower_bound_unavailable",
                     "kernel.global_memory_transaction_amplification",
+                    "kernel.launch_shape_unavailable",
+                    "kernel.memory_access_path_unmodeled",
                     "kernel.redundant_dram_traffic",
                     "kernel.memory_latency_hiding_insufficient",
+                    "kernel.precision_contract_unavailable",
                     "kernel.register_or_shared_pressure",
                     "kernel.parallelism_or_wave_tail",
                     "kernel.compute_pipeline_or_dtype_mismatch",
+                    "kernel.static_resource_identity_mismatch",
                     "kernel.synchronization_or_atomic_contention",
+                    "kernel.warp_stall_mapping_unmodeled",
                 }
             ),
         },
@@ -135,9 +142,13 @@ def semantic_producer_contract() -> dict:
             "raw_semantic_ids": [],
             "derived_semantic_ids": sorted(
                 {
+                    "communication.rank_timeline_unaligned",
                     "runtime.launch_gap_short_context",
                     "runtime.gpu_idle_gap",
                     "runtime.cpu_launch_overhead",
+                    "runtime.timeline_boundary_ambiguous",
+                    "serving.request_corpus_changed",
+                    "transfer.boundary_ambiguous",
                     "transfer.h2d_serialized",
                     "runtime.gpu_waiting_for_input",
                     "communication.rank_arrival_skew",
@@ -150,9 +161,13 @@ def semantic_producer_contract() -> dict:
             "raw_semantic_ids": [],
             "derived_semantic_ids": sorted(
                 {
+                    "communication.rank_timeline_unaligned",
                     "runtime.launch_gap_short_context",
                     "runtime.gpu_idle_gap",
                     "runtime.cpu_launch_overhead",
+                    "runtime.timeline_boundary_ambiguous",
+                    "serving.request_corpus_changed",
+                    "transfer.boundary_ambiguous",
                     "transfer.h2d_serialized",
                     "runtime.gpu_waiting_for_input",
                     "communication.rank_arrival_skew",
@@ -169,6 +184,8 @@ def semantic_producer_contract() -> dict:
                     "framework.shape_fragmentation",
                     "framework.dispatch_overhead",
                     "runtime.gpu_waiting_for_input",
+                    "runtime.input_workload_changed",
+                    "runtime.timeline_boundary_ambiguous",
                 }
             ),
         },

@@ -1727,8 +1727,9 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
     if cases["schema_version"] != "cuda-optimizer/case-memory-v1":
         raise ValueError("case memory schema is unsupported")
     case_items = cases["cases"]
-    if type(case_items) is not list or not case_items:
-        raise ValueError("case memory is empty")
+    if type(case_items) is not list:
+        raise ValueError("case memory cases must be an array")
+    case_memory_disabled = not case_items
     case_fields = {
         "id",
         "replay_case_id",
@@ -1918,16 +1919,15 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
             falsifier["rationale"],
             f"diagnostic card {card_id} cheapest_falsifier rationale",
         )
-        positive_semantics = {
-            rule["semantic_id"]
-            for rule in item["observation_rules"]["positive"]
+        rule_semantics = {
+            group: {
+                rule["semantic_id"]
+                for rule in item["observation_rules"][group]
+            }
+            for group in ("positive", "counter", "invalidators")
         }
-        if item["content_status"] == "source_verified" and positive_semantics:
-            if positive_semantics.isdisjoint(declared_derived_semantics):
-                raise ValueError(
-                    f"diagnostic card {card_id} positive semantic is outside "
-                    "the declared derived vocabulary"
-                )
+        positive_semantics = rule_semantics["positive"]
+        if item["content_status"] == "source_verified":
             compatible_actions = set(preferred_actions)
             compatible_actions.add(falsifier_id)
             compatible_semantics = set()
@@ -1937,11 +1937,23 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
                     compatible_semantics.update(
                         contract["derived_semantic_ids"]
                     )
-            if positive_semantics.isdisjoint(compatible_semantics):
-                raise ValueError(
-                    f"diagnostic card {card_id} positive semantic has no "
-                    "compatible action"
-                )
+            for group, semantic_ids in rule_semantics.items():
+                for semantic_id in semantic_ids:
+                    label = (
+                        "invalidator"
+                        if group == "invalidators"
+                        else group
+                    )
+                    if semantic_id not in declared_derived_semantics:
+                        raise ValueError(
+                            f"diagnostic card {card_id} {label} semantic is "
+                            "outside the declared derived vocabulary"
+                        )
+                    if semantic_id not in compatible_semantics:
+                        raise ValueError(
+                            f"diagnostic card {card_id} {label} semantic has "
+                            "no compatible action"
+                        )
         referenced_sources = _strings(
             item["source_ids"], f"diagnostic card {card_id} source_ids"
         )
@@ -1965,12 +1977,13 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
                     in {"replay_verified", "locally_measured"}
                 )
             ]
-            if not eligible_replays:
+            if not eligible_replays and not case_memory_disabled:
                 raise ValueError(
                     f"diagnostic card {card_id} replay_verified requires a "
                     "non-protocol supporting or rejecting replay"
                 )
-            runtime_candidates.append(card_id)
+            if eligible_replays:
+                runtime_candidates.append(card_id)
         if item["content_status"] == "locally_measured":
             locally_measured_cases = [
                 case_by_id[case_id]
@@ -1983,12 +1996,13 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
                     and case_by_id[case_id]["knowledge_identity_sha256"] is not None
                 )
             ]
-            if not locally_measured_cases:
+            if not locally_measured_cases and not case_memory_disabled:
                 raise ValueError(
                     f"diagnostic card {card_id} locally_measured requires an exact "
                     "locally_measured case with a complete identity digest"
                 )
-            runtime_candidates.append(card_id)
+            if locally_measured_cases:
+                runtime_candidates.append(card_id)
         if _iso_date(
             item["last_reviewed"], f"diagnostic card {card_id} last_reviewed"
         ) > cards_as_of:
