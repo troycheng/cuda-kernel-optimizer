@@ -259,6 +259,31 @@ def _frozen_inputs() -> dict:
     }
 
 
+def _source_verified_frozen() -> dict:
+    frozen = _frozen_inputs()
+    frozen["diagnostic_evidence"] = []
+    frozen["active_evidence_results"] = [
+        _active_result(
+            [
+                _semantic_observation(
+                    semantic_id="framework.dispatch_overhead",
+                    status="present",
+                    value=True,
+                    unit="state",
+                    scope=["framework", "cpu-submit"],
+                    aggregation="presence",
+                    tool={"name": "pytorch", "version": "2.11.0"},
+                )
+            ]
+        )
+    ]
+    frozen["active_evidence_results"][0].update(
+        action_id="pytorch-operator-trace",
+        evidence_kind="framework_trace",
+    )
+    return frozen
+
+
 def _prepare_valid_contract(reference_dir: Path) -> None:
     source_path = reference_dir / "knowledge_sources.json"
     sources = json.loads(source_path.read_text(encoding="utf-8"))
@@ -964,13 +989,445 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
             with self.subTest(card_id=card["id"]):
                 self.assertEqual(card["status"], "routing_only")
                 self.assertEqual(card["case_ids"], [])
-                self.assertNotIn(card["id"], runtime_ids)
+                self.assertIn(card["id"], runtime_ids)
                 self.assertTrue(card["observation_rules"]["positive"])
                 self.assertTrue(card["observation_rules"]["counter"])
                 self.assertTrue(card["observation_rules"]["invalidators"])
                 self.assertTrue(card["positive_signals"])
                 self.assertTrue(card["counter_signals"])
                 self.assertTrue(card["invalidators"])
+
+    def test_source_verified_candidate_requires_trusted_active_observation(
+        self,
+    ) -> None:
+        frozen = _source_verified_frozen()
+
+        context = self.module.build_knowledge_context(frozen, limit=3)
+
+        self.assertEqual(
+            [item["card_id"] for item in context["candidates"]],
+            ["diagnostic.framework.launch-gaps"],
+        )
+        candidate = context["candidates"][0]
+        self.assertEqual(candidate["confidence"], "inconclusive")
+        self.assertEqual(candidate["promotion_authority"], "none")
+        self.assertEqual(context["promotion_authority"], "none")
+
+    def test_source_verified_trust_failures_are_explanations(self) -> None:
+        mutations = (
+            (
+                "quality_untrusted",
+                lambda frozen: frozen["active_evidence_results"][0][
+                    "observations"
+                ]["semantic_observations"][0].update(quality="heuristic"),
+            ),
+            (
+                "tool_unmodeled",
+                lambda frozen: frozen["active_evidence_results"][0][
+                    "observations"
+                ]["semantic_observations"][0].update(
+                    tool={"name": "unknown", "version": "1"}
+                ),
+            ),
+            (
+                "tool_version_mismatch",
+                lambda frozen: frozen["active_evidence_results"][0][
+                    "observations"
+                ]["semantic_observations"][0]["tool"].update(version="2.10.0"),
+            ),
+            (
+                "identity_unverified",
+                lambda frozen: frozen["knowledge_identity"][
+                    "framework_versions"
+                ].pop("pytorch"),
+            ),
+            (
+                "identity_unverified",
+                lambda frozen: frozen["knowledge_identity"][
+                    "framework_versions"
+                ]["pytorch"].update(
+                    value=None,
+                    status="unknown",
+                    source_kind="unknown",
+                    source_sha256=None,
+                ),
+            ),
+            (
+                "producer_untrusted",
+                lambda frozen: frozen["active_evidence_results"][0].update(
+                    evidence_kind="nsys_timeline"
+                ),
+            ),
+            (
+                "producer_untrusted",
+                lambda frozen: frozen["active_evidence_results"][0][
+                    "observations"
+                ]["semantic_observations"][0].update(
+                    semantic_id="runtime.launch_gap_short_context",
+                    scope=["cpu-submit", "gpu-kernel"],
+                ),
+            ),
+            (
+                "producer_untrusted",
+                lambda frozen: frozen["active_evidence_results"][0].update(
+                    status="inconclusive"
+                ),
+            ),
+        )
+        for reason, mutation in mutations:
+            frozen = _source_verified_frozen()
+            mutation(frozen)
+            with self.subTest(reason=reason):
+                context = self.module.build_knowledge_context(frozen, limit=3)
+                self.assertEqual(context["candidates"], [])
+                self.assertTrue(
+                    any(
+                        item["card_id"] == "diagnostic.framework.launch-gaps"
+                        and item["reason"] == reason
+                        for item in context["explanations"]
+                    ),
+                    context["explanations"],
+                )
+
+    def test_diagnostic_signal_cannot_bypass_active_observation_trust(self) -> None:
+        frozen = _source_verified_frozen()
+        frozen["active_evidence_results"][0]["observations"][
+            "semantic_observations"
+        ][0]["quality"] = "heuristic"
+        frozen["diagnostic_evidence"] = [
+            _diagnostic_value(
+                kind="pytorch_profile",
+                producer_id="pytorch-profile-adapter",
+                signals=["framework_dispatch_overhead"],
+            )
+        ]
+
+        context = self.module.build_knowledge_context(frozen, limit=3)
+
+        self.assertEqual(context["candidates"], [])
+        self.assertTrue(
+            any(
+                item["card_id"] == "diagnostic.framework.launch-gaps"
+                and item["reason"] == "quality_untrusted"
+                for item in context["explanations"]
+            )
+        )
+
+    def test_low_quality_observation_cannot_expand_into_expensive_ncu_action(
+        self,
+    ) -> None:
+        frozen = _frozen_inputs()
+        frozen["diagnostic_evidence"] = []
+        frozen["knowledge_identity"]["profiler_versions"]["ncu"] = (
+            _identity_fact("2026.2")
+        )
+        frozen["active_evidence_results"] = [
+            {
+                "action_id": "ncu-targeted-kernel",
+                "evidence_kind": "ncu_kernel",
+                "adapter_implementation_sha256": IMPLEMENTATION_SHA,
+                "result_sha256": RESULT_SHA,
+                "status": "observed",
+                "observations": {
+                    "semantic_observations": [
+                        _semantic_observation(
+                            semantic_id=(
+                                "kernel."
+                                "global_memory_transaction_amplification"
+                            ),
+                            status="present",
+                            value=True,
+                            unit="state",
+                            scope=["gpu-kernel"],
+                            aggregation="presence",
+                            tool={"name": "ncu", "version": "2026.2"},
+                            quality="heuristic",
+                        )
+                    ]
+                },
+            }
+        ]
+        frozen["ready_capability_ids"].append("ncu.counter_access")
+        frozen["ready_capability_ids"].sort()
+        frozen["contract_action_ids"].append("ncu-targeted-kernel")
+        frozen["contract_action_ids"].sort()
+        frozen["available_actions"].append("ncu-targeted-kernel")
+        frozen["available_actions"].sort()
+
+        context = self.module.build_knowledge_context(frozen, limit=3)
+
+        self.assertEqual(context["candidates"], [])
+        self.assertTrue(
+            any(
+                item["card_id"] == "diagnostic.kernel.resource-or-memory"
+                and item["reason"] == "quality_untrusted"
+                for item in context["explanations"]
+            )
+        )
+
+    def test_direct_query_frozen_cannot_bypass_active_observation_trust(
+        self,
+    ) -> None:
+        frozen = _source_verified_frozen()
+        frozen["active_evidence_results"][0]["observations"][
+            "semantic_observations"
+        ][0]["quality"] = "estimated"
+        query_module = _load_script(
+            "knowledge_query.py",
+            "knowledge_test_source_verified_query_frozen",
+        )
+
+        context = query_module.query_frozen(frozen, limit=3)
+
+        self.assertEqual(context["candidates"], [])
+        self.assertTrue(
+            any(
+                item["card_id"] == "diagnostic.framework.launch-gaps"
+                and item["reason"] == "quality_untrusted"
+                for item in context["explanations"]
+            )
+        )
+
+    def test_direct_query_frozen_rejects_result_digest_envelope_collision(
+        self,
+    ) -> None:
+        frozen = _source_verified_frozen()
+        colliding = _active_result(
+            [
+                _semantic_observation(
+                    semantic_id="runtime.gpu_idle_gap",
+                    status="present",
+                    value=True,
+                    unit="state",
+                    scope=["gpu-kernel"],
+                    aggregation="presence",
+                    tool={"name": "nsys", "version": "2026.3"},
+                )
+            ]
+        )
+        self.assertEqual(
+            colliding["result_sha256"],
+            frozen["active_evidence_results"][0]["result_sha256"],
+        )
+        frozen["active_evidence_results"].append(colliding)
+        query_module = _load_script(
+            "knowledge_query.py",
+            "knowledge_test_source_verified_digest_collision",
+        )
+
+        context = query_module.query_frozen(frozen, limit=3)
+
+        self.assertEqual(context["candidates"], [])
+        self.assertTrue(
+            any(
+                item["card_id"] == "diagnostic.framework.launch-gaps"
+                and item["reason"] == "producer_untrusted"
+                for item in context["explanations"]
+            )
+        )
+
+    def test_raw_and_cross_action_semantics_are_not_trusted(self) -> None:
+        identity = _source_verified_frozen()["knowledge_identity"]
+        producer_contract = _load_script(
+            "diagnostic_evidence.py",
+            "knowledge_test_source_verified_producer_contract",
+        ).semantic_producer_contract()
+        cases = (
+            (
+                _semantic_observation(
+                    semantic_id="kernel.dram_throughput_pct",
+                    tool={"name": "ncu", "version": "2026.2"},
+                ),
+                "ncu-targeted-kernel",
+                "ncu_kernel",
+            ),
+            (
+                _semantic_observation(
+                    semantic_id="runtime.launch_gap_short_context",
+                    tool={"name": "pytorch", "version": "2.11.0"},
+                ),
+                "pytorch-operator-trace",
+                "framework_trace",
+            ),
+        )
+
+        for observation, action_id, evidence_kind in cases:
+            with self.subTest(semantic_id=observation["semantic_id"]):
+                self.assertEqual(
+                    self.module._active_observation_trust(
+                        observation,
+                        envelope_status="observed",
+                        action_id=action_id,
+                        evidence_kind=evidence_kind,
+                        identity=identity,
+                        producer_contract=producer_contract,
+                    ),
+                    (False, "producer_untrusted"),
+                )
+
+    def test_source_verified_candidate_respects_runtime_gates(self) -> None:
+        mutations = (
+            (
+                "positive_observation_missing",
+                lambda frozen: frozen["active_evidence_results"][0][
+                    "observations"
+                ]["semantic_observations"][0].update(
+                    semantic_id="framework.shape_fragmentation",
+                    scope=["framework"],
+                ),
+            ),
+            (
+                "read_only_action_unavailable",
+                lambda frozen: (
+                    frozen["contract_action_ids"].remove(
+                        "pytorch-operator-trace"
+                    ),
+                    frozen["available_actions"].remove(
+                        "pytorch-operator-trace"
+                    ),
+                ),
+            ),
+            (
+                "below_minimum_effect",
+                lambda frozen: frozen.update(
+                    performance_model=_load_script(
+                        "performance_model.py",
+                        "knowledge_test_source_verified_below_mde",
+                    ).build_performance_model(
+                        frozen["execution_map"],
+                        minimum_effect_us=10_000.0,
+                    )
+                ),
+            ),
+        )
+        for reason, mutation in mutations:
+            frozen = _source_verified_frozen()
+            mutation(frozen)
+            with self.subTest(reason=reason):
+                context = self.module.build_knowledge_context(frozen, limit=3)
+                self.assertEqual(context["candidates"], [])
+                self.assertTrue(
+                    any(
+                        item["card_id"] == "diagnostic.framework.launch-gaps"
+                        and item["reason"] == reason
+                        for item in context["explanations"]
+                    )
+                )
+
+    def test_trusted_counter_blocks_source_verified_candidate(self) -> None:
+        frozen = _source_verified_frozen()
+        counter = _active_result(
+            [
+                _semantic_observation(
+                    semantic_id="runtime.launch_gap_short_context",
+                    status="absent",
+                    value=False,
+                    unit="state",
+                    scope=["cpu-submit", "gpu-kernel"],
+                    aggregation="presence",
+                    tool={"name": "nsys", "version": "2026.3"},
+                )
+            ]
+        )
+        counter["result_sha256"] = "7" * 64
+        frozen["active_evidence_results"].append(counter)
+
+        context = self.module.build_knowledge_context(frozen, limit=3)
+
+        self.assertEqual(context["candidates"], [])
+        self.assertTrue(
+            any(
+                item["card_id"] == "diagnostic.framework.launch-gaps"
+                and item["reason"] == "counter_observed"
+                for item in context["explanations"]
+            )
+        )
+
+    def test_trusted_invalidator_rejects_source_verified_candidate(self) -> None:
+        reference_dir = self._copied_references()
+        card_path = reference_dir / "diagnostic_cards.json"
+        payload = json.loads(card_path.read_text(encoding="utf-8"))
+        card = next(
+            item
+            for item in payload["cards"]
+            if item["id"] == "diagnostic.framework.launch-gaps"
+        )
+        card["observation_rules"]["invalidators"] = [
+            _observation_rule(
+                semantic_id="framework.shape_fragmentation",
+                statuses=["present"],
+                scope_all=["framework"],
+            )
+        ]
+        _write_json(card_path, payload)
+        old_reference_dir = self.module.REFERENCE_DIR
+        old_cards_path = self.module.CARDS_PATH
+        self.module.REFERENCE_DIR = reference_dir
+        self.module.CARDS_PATH = card_path
+        self.addCleanup(setattr, self.module, "REFERENCE_DIR", old_reference_dir)
+        self.addCleanup(setattr, self.module, "CARDS_PATH", old_cards_path)
+        frozen = _source_verified_frozen()
+        frozen["active_evidence_results"][0]["observations"][
+            "semantic_observations"
+        ].append(
+            _semantic_observation(
+                semantic_id="framework.shape_fragmentation",
+                status="present",
+                value=True,
+                unit="state",
+                scope=["framework"],
+                aggregation="presence",
+                tool={"name": "pytorch", "version": "2.11.0"},
+            )
+        )
+
+        context = self.module.build_knowledge_context(frozen, limit=3)
+
+        self.assertEqual(context["candidates"], [])
+        self.assertTrue(
+            any(
+                item["card_id"] == "diagnostic.framework.launch-gaps"
+                and item["reason"] == "invalidator_observed"
+                for item in context["rejections"]
+            )
+        )
+
+    def test_source_verified_card_without_positive_cannot_measure_only(self) -> None:
+        reference_dir = self._copied_references()
+        card_path = reference_dir / "diagnostic_cards.json"
+        payload = json.loads(card_path.read_text(encoding="utf-8"))
+        triage = next(
+            item
+            for item in payload["cards"]
+            if item["id"] == "diagnostic.cross-layer.triage"
+        )
+        triage["preferred_actions"] = ["pytorch-operator-trace"]
+        triage["cheapest_falsifier"] = {
+            "action_id": "pytorch-operator-trace",
+            "rationale": "A low-cost action must not bypass positive evidence.",
+        }
+        _write_json(card_path, payload)
+        old_reference_dir = self.module.REFERENCE_DIR
+        old_cards_path = self.module.CARDS_PATH
+        self.module.REFERENCE_DIR = reference_dir
+        self.module.CARDS_PATH = card_path
+        self.addCleanup(setattr, self.module, "REFERENCE_DIR", old_reference_dir)
+        self.addCleanup(setattr, self.module, "CARDS_PATH", old_cards_path)
+        frozen = _frozen_inputs()
+        frozen["diagnostic_evidence"] = []
+        frozen["active_evidence_results"] = []
+        frozen["requested_claim"] = "serving"
+
+        context = self.module.build_knowledge_context(frozen, limit=3)
+
+        self.assertEqual(context["candidates"], [])
+        self.assertTrue(
+            any(
+                item["card_id"] == "diagnostic.cross-layer.triage"
+                and item["reason"] == "content_status"
+                for item in context["explanations"]
+            )
+        )
 
     def test_general_cards_only_use_existing_read_only_falsifiers(self) -> None:
         package = json.loads(

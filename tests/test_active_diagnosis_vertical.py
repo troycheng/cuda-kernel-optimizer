@@ -182,6 +182,32 @@ def scenario_maps(map_module) -> dict[str, dict]:
     }
 
 
+def _synthetic_measure_only_context(context: dict, frozen_inputs: dict) -> dict:
+    """Preserve Controller-only measure-only tests without runtime admission."""
+    result = copy.deepcopy(context)
+    nodes = frozen_inputs["execution_map"]["nodes"]
+    node = min(
+        [item for item in nodes if item["layer"] == "gpu"] or nodes,
+        key=lambda item: item["node_id"],
+    )
+    result["candidates"] = [
+        {
+            "mechanism_key": "crosslayerunattributedcriticalpath",
+            "statement": "Test-only unmodeled interval requiring one bounded probe.",
+            "execution_layers": [node["layer"]],
+            "scope_node_ids": [node["node_id"]],
+            "confidence": "inconclusive",
+            "promotion_authority": "none",
+            "cheapest_falsifier": {
+                "action_id": "compiler-sass-inspection",
+                "rationale": "Inspect generated code without changing the project.",
+            },
+            "admission": "measure_only",
+        }
+    ]
+    return result
+
+
 class ActiveDiagnosisVerticalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.map_module = _load("execution_map.py", "vertical_execution_map")
@@ -222,7 +248,7 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
         )
         self.assertEqual(spend, {"elapsed_seconds": 7.0})
 
-    def test_measure_only_knowledge_maps_to_one_unmodeled_measurement(self) -> None:
+    def test_no_positive_knowledge_does_not_runtime_admit_measurement(self) -> None:
         replay = json.loads(FRESH_REPLAY_FIXTURE.read_text(encoding="utf-8"))
         raw = copy.deepcopy(
             next(
@@ -255,6 +281,11 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
         knowledge_context = _load(
             "diagnostic_knowledge.py", "vertical_measure_only_knowledge"
         ).build_knowledge_context(frozen, limit=3)
+        self.assertEqual(knowledge_context["candidates"], [])
+        knowledge_context = _synthetic_measure_only_context(
+            knowledge_context,
+            frozen,
+        )
         self.assertEqual(knowledge_context["candidates"][0]["admission"], "measure_only")
 
         execution_map = self.map_module.validate_execution_map(
@@ -454,12 +485,31 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
             ]
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
 
-            helper.controller.start_run(control, run_dir)
-            helper._authorize_active_run(
-                control,
-                run_dir,
-                "grant-model-direction-after-raw-measurement",
+            knowledge_module = (
+                helper.controller._load_diagnostic_knowledge_module()
             )
+
+            def build_test_only_measure_context(frozen_inputs, *, limit):
+                context = knowledge_module.build_knowledge_context(
+                    frozen_inputs,
+                    limit=limit,
+                )
+                self.assertEqual(context["candidates"], [])
+                return _synthetic_measure_only_context(context, frozen_inputs)
+
+            with mock.patch.object(
+                helper.controller,
+                "_load_diagnostic_knowledge_module",
+            ) as load_knowledge:
+                load_knowledge.return_value.build_knowledge_context.side_effect = (
+                    build_test_only_measure_context
+                )
+                helper.controller.start_run(control, run_dir)
+                helper._authorize_active_run(
+                    control,
+                    run_dir,
+                    "grant-model-direction-after-raw-measurement",
+                )
             active = run_dir / "active_diagnosis"
             epoch = json.loads((active / "epoch.json").read_text("utf-8"))
             context = json.loads(
@@ -3961,6 +4011,85 @@ class ActiveDiagnosisVerticalTests(unittest.TestCase):
                 helper.controller.ValidationError, "digest|artifact|context"
             ):
                 helper.controller.resume_run(run_dir)
+
+    def test_adapter_implementation_drift_is_rejected_before_knowledge_routing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            helper = workload_fixtures.WorkloadRoundTests()
+            helper.setUp()
+            control, run_dir, _project = helper._workspace(root)
+            workload_fixtures._enable_v2_readiness(
+                control,
+                root,
+                capability_ids=("gpu-execute", "pytorch.profiler"),
+            )
+            workload_fixtures._enable_active_diagnosis(control, root)
+            helper.controller.start_run(control, run_dir)
+            helper._authorize_active_run(
+                control,
+                run_dir,
+                "grant-task4-adapter-binding",
+            )
+            hypothesis, request = helper._active_proposal(run_dir)
+            helper.controller.register_active_diagnosis_proposal(
+                control,
+                run_dir,
+                hypothesis,
+                request,
+            )
+            helper.controller.collect_active_diagnosis_evidence(
+                control,
+                run_dir,
+            )
+
+            active = run_dir / "active_diagnosis"
+            context = json.loads(
+                (run_dir / "diagnosis_context.json").read_text("utf-8")
+            )
+            contract = helper.controller._load_frozen_analysis_contract(
+                run_dir,
+                helper.controller.read_run_state(run_dir),
+            )
+            action_id = context["evidence_results"][-1]["action_id"]
+            tampered_contract = copy.deepcopy(contract)
+            next(
+                item
+                for item in tampered_contract["actions"]
+                if item["action_id"] == action_id
+            )["adapter_sha256"] = "f" * 64
+
+            with mock.patch.object(
+                helper.controller,
+                "_load_diagnostic_knowledge_module",
+                side_effect=AssertionError(
+                    "tampered adapter identity reached knowledge routing"
+                ),
+            ) as load_knowledge:
+                with self.assertRaisesRegex(
+                    helper.controller.ValidationError,
+                    "adapter binding drifted",
+                ):
+                    helper.controller._rebuild_knowledge_context(
+                        run_dir,
+                        context,
+                        tampered_contract,
+                        json.loads((active / "epoch.json").read_text("utf-8")),
+                        json.loads(
+                            (active / "execution_map.json").read_text("utf-8")
+                        ),
+                        json.loads(
+                            (active / "evidence_catalog.json").read_text("utf-8")
+                        ),
+                        json.loads(
+                            (active / "selection_policy.json").read_text("utf-8")
+                        ),
+                        json.loads(
+                            (active / "performance_model.json").read_text("utf-8")
+                        ),
+                    )
+            load_knowledge.assert_not_called()
 
 
 

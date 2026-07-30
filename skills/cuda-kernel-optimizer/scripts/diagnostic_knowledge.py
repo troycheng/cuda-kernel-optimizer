@@ -47,6 +47,17 @@ _ACTIVE_ACTIONS = {
     "nsys-os-runtime-slice": "os_runtime",
     "pytorch-operator-trace": "framework_trace",
 }
+_ACTIVE_EVIDENCE_TOOLS = {
+    "ncu_kernel": ({"ncu"}, "profiler_versions", "ncu"),
+    "nsys_timeline": ({"nsys"}, "profiler_versions", "nsys"),
+    "os_runtime": ({"nsys"}, "profiler_versions", "nsys"),
+    "framework_trace": ({"pytorch"}, "framework_versions", "pytorch"),
+    "compiler_sass": (
+        {"nvdisasm", "cuobjdump"},
+        "compiler_versions",
+        "cuda",
+    ),
+}
 _KNOWLEDGE_IDENTITY_FIELDS = {
     "schema_version",
     "gpu_architecture",
@@ -293,6 +304,145 @@ def _append_observation(observations: dict[tuple, dict], item: dict) -> None:
             "and source_digest"
         )
     observations[key] = item
+
+
+def _active_observation_trust(
+    observation: Mapping[str, object],
+    *,
+    envelope_status: str,
+    action_id: str,
+    evidence_kind: str,
+    identity: Mapping[str, object],
+    producer_contract: Mapping[str, object],
+) -> tuple[bool, str]:
+    """Decide whether one active observation can admit source-backed knowledge."""
+    contract = producer_contract.get(action_id)
+    if (
+        envelope_status != "observed"
+        or _ACTIVE_ACTIONS.get(action_id) != evidence_kind
+        or not isinstance(contract, Mapping)
+        or contract.get("evidence_kind") != evidence_kind
+        or observation.get("semantic_id")
+        not in contract.get("derived_semantic_ids", ())
+    ):
+        return False, "producer_untrusted"
+    if observation.get("quality") != "validated":
+        return False, "quality_untrusted"
+    expected = _ACTIVE_EVIDENCE_TOOLS.get(evidence_kind)
+    if expected is None:
+        return False, "tool_unmodeled"
+    tool_names, identity_group, identity_key = expected
+    tool = observation.get("tool")
+    if not isinstance(tool, Mapping) or tool.get("name") not in tool_names:
+        return False, "tool_unmodeled"
+    facts = identity.get(identity_group)
+    fact = facts.get(identity_key) if isinstance(facts, Mapping) else None
+    if not isinstance(fact, Mapping) or fact.get("status") != "verified":
+        return False, "identity_unverified"
+    if tool.get("version") != fact.get("value"):
+        return False, "tool_version_mismatch"
+    return True, "validated"
+
+
+def _active_observation_key(observation: Mapping[str, object]) -> tuple:
+    return (
+        observation["semantic_id"],
+        tuple(observation["scope"]),
+    )
+
+
+def _active_observation_trust_index(
+    active_evidence_results: Sequence[Mapping[str, object]],
+    *,
+    identity: Mapping[str, object],
+    producer_contract: Mapping[str, object],
+) -> dict[str, dict[str, object]]:
+    """Index trust by the sealed result digest without changing observations."""
+    index: dict[str, dict[str, object]] = {}
+    for envelope in active_evidence_results:
+        result_sha = envelope["result_sha256"]
+        envelope_sha = _canonical_sha256(envelope)
+        result_index = index.get(result_sha)
+        if result_index is None:
+            result_index = {
+                "envelope_sha256": envelope_sha,
+                "collision": False,
+                "observations": {},
+            }
+            index[result_sha] = result_index
+        elif result_index["envelope_sha256"] != envelope_sha:
+            result_index["collision"] = True
+            result_index["observations"] = {}
+            continue
+        if result_index["collision"]:
+            continue
+        semantic_items = envelope["observations"].get("semantic_observations")
+        if not isinstance(semantic_items, list):
+            continue
+        indexed_observations = result_index["observations"]
+        for observation in semantic_items:
+            _, reason = _active_observation_trust(
+                observation,
+                envelope_status=envelope["status"],
+                action_id=envelope["action_id"],
+                evidence_kind=envelope["evidence_kind"],
+                identity=identity,
+                producer_contract=producer_contract,
+            )
+            key = _active_observation_key(observation)
+            previous = indexed_observations.get(key)
+            if previous is not None and previous != reason:
+                reason = "producer_untrusted"
+            indexed_observations[key] = reason
+    return index
+
+
+def _observation_trust_reason(
+    observation: Mapping[str, object],
+    trust_index: Mapping[str, Mapping[str, object]],
+) -> str:
+    result_index = trust_index.get(observation["source_digest"])
+    if result_index is None or result_index["collision"]:
+        return "producer_untrusted"
+    return result_index["observations"].get(
+        _active_observation_key(observation),
+        "producer_untrusted",
+    )
+
+
+def _trusted_active_observations(
+    observations: Sequence[Mapping[str, object]],
+    trust_index: Mapping[str, Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    return [
+        item
+        for item in observations
+        if _observation_trust_reason(item, trust_index) == "validated"
+    ]
+
+
+def _matching_untrusted_reason(
+    rules: Sequence[Mapping[str, object]],
+    observations: Sequence[Mapping[str, object]],
+    trust_index: Mapping[str, Mapping[str, object]],
+) -> str | None:
+    priorities = {
+        "quality_untrusted": 0,
+        "tool_unmodeled": 1,
+        "tool_version_mismatch": 2,
+        "identity_unverified": 3,
+        "producer_untrusted": 4,
+    }
+    reasons = {
+        _observation_trust_reason(observation, trust_index)
+        for rule in rules
+        for observation in observations
+        if _rule_matches(rule, observation)
+        and _observation_trust_reason(observation, trust_index) != "validated"
+    }
+    if not reasons:
+        return None
+    return min(reasons, key=lambda reason: priorities[reason])
 
 
 def _validate_observation_rules(value: object, label: str) -> None:
@@ -568,8 +718,6 @@ def normalize_observations(
             envelope["evidence_kind"],
             f"active evidence result {index} evidence_kind",
         )
-        if _ACTIVE_ACTIONS.get(action_id) != evidence_kind:
-            raise ValueError(f"active evidence result {index} action identity is unknown")
         _sha256(
             envelope["adapter_implementation_sha256"],
             f"active evidence result {index} adapter identity SHA",
@@ -1023,9 +1171,20 @@ def build_knowledge_context(
         diagnostic_evidence=frozen_inputs["diagnostic_evidence"],
         active_evidence_results=frozen_inputs["active_evidence_results"],
     )
-    completed_action_ids = {
-        item["action_id"] for item in frozen_inputs["active_evidence_results"]
-    }
+    evidence_module = _load_sibling(
+        "diagnostic_evidence.py",
+        "cuda_optimizer_diagnostic_evidence_knowledge_trust",
+    )
+    producer_contract = evidence_module.semantic_producer_contract()
+    active_trust_index = _active_observation_trust_index(
+        frozen_inputs["active_evidence_results"],
+        identity=identity,
+        producer_contract=producer_contract,
+    )
+    trusted_active_observations = _trusted_active_observations(
+        observations,
+        active_trust_index,
+    )
     evidence_sha = _canonical_sha256(observations)
     categories = _effective_categories(
         frozen_inputs["diagnosis"], rebuilt_model
@@ -1053,6 +1212,11 @@ def build_knowledge_context(
         "content_status": 0,
         "read_only_action_unavailable": 0,
         "below_minimum_effect": 0,
+        "counter_observed": 0,
+        "quality_untrusted": 0,
+        "producer_untrusted": 0,
+        "tool_unmodeled": 0,
+        "tool_version_mismatch": 0,
         "canonical_duplicate": 0,
         "pareto_dominated": 0,
         "byte_trimmed": 0,
@@ -1126,14 +1290,19 @@ def build_knowledge_context(
             )
             filtered_counts["execution_layer_unobserved"] += 1
             continue
+        rule_observations = (
+            trusted_active_observations
+            if card["content_status"] == "source_verified"
+            else observations
+        )
         positive, missing = _rule_evidence(
-            card["observation_rules"]["positive"], observations
+            card["observation_rules"]["positive"], rule_observations
         )
         counter, _ = _rule_evidence(
-            card["observation_rules"]["counter"], observations
+            card["observation_rules"]["counter"], rule_observations
         )
         invalidators, _ = _rule_evidence(
-            card["observation_rules"]["invalidators"], observations
+            card["observation_rules"]["invalidators"], rule_observations
         )
         if invalidators:
             rejections.append(
@@ -1146,6 +1315,18 @@ def build_knowledge_context(
                 }
             )
             filtered_counts["invalidator_observed"] += 1
+            continue
+        if card["content_status"] == "source_verified" and counter:
+            explanations.append(
+                {
+                    **base,
+                    "reason": "counter_observed",
+                    "details": sorted(
+                        {item["semantic_id"] for item in counter}
+                    ),
+                }
+            )
+            filtered_counts["counter_observed"] += 1
             continue
         card_cases = [cases[case_id] for case_id in card["case_ids"]]
         exact_rejection_ids = sorted(
@@ -1173,29 +1354,22 @@ def build_knowledge_context(
             action_id in available_action_ids
             and action["control_scope"] == "read_only"
         )
-        measure_only_eligible = (
-            requested_claim == "serving"
-            and card["content_status"] == "source_verified"
-            and not card["observation_rules"]["positive"]
-            and action_available
-            and action_id not in completed_action_ids
-            and action["cost"] == "low"
-            and action["control_scope"] == "read_only"
-            and action["risk"] in {"none", "low"}
-        )
         candidate_eligible = card["id"] in eligible_card_ids
         if not candidate_eligible:
-            if measure_only_eligible:
-                record_kind = "measure_only"
-                explanation_reason = None
-                explanation_details = []
-            else:
-                record_kind = "explanation"
-                explanation_reason = "content_status"
-                explanation_details = [card["content_status"]]
+            record_kind = "explanation"
+            explanation_reason = "content_status"
+            explanation_details = [card["content_status"]]
         elif card["observation_rules"]["positive"] and not positive:
             record_kind = "explanation"
-            explanation_reason = "positive_observation_missing"
+            explanation_reason = (
+                _matching_untrusted_reason(
+                    card["observation_rules"]["positive"],
+                    observations,
+                    active_trust_index,
+                )
+                if card["content_status"] == "source_verified"
+                else None
+            ) or "positive_observation_missing"
             explanation_details = sorted(
                 item["semantic_id"] for item in missing
             )
@@ -1239,7 +1413,7 @@ def build_knowledge_context(
         qualifies_minimum_effect = bool(
             direction and direction["qualifies_minimum_effect"]
         )
-        if record_kind in {"candidate", "measure_only"} and not qualifies_minimum_effect:
+        if record_kind == "candidate" and not qualifies_minimum_effect:
             record_kind = "explanation"
             explanation_reason = "below_minimum_effect"
             explanation_details = [
@@ -1341,9 +1515,6 @@ def build_knowledge_context(
     candidate_records = [
         item for item in deduplicated if item["_kind"] == "candidate"
     ]
-    measure_only_records = [
-        item for item in deduplicated if item["_kind"] == "measure_only"
-    ]
     frontier = []
     for candidate in candidate_records:
         dominators = [
@@ -1379,12 +1550,6 @@ def build_knowledge_context(
                 selected.append(candidate)
             if len(selected) == limit:
                 break
-    if not selected and measure_only_records:
-        measure_only_records.sort(
-            key=lambda item: (item["mechanism_key"], item["card_id"])
-        )
-        selected.append(measure_only_records[0])
-
     public_candidates = []
     for candidate in selected:
         public = {
@@ -1392,8 +1557,6 @@ def build_knowledge_context(
             for key, value in candidate.items()
             if not key.startswith("_")
         }
-        if candidate["_kind"] == "measure_only":
-            public["admission"] = "measure_only"
         public_candidates.append(public)
     explanations.sort(key=lambda item: (item["mechanism_key"], item["card_id"]))
     rejections.sort(
@@ -1784,6 +1947,8 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
         )
         if not set(referenced_sources).issubset(source_ids):
             raise ValueError(f"diagnostic card {card_id} references unknown source")
+        if item["content_status"] == "source_verified" and positive_semantics:
+            runtime_candidates.append(card_id)
         referenced_cases = _strings(
             item["case_ids"], f"diagnostic card {card_id} case_ids", nonempty=False
         )
