@@ -760,6 +760,56 @@ class AnalyzeNcuRepImportTests(unittest.TestCase):
                 self.assertTrue(payload["commands"]["raw"]["available"])
                 self.assertTrue(payload["artifacts"]["raw.csv"]["available"])
 
+    def test_raw_only_import_publishes_partial_bundle_when_metrics_are_uninterpretable(self) -> None:
+        module = _load()
+        raw = (
+            '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
+            '"kernel","dram__throughput.avg.pct_of_peak_sustained_elapsed","%","NaN"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = root / "input.ncu-rep"
+            report.write_bytes(b"report")
+            output = root / "analysis"
+            ncu = _fake_ncu(root)
+            success = {
+                "timed_out": False,
+                "truncated": False,
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "",
+            }
+            unavailable = {**success, "returncode": 7, "stderr": "unavailable"}
+            responses = [
+                {**success, "stdout": "NVIDIA Nsight Compute 2026.2"},
+                unavailable,
+                unavailable,
+                {**success, "stdout": raw},
+            ]
+            with mock.patch.object(module, "_run_bounded", side_effect=responses):
+                returncode = module.main(
+                    [
+                        str(report),
+                        "--out-dir",
+                        str(output),
+                        "--ncu-bin",
+                        str(ncu),
+                    ]
+                )
+
+            payload = json.loads(
+                (output / "analysis.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(returncode, 2)
+            self.assertEqual(payload["status"], "partial")
+            self.assertEqual(
+                (output / "raw.csv").read_bytes(), raw.encode("utf-8")
+            )
+            self.assertTrue(payload["commands"]["raw"]["available"])
+            self.assertTrue(payload["artifacts"]["raw.csv"]["available"])
+            self.assertFalse(payload["artifacts"]["summary.txt"]["available"])
+            self.assertFalse(payload["artifacts"]["details.txt"]["available"])
+
     def test_whitespace_only_imports_are_unavailable_and_do_not_publish_marker(self) -> None:
         module = _load()
         success = {"timed_out": False, "truncated": False, "returncode": 0, "stdout": " \n\t", "stderr": ""}

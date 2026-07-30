@@ -421,12 +421,8 @@ def _run_analysis(args: argparse.Namespace) -> int:
     for name, result in results.items():
         commands[name] = _command_result(result, available=available[name])
 
-    interpretable = (
-        available["summary"]
-        or available["details"]
-        or raw_metrics_interpretable
-    )
-    if not interpretable:
+    publishable = any(available.values())
+    if not publishable:
         raise RuntimeError("all NCU report imports failed or were uninterpretable")
     complete = (
         version_available
