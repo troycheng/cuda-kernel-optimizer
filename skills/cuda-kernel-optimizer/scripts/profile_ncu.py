@@ -30,6 +30,10 @@ from pathlib import Path
 from typing import Iterable
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import diagnostic_evidence  # noqa: E402
+
+
 # ---------------------------------------------------------------------------
 # Axis rubric — which metric ID patterns belong to which axis, and whether
 # higher values are "worse" (i.e. indicate a bottleneck on that axis).
@@ -347,6 +351,20 @@ def _aggregate_across_kernels(rows: list[dict]) -> dict[str, dict]:
             "kernels": sorted(a["kernels"]),
         }
     return out
+
+
+def _semantic_ncu_observations(
+    csv_text: str,
+    tool_version: str,
+    kernel_name_hints: list[str] | None = None,
+) -> dict:
+    rows = _parse_ncu_csv(csv_text, kernel_name_hints=kernel_name_hints)
+    aggregate = _aggregate_across_kernels(rows)
+    metrics = {
+        name: (info.get("value"), info.get("unit"))
+        for name, info in aggregate.items()
+    }
+    return diagnostic_evidence.normalize_ncu_metrics(metrics, tool_version)
 
 
 def _build_profile_command(
@@ -672,6 +690,13 @@ def main() -> None:
     rows = _parse_ncu_csv(csv_text, kernel_name_hints=kernel_hints)
     agg = _aggregate_across_kernels(rows)
     by_axis = _rank_by_axis(agg, state.get("ncu_num", 5))
+    semantics = diagnostic_evidence.normalize_ncu_metrics(
+        {
+            name: (info.get("value"), info.get("unit"))
+            for name, info in agg.items()
+        },
+        ncu_info.get("version") if isinstance(ncu_info, dict) else None,
+    )
 
     top = {
         "degraded": False,
@@ -680,6 +705,7 @@ def main() -> None:
         "ncu_rep": rep_path,
         "metric_count_collected": len(agg),
         **by_axis,
+        **semantics,
     }
     _write_json(os.path.join(iter_dir, "ncu_top.json"), top)
 

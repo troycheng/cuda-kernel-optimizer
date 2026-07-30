@@ -21,6 +21,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artifact_store  # noqa: E402
+import diagnostic_evidence  # noqa: E402
 import profile_ncu  # noqa: E402
 
 
@@ -255,10 +256,19 @@ def _command_result(result: dict[str, Any], *, available: bool) -> dict[str, Any
     }
 
 
-def _analyze_csv(csv_text: str, ncu_num: int) -> dict[str, Any]:
+def _analyze_csv(
+    csv_text: str, ncu_num: int, tool_version: str | None = None
+) -> dict[str, Any]:
     """Normalize and rank imported CSV through the optimizer's shared rubric."""
     rows = profile_ncu._parse_ncu_csv(csv_text)
     aggregate = profile_ncu._aggregate_across_kernels(rows)
+    semantics = diagnostic_evidence.normalize_ncu_metrics(
+        {
+            name: (info.get("value"), info.get("unit"))
+            for name, info in aggregate.items()
+        },
+        tool_version,
+    )
     aggregate = {
         name: info
         for name, info in aggregate.items()
@@ -291,6 +301,7 @@ def _analyze_csv(csv_text: str, ncu_num: int) -> dict[str, Any]:
         "kernels": kernels,
         "rankings": rankings,
         "primary_axis": {"axis": best_axis, "quality": "heuristic"},
+        **semantics,
     }
 
 
@@ -400,9 +411,17 @@ def _run_analysis(args: argparse.Namespace) -> int:
         for name, result in results.items()
     }
     csv_analysis = (
-        _analyze_csv(results["raw"]["stdout"], args.ncu_num)
+        _analyze_csv(
+            results["raw"]["stdout"],
+            args.ncu_num,
+            tool_version=version_result["stdout"] if version_available else None,
+        )
         if available["raw"]
-        else _analyze_csv("", args.ncu_num)
+        else _analyze_csv(
+            "",
+            args.ncu_num,
+            tool_version=version_result["stdout"] if version_available else None,
+        )
     )
     available["raw"] = available["raw"] and csv_analysis["metric_count"] > 0
     for name, result in results.items():

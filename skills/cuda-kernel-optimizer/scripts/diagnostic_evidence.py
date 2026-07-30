@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -29,10 +30,148 @@ _SIGNALS = {
         "framework_dispatch_overhead",
     },
 }
+_NCU_MAPPING_VERSION = "ncu-semantic-v1"
+_NCU_VERSION = re.compile(r"(?<!\d)(\d{4}\.\d+)(?:\.\d+)*(?!\d)")
+_NCU_METRIC_MAPPINGS = {
+    "2026.2": {
+        "dram__throughput.avg.pct_of_peak_sustained_elapsed": {
+            "semantic_id": "kernel.dram_throughput_pct",
+            "unit": "%",
+        },
+        "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct": {
+            "semantic_id": "kernel.long_scoreboard_pct",
+            "unit": "%",
+        },
+        "smsp__average_warp_latency_issue_stalled_long_scoreboard_per_warp_active.pct": {
+            "semantic_id": "kernel.long_scoreboard_pct",
+            "unit": "%",
+        },
+    }
+}
 
 
 class ValidationError(ValueError):
     pass
+
+
+def _ncu_major_minor(tool_version: Any) -> str | None:
+    if type(tool_version) is not str:
+        return None
+    match = _NCU_VERSION.search(tool_version)
+    return match.group(1) if match is not None else None
+
+
+def normalize_ncu_metrics(metrics: Mapping[str, Any], tool_version: str) -> dict:
+    """Map versioned raw NCU metrics to stable routing-only observations."""
+    if not isinstance(metrics, Mapping):
+        raise ValidationError("NCU metrics must be a mapping")
+
+    version = _ncu_major_minor(tool_version)
+    mapping = _NCU_METRIC_MAPPINGS.get(version)
+    unmodeled = []
+    if mapping is None:
+        for metric_name in sorted(metrics):
+            unmodeled.append(
+                {
+                    "metric_name": metric_name,
+                    "reason": "unsupported_tool_version",
+                }
+            )
+        return {
+            "semantic_observations": [],
+            "unmodeled_metrics": unmodeled,
+            "mapping_version": _NCU_MAPPING_VERSION,
+        }
+
+    candidates: dict[str, list[tuple[str, float, str]]] = {}
+    invalid_semantics = set()
+    for metric_name in sorted(metrics):
+        rule = mapping.get(metric_name)
+        if rule is None:
+            unmodeled.append(
+                {"metric_name": metric_name, "reason": "unknown_metric"}
+            )
+            continue
+        semantic_id = rule["semantic_id"]
+        raw = metrics[metric_name]
+        if type(raw) not in {tuple, list} or len(raw) != 2:
+            invalid_semantics.add(semantic_id)
+            unmodeled.append(
+                {"metric_name": metric_name, "reason": "invalid_metric_value"}
+            )
+            continue
+        value, unit = raw
+        if (
+            type(value) not in {int, float}
+            or not math.isfinite(value)
+        ):
+            invalid_semantics.add(semantic_id)
+            reason = (
+                "non_finite_value"
+                if type(value) in {int, float}
+                else "invalid_metric_value"
+            )
+            unmodeled.append({"metric_name": metric_name, "reason": reason})
+            continue
+        if type(unit) is not str or not unit.strip():
+            invalid_semantics.add(semantic_id)
+            unmodeled.append(
+                {"metric_name": metric_name, "reason": "missing_unit"}
+            )
+            continue
+        if unit != rule["unit"]:
+            invalid_semantics.add(semantic_id)
+            unmodeled.append(
+                {"metric_name": metric_name, "reason": "unexpected_unit"}
+            )
+            continue
+        candidates.setdefault(semantic_id, []).append(
+            (metric_name, float(value), unit)
+        )
+
+    observations = []
+    for semantic_id in sorted(candidates):
+        entries = candidates[semantic_id]
+        if semantic_id in invalid_semantics:
+            for metric_name, _value, _unit in entries:
+                unmodeled.append(
+                    {
+                        "metric_name": metric_name,
+                        "reason": "semantic_input_invalid",
+                    }
+                )
+            continue
+        values = {(value, unit) for _name, value, unit in entries}
+        if len(values) != 1:
+            for metric_name, _value, _unit in entries:
+                unmodeled.append(
+                    {
+                        "metric_name": metric_name,
+                        "reason": "conflicting_semantic_values",
+                    }
+                )
+            continue
+        value, unit = next(iter(values))
+        observations.append(
+            {
+                "semantic_id": semantic_id,
+                "status": "observed",
+                "value": value,
+                "unit": unit,
+                "scope": ["kernel"],
+                "aggregation": "ncu_metric",
+                "tool": {"name": "ncu", "version": version},
+                "quality": "validated",
+            }
+        )
+
+    return {
+        "semantic_observations": observations,
+        "unmodeled_metrics": sorted(
+            unmodeled, key=lambda item: (item["metric_name"], item["reason"])
+        ),
+        "mapping_version": _NCU_MAPPING_VERSION,
+    }
 
 
 def _pairs(pairs):

@@ -151,6 +151,123 @@ class DiagnosticEvidenceTests(unittest.TestCase):
                     recorded_at=100.0,
                 )
 
+    def test_supported_ncu_metrics_normalize_to_closed_validated_semantics(self) -> None:
+        result = self.module.normalize_ncu_metrics(
+            {
+                "dram__throughput.avg.pct_of_peak_sustained_elapsed": (81.0, "%"),
+                "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct": (
+                    37.0,
+                    "%",
+                ),
+                "unknown__metric": (9.0, "%"),
+            },
+            tool_version="2026.2",
+        )
+
+        self.assertEqual(
+            set(result),
+            {"semantic_observations", "unmodeled_metrics", "mapping_version"},
+        )
+        self.assertEqual(result["mapping_version"], "ncu-semantic-v1")
+        self.assertEqual(
+            [item["semantic_id"] for item in result["semantic_observations"]],
+            ["kernel.dram_throughput_pct", "kernel.long_scoreboard_pct"],
+        )
+        self.assertTrue(
+            all(
+                set(item)
+                == {
+                    "semantic_id",
+                    "status",
+                    "value",
+                    "unit",
+                    "scope",
+                    "aggregation",
+                    "tool",
+                    "quality",
+                }
+                for item in result["semantic_observations"]
+            )
+        )
+        self.assertTrue(
+            all(
+                item["status"] == "observed"
+                and item["quality"] == "validated"
+                and item["tool"] == {"name": "ncu", "version": "2026.2"}
+                for item in result["semantic_observations"]
+            )
+        )
+        self.assertEqual(
+            result["unmodeled_metrics"],
+            [{"metric_name": "unknown__metric", "reason": "unknown_metric"}],
+        )
+
+    def test_unknown_ncu_major_minor_is_unmodeled_without_semantics(self) -> None:
+        result = self.module.normalize_ncu_metrics(
+            {
+                "dram__throughput.avg.pct_of_peak_sustained_elapsed": (81.0, "%"),
+            },
+            tool_version="2026.3",
+        )
+
+        self.assertEqual(result["semantic_observations"], [])
+        self.assertEqual(
+            result["unmodeled_metrics"],
+            [
+                {
+                    "metric_name": "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+                    "reason": "unsupported_tool_version",
+                }
+            ],
+        )
+
+    def test_invalid_ncu_values_units_and_duplicate_semantics_fail_closed(self) -> None:
+        cases = [
+            (
+                {
+                    "dram__throughput.avg.pct_of_peak_sustained_elapsed": (
+                        float("nan"),
+                        "%",
+                    )
+                },
+                "non_finite_value",
+            ),
+            (
+                {
+                    "dram__throughput.avg.pct_of_peak_sustained_elapsed": (
+                        81.0,
+                        "",
+                    )
+                },
+                "missing_unit",
+            ),
+            (
+                {
+                    "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct": (
+                        37.0,
+                        "%",
+                    ),
+                    "smsp__average_warp_latency_issue_stalled_long_scoreboard_per_warp_active.pct": (
+                        41.0,
+                        "%",
+                    ),
+                },
+                "conflicting_semantic_values",
+            ),
+        ]
+
+        for metrics, reason in cases:
+            with self.subTest(reason=reason):
+                result = self.module.normalize_ncu_metrics(
+                    metrics, tool_version="2026.2"
+                )
+                self.assertEqual(result["semantic_observations"], [])
+                self.assertTrue(result["unmodeled_metrics"])
+                self.assertEqual(
+                    {item["reason"] for item in result["unmodeled_metrics"]},
+                    {reason},
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

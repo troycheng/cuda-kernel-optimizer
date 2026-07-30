@@ -511,6 +511,32 @@ class AnalyzeNcuRepImportTests(unittest.TestCase):
         )
         self.assertEqual(unknown["primary_axis"], {"axis": "unknown", "quality": "heuristic"})
 
+    def test_analysis_and_profile_entries_share_identical_stable_ncu_semantics(self) -> None:
+        module = _load()
+        raw = (
+            '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
+            '"kernel","dram__throughput.avg.pct_of_peak_sustained_elapsed","%","75"\n'
+            '"kernel","smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct","%","32"\n'
+            '"kernel","unknown__metric","%","9"\n'
+        )
+
+        profile_result = module.profile_ncu._semantic_ncu_observations(raw, "2026.2")
+        analysis_result = module._analyze_csv(raw, 5, tool_version="2026.2")
+        analysis_semantics = {
+            key: analysis_result[key]
+            for key in (
+                "semantic_observations",
+                "unmodeled_metrics",
+                "mapping_version",
+            )
+        }
+
+        self.assertEqual(analysis_semantics, profile_result)
+        self.assertNotIn(
+            analysis_result["primary_axis"],
+            analysis_result["semantic_observations"],
+        )
+
     def test_successful_unclassified_raw_csv_is_preserved_with_unknown_axis(self) -> None:
         module = _load()
         raw = (

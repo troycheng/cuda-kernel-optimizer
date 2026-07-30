@@ -136,6 +136,27 @@ class ProfileNcuTests(unittest.TestCase):
         self.assertTrue(rows)
         self.assertEqual({row["Kernel Name"] for row in rows}, {"target_kernel"})
 
+    def test_profile_csv_emits_stable_semantics_without_heuristic_axis(self) -> None:
+        profile_ncu = _load("profile_ncu")
+        text = (
+            '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
+            '"target","dram__throughput.avg.pct_of_peak_sustained_elapsed","%","75"\n'
+            '"target","smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct","%","32"\n'
+            '"target","unknown__metric","%","9"\n'
+        )
+
+        result = profile_ncu._semantic_ncu_observations(text, "2026.2")
+
+        self.assertEqual(
+            [item["semantic_id"] for item in result["semantic_observations"]],
+            ["kernel.dram_throughput_pct", "kernel.long_scoreboard_pct"],
+        )
+        self.assertNotIn("primary_axis", result)
+        self.assertEqual(
+            result["unmodeled_metrics"],
+            [{"metric_name": "unknown__metric", "reason": "unknown_metric"}],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
