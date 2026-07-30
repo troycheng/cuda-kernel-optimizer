@@ -748,6 +748,25 @@ class PostFreezeControllerReplayTest(unittest.TestCase):
         self.assertEqual(len(epochs), 6)
         self.assertEqual(len(decisions), 6)
 
+    def test_historical_source_identity_uses_recorded_commit_not_current_tree(
+        self,
+    ):
+        for case in self.suite["cases"]:
+            source = case["input_snapshot"]["archive_identity_facts"][
+                "controller_source_identity"
+            ]
+            with self.subTest(case=case["case_id"]):
+                validated = (
+                    build_knowledge_replay._validate_controller_source_identity(
+                        source,
+                        verify_commit=True,
+                    )
+                )
+                self.assertEqual(
+                    validated["source_repo_head"],
+                    source["source_repo_head"],
+                )
+
     def test_postfreeze_labels_separate_diagnosis_from_candidate_outcome(self):
         for case in self.suite["cases"]:
             with self.subTest(case=case["case_id"]):

@@ -70,11 +70,7 @@ def _validate_controller_source_identity(
         raise ValueError("Controller source-state commit is invalid")
     for field, path in _CONTROLLER_SOURCE_FILES.items():
         digest = source[field]
-        if (
-            type(digest) is not str
-            or _SHA256.fullmatch(digest) is None
-            or digest != hashlib.sha256(path.read_bytes()).hexdigest()
-        ):
+        if type(digest) is not str or _SHA256.fullmatch(digest) is None:
             raise ValueError("Controller source-state digest is invalid")
         if verify_commit:
             relative_path = path.relative_to(ROOT).as_posix()
@@ -95,6 +91,8 @@ def _validate_controller_source_identity(
                 raise ValueError(
                     "Controller source commit does not reproduce recorded files"
                 )
+        elif digest != hashlib.sha256(path.read_bytes()).hexdigest():
+            raise ValueError("Controller source-state digest is invalid")
     return source
 
 
@@ -1090,8 +1088,25 @@ def _validate_controller_replay_case(
 def validate_scoreable_case(
     case: dict,
     *,
-    verify_source_commit: bool = True,
+    verify_source_commit: bool | None = None,
 ) -> None:
+    if verify_source_commit is None:
+        source_identity = (
+            case.get("input_snapshot", {})
+            .get("archive_identity_facts", {})
+            .get("controller_source_identity", {})
+        )
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise ValueError("Current controller source commit is unavailable")
+        verify_source_commit = (
+            source_identity.get("source_repo_head") != result.stdout.strip()
+        )
     _validate_controller_replay_case(
         case,
         eligibility_status="scoreable",
