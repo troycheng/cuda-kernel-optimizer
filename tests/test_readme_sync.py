@@ -413,6 +413,9 @@ class ReadmeSyncTests(unittest.TestCase):
         for marker in (
             "当前 workload 的封存证据",
             "最多三个可证伪方向",
+            "12 个机制族",
+            "CUDA kernel、CUTLASS/CuTe、Triton、PyTorch、Serving 和 NCCL",
+            "精确 SM 和当前本地身份",
             "历史收益数字",
             "active_diagnosis/knowledge_context.json",
             "知识库没有匹配不会阻止模型提出方向",
@@ -422,6 +425,9 @@ class ReadmeSyncTests(unittest.TestCase):
         for marker in (
             "sealed evidence from the current workload",
             "at most three falsifiable directions",
+            "12 mechanism families",
+            "CUDA kernels, CUTLASS/CuTe, Triton, PyTorch, serving, and NCCL",
+            "exact SM and current local identity",
             "historical speedup numbers",
             "active_diagnosis/knowledge_context.json",
             "A missing knowledge match does not block a model-proposed direction",

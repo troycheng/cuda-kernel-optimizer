@@ -30,7 +30,7 @@ still require validation. It does not claim a speedup.
 
 - Check that build, correctness, benchmark, GPU, and profiler capabilities and dependencies are available before optimization starts.
 - Run the project's original baseline and locate the bottleneck layer on the critical path of the complete workload.
-- Use sealed evidence from the current workload, source code, and technical knowledge to form at most three falsifiable directions, then prefer the lowest-cost check.
+- Use sealed evidence from the current workload, source code, and technical knowledge to form at most three falsifiable directions from 12 cross-layer mechanism families, then prefer the lowest-cost check.
 - Optimize CUDA, CUTLASS, and Triton kernels and their surrounding execution paths, with staged validation for each candidate.
 - Decide whether to continue, pause, or stop from the available headroom, evidence strength, and next-stage cost; a resumed run
   will not rerun completed expensive stages.
@@ -110,15 +110,14 @@ evidence gaps. A benefit ceiling is the amount of time a direction could affect,
 not a promised speedup.
 
 ChatGPT proposes no more than three competing hypotheses from the execution
-map, source code, and relevant knowledge. V1.3 derives directions only from the
-current identity, performance model, and sealed observations; it never treats
-historical speedup numbers as current benefit. A prior failure may prevent a
-repeat only under the same identity. A missing knowledge match does not block a
-model-proposed direction; the Controller still checks it against the sealed
-profile, execution path, and source. The Controller then checks evidence
-binding, mechanism duplication, and claim layer before selecting the cheapest
-check that can distinguish the hypotheses. New evidence updates the next round
-until a direction is supported or rejected.
+map, source code, and relevant knowledge. V1.3 has 12 mechanism families for
+common performance problems across CUDA kernels, CUTLASS/CuTe, Triton, PyTorch,
+serving, and NCCL. Architecture capabilities from Ampere through Blackwell are
+filtered by exact SM and current local identity. The knowledge layer accepts
+only sealed semantic observations and never treats historical speedup numbers
+as current benefit. A missing knowledge match does not block a model-proposed
+direction from the profile, execution path, and source. The Controller checks evidence binding, mechanism duplication, and claim layer before selecting the
+cheapest distinguishing check; new evidence updates the next round.
 
 External search and third-party AI may challenge a direction or review a final
 result. Only the necessary technical summary is shared. External opinions
@@ -202,7 +201,8 @@ Neither predicts the speedup of a new project.
 
 ### V1.3.0
 
-- The local knowledge engine returns at most three falsifiable directions from the current identity, performance model, and sealed observations.
+- The local knowledge engine provides 12 mechanism families across six software layers; source-backed coverage from Ampere through Blackwell passed offline routing and architecture-counterfactual tests.
+- Architecture-specific capabilities are filtered by exact SM and local identity; knowledge candidates still have no execution or promotion authority.
 - When a raw profile lacks mechanism-level observations, the Controller allows one low-cost read-only check. A neutral result is not support, and an empty knowledge match does not block a model direction.
 - Historical cases support or reject only identity-bound mechanisms; historical gains do not transfer to a new workload.
 - In the retained RTX 5090 replay, V1.3 matched 3 of 4 promoted mechanisms and reduced profiler suggestions from 4 to 0. This is a known-case regression, not a new-workload hit rate.
