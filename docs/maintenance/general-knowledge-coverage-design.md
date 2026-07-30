@@ -103,6 +103,25 @@ Controller 仍然只相信本地封存证据。知识层不能直接修改代码
 
 这些机制不包含固定 tile、warp、stage、scheduler 参数或历史提速范围。实现参数由当前环境、能力事实和实验决定。
 
+### 6.1 覆盖矩阵与验证口径
+
+“覆盖”指知识路由能处理声明范围内的证据，不代表已经在每种 GPU 上获得性能收益。实现时必须维护一张机制覆盖矩阵：
+
+- 行是 12 个机制族；
+- 列是 CUDA kernel、CUTLASS/CuTe、Triton、PyTorch、Serving 和 NCCL；
+- 单元格只能标记为“适用”“不适用”或“需要架构能力”；
+- 每个“适用”单元格必须能追溯到机制卡、正向语义观测和最低成本证伪动作；
+- 每个“需要架构能力”单元格还必须指向 exact-SM capability gate；
+- 不得为了填满矩阵，给本来不适用的机制伪造跨层适用性。
+
+验收分成三种，不能混写：
+
+1. **机制单元测试**：每个机制族至少一个正例、一个 counter、一个 invalidator 和一个动作不可用例；
+2. **架构反事实测试**：SM80、SM86、SM89、SM90、SM100、SM103、SM110、SM120、SM121 分别验证允许能力及相邻架构能力泄漏；
+3. **跨层保留测试**：关闭 case memory 后，六个软件层各至少一个独立 fixture；fixture 不能从 5090 案例卡复制预期候选，并且必须覆盖至少六个不同的原始 workload 或公开代码路径。
+
+跨层 fixture 只证明路由、反例和权限边界。没有对应物理环境的成对性能数据时，发布说明只能写“来源支持并通过路由测试”，不能写“已在该架构或软件层验证性能”。
+
 ## 7. 来源已核对机制的准入
 
 当前实现只有 `replay_verified` 和 `locally_measured` 机制卡可以成为运行时候选。该规则会让知识覆盖被已有案例数量限制。
@@ -124,6 +143,17 @@ Controller 仍然只相信本地封存证据。知识层不能直接修改代码
 7. 没有正向观测时，只能作为解释或建议补测，不能成为具体机制候选；
 8. counter 作为反向证据保留；invalidator 命中时直接排除；
 9. 来源已核对不能代替本地正确性、成对压测或完整 workload 验证。
+
+其中“当前封存证据”还必须同时满足：
+
+- 由现有 Controller 认可的 diagnostic producer 或 active-evidence action 产生；
+- producer ID、producer version、adapter implementation digest 和 result digest 均通过现有封存链校验；
+- `quality` 必须是 `validated`；`heuristic`、`estimated`、缺失值和未知值只能用于解释或建议补测；
+- profiler、编译器或框架版本必须命中当前语义映射；未知版本输出为 `unmodeled`；
+- contract、environment、source 和 analysis epoch 身份必须与本轮输入一致；
+- 语义映射依赖的一手来源仍覆盖当前工具版本；版本超出来源记录范围时必须重新核对或本地 probe。
+
+这些条件由现有观测字段和封存摘要推导，不新增 JSON Schema。实现必须为未知 producer、未知 producer version、低质量观测、未知工具版本、身份过期和来源版本不覆盖分别增加拒绝测试。
 
 这项调整扩大的是“可以考虑什么”，不是“可以执行什么”或“什么已经有效”。
 
@@ -273,7 +303,7 @@ Controller 仍然只相信本地封存证据。知识层不能直接修改代码
 - 关闭 case memory 运行通用机制测试；
 - 运行 SM80 至 SM121 的架构反事实矩阵；
 - 运行 5090 保留案例，确认没有退化；
-- 使用可获得的公开或保留证据检查不同 workload family。
+- 使用与 5090 案例独立的六个跨层 fixture 检查 CUDA kernel、CUTLASS/CuTe、Triton、PyTorch、Serving 和 NCCL 路由。
 
 ### 阶段 5：发布准备
 
@@ -297,6 +327,9 @@ Controller 仍然只相信本地封存证据。知识层不能直接修改代码
 10. 5090 保留案例回归不退化；
 11. V1.2 的授权、候选阶段、恢复和终态测试全部通过；
 12. 没有新增 Controller 状态、执行阶段或 JSON Schema。
+13. 覆盖矩阵中每个“适用”单元格都能追溯到机制卡、语义观测和证伪动作；
+14. 六个软件层各有至少一个独立、case-off 的保留 fixture，合计来自至少六个不同 workload 或公开代码路径；
+15. 未知 producer、未知版本、低质量观测、身份过期和来源版本不覆盖均不能让 `source_verified` 卡成为候选。
 
 每个机制至少用一个独立正例、一个反例和一个能力/动作缺失例验证。公开或合成的证据只能证明路由和安全边界，不能证明在对应物理 GPU 上获得性能收益。
 
