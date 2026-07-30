@@ -1525,11 +1525,11 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
         "cuda_optimizer_diagnostic_evidence_package_validation",
     )
     producer_contract = evidence_module.semantic_producer_contract()
-    produced_semantics: set[str] = set()
+    declared_derived_semantics: set[str] = set()
     for action_id, raw in producer_contract.items():
         contract = _closed(
             raw,
-            {"evidence_kind", "semantic_ids"},
+            {"evidence_kind", "raw_semantic_ids", "derived_semantic_ids"},
             f"semantic producer {action_id}",
         )
         if action_id not in action_evidence_kinds:
@@ -1540,16 +1540,25 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
             raise ValueError(
                 f"semantic producer {action_id} evidence kind mismatches action"
             )
-        semantic_ids = _strings(
-            contract["semantic_ids"],
-            f"semantic producer {action_id} semantic_ids",
+        raw_semantic_ids = _strings(
+            contract["raw_semantic_ids"],
+            f"semantic producer {action_id} raw_semantic_ids",
+            nonempty=False,
         )
-        for semantic_id in semantic_ids:
+        derived_semantic_ids = _strings(
+            contract["derived_semantic_ids"],
+            f"semantic producer {action_id} derived_semantic_ids",
+        )
+        if set(raw_semantic_ids) & set(derived_semantic_ids):
+            raise ValueError(
+                f"semantic producer {action_id} mixes raw and derived semantics"
+            )
+        for semantic_id in [*raw_semantic_ids, *derived_semantic_ids]:
             _observation_identifier(
                 semantic_id,
                 f"semantic producer {action_id} semantic_id",
             )
-        produced_semantics.update(semantic_ids)
+        declared_derived_semantics.update(derived_semantic_ids)
 
     _closed(cases, {"schema_version", "cases"}, "case memory")
     if cases["schema_version"] != "cuda-optimizer/case-memory-v1":
@@ -1751,10 +1760,10 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
             for rule in item["observation_rules"]["positive"]
         }
         if item["content_status"] == "source_verified" and positive_semantics:
-            if positive_semantics.isdisjoint(produced_semantics):
+            if positive_semantics.isdisjoint(declared_derived_semantics):
                 raise ValueError(
-                    f"diagnostic card {card_id} positive semantic has no "
-                    "trusted producer"
+                    f"diagnostic card {card_id} positive semantic is outside "
+                    "the declared derived vocabulary"
                 )
             compatible_actions = set(preferred_actions)
             compatible_actions.add(falsifier_id)
@@ -1762,7 +1771,9 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
             for action_id in compatible_actions:
                 contract = producer_contract.get(action_id)
                 if contract is not None:
-                    compatible_semantics.update(contract["semantic_ids"])
+                    compatible_semantics.update(
+                        contract["derived_semantic_ids"]
+                    )
             if positive_semantics.isdisjoint(compatible_semantics):
                 raise ValueError(
                     f"diagnostic card {card_id} positive semantic has no "

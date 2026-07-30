@@ -14,63 +14,51 @@ EVIDENCE_SCHEMA = "cuda-optimizer/diagnostic-evidence-v1"
 MEASUREMENT_SCHEMA = "cuda-optimizer/diagnostic-measurement-v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-_DIAGNOSTIC_SIGNAL_CONTRACT = {
+_PRODUCERS = {
+    "nsys_timeline": "nsys-timeline-adapter",
+    "pytorch_profile": "pytorch-profile-adapter",
+}
+_DIAGNOSTIC_SIGNAL_SEMANTICS = {
     "nsys_timeline": {
-        "producer_id": "nsys-timeline-adapter",
-        "producer_version": "1.0.0",
-        "signals": {
-            "launch_gap_short_context": {
-                "semantic_id": "runtime.launch_gap_short_context",
-                "scope": ["cpu-submit", "gpu-kernel"],
-            },
-            "gpu_idle_gap": {
-                "semantic_id": "runtime.gpu_idle_gap",
-                "scope": ["gpu-kernel"],
-            },
-            "cpu_launch_overhead": {
-                "semantic_id": "runtime.cpu_launch_overhead",
-                "scope": ["cpu-submit"],
-            },
-            "h2d_serialized": {
-                "semantic_id": "transfer.h2d_serialized",
-                "scope": ["transfer", "gpu-kernel"],
-            },
-            "gpu_waiting_for_input": {
-                "semantic_id": "runtime.gpu_waiting_for_input",
-                "scope": ["cpu-submit", "gpu-kernel"],
-            },
-            "rank_arrival_skew": {
-                "semantic_id": "communication.rank_arrival_skew",
-                "scope": ["communication", "gpu-kernel"],
-            },
-            "queue_or_request_path_dominant": {
-                "semantic_id": "serving.queue_or_request_path_dominant",
-                "scope": ["request", "gpu-kernel"],
-            },
+        "launch_gap_short_context": {
+            "semantic_id": "runtime.launch_gap_short_context",
+            "scope": ["cpu-submit", "gpu-kernel"],
+        },
+        "gpu_idle_gap": {
+            "semantic_id": "runtime.gpu_idle_gap",
+            "scope": ["gpu-kernel"],
+        },
+        "cpu_launch_overhead": {
+            "semantic_id": "runtime.cpu_launch_overhead",
+            "scope": ["cpu-submit"],
         },
     },
     "pytorch_profile": {
-        "producer_id": "pytorch-profile-adapter",
-        "producer_version": "1.0.0",
-        "signals": {
-            "gqa_head_ratio": {
-                "semantic_id": "framework.gqa_head_ratio",
-                "scope": ["framework", "gpu-kernel"],
-            },
-            "shape_fragmentation": {
-                "semantic_id": "framework.shape_fragmentation",
-                "scope": ["framework"],
-            },
-            "framework_dispatch_overhead": {
-                "semantic_id": "framework.dispatch_overhead",
-                "scope": ["framework", "cpu-submit"],
-            },
-            "gpu_waiting_for_input": {
-                "semantic_id": "runtime.gpu_waiting_for_input",
-                "scope": ["framework", "cpu-submit", "gpu-kernel"],
-            },
+        "gqa_head_ratio": {
+            "semantic_id": "framework.gqa_head_ratio",
+            "scope": ["framework", "gpu-kernel"],
+        },
+        "shape_fragmentation": {
+            "semantic_id": "framework.shape_fragmentation",
+            "scope": ["framework"],
+        },
+        "framework_dispatch_overhead": {
+            "semantic_id": "framework.dispatch_overhead",
+            "scope": ["framework", "cpu-submit"],
         },
     },
+}
+_SIGNALS = {
+    kind: set(signals)
+    for kind, signals in _DIAGNOSTIC_SIGNAL_SEMANTICS.items()
+}
+_DIAGNOSTIC_SIGNAL_CONTRACT = {
+    kind: {
+        "producer_id": _PRODUCERS[kind],
+        "producer_version": "1.0.0",
+        "signals": signals,
+    }
+    for kind, signals in _DIAGNOSTIC_SIGNAL_SEMANTICS.items()
 }
 _NCU_MAPPING_VERSION = "ncu-semantic-v1"
 _NCU_VERSION = re.compile(r"(?<!\d)(\d{4}\.\d+)(?:\.\d+)*(?!\d)")
@@ -118,46 +106,71 @@ def diagnostic_signal_contract() -> dict:
 
 
 def semantic_producer_contract() -> dict:
-    """Return action/evidence-kind to stable semantics from real producers."""
-    ncu_semantics = sorted(
+    """Declare direct raw semantics separately from adapter-derived vocabulary."""
+    ncu_raw_semantics = sorted(
         {
             rule["semantic_id"]
             for mapping in _NCU_METRIC_MAPPINGS.values()
             for rule in mapping.values()
         }
     )
-    nsys_semantics = sorted(
-        {
-            rule["semantic_id"]
-            for rule in _DIAGNOSTIC_SIGNAL_CONTRACT["nsys_timeline"][
-                "signals"
-            ].values()
-        }
-    )
-    pytorch_semantics = sorted(
-        {
-            rule["semantic_id"]
-            for rule in _DIAGNOSTIC_SIGNAL_CONTRACT["pytorch_profile"][
-                "signals"
-            ].values()
-        }
-    )
     return {
         "ncu-targeted-kernel": {
             "evidence_kind": "ncu_kernel",
-            "semantic_ids": ncu_semantics,
+            "raw_semantic_ids": ncu_raw_semantics,
+            "derived_semantic_ids": sorted(
+                {
+                    "kernel.global_memory_transaction_amplification",
+                    "kernel.redundant_dram_traffic",
+                    "kernel.memory_latency_hiding_insufficient",
+                    "kernel.register_or_shared_pressure",
+                    "kernel.parallelism_or_wave_tail",
+                    "kernel.compute_pipeline_or_dtype_mismatch",
+                    "kernel.synchronization_or_atomic_contention",
+                }
+            ),
         },
         "nsys-global-timeline": {
             "evidence_kind": "nsys_timeline",
-            "semantic_ids": nsys_semantics,
+            "raw_semantic_ids": [],
+            "derived_semantic_ids": sorted(
+                {
+                    "runtime.launch_gap_short_context",
+                    "runtime.gpu_idle_gap",
+                    "runtime.cpu_launch_overhead",
+                    "transfer.h2d_serialized",
+                    "runtime.gpu_waiting_for_input",
+                    "communication.rank_arrival_skew",
+                    "serving.queue_or_request_path_dominant",
+                }
+            ),
         },
         "nsys-os-runtime-slice": {
             "evidence_kind": "os_runtime",
-            "semantic_ids": nsys_semantics,
+            "raw_semantic_ids": [],
+            "derived_semantic_ids": sorted(
+                {
+                    "runtime.launch_gap_short_context",
+                    "runtime.gpu_idle_gap",
+                    "runtime.cpu_launch_overhead",
+                    "transfer.h2d_serialized",
+                    "runtime.gpu_waiting_for_input",
+                    "communication.rank_arrival_skew",
+                    "serving.queue_or_request_path_dominant",
+                }
+            ),
         },
         "pytorch-operator-trace": {
             "evidence_kind": "framework_trace",
-            "semantic_ids": pytorch_semantics,
+            "raw_semantic_ids": [],
+            "derived_semantic_ids": sorted(
+                {
+                    "framework.gqa_head_ratio",
+                    "framework.shape_fragmentation",
+                    "framework.dispatch_overhead",
+                    "runtime.gpu_waiting_for_input",
+                }
+            ),
         },
     }
 

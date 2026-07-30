@@ -131,11 +131,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.dram_bytes",
-          "statuses": ["observed"],
-          "scope_all": ["kernel"],
-          "unit": "byte",
-          "aggregation": "ncu_metric",
+          "semantic_id": "kernel.global_memory_transaction_amplification",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
           "comparison": null
         }],
         "counter": [{
@@ -441,11 +441,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.dram_throughput_pct",
-          "statuses": ["observed"],
-          "scope_all": ["kernel"],
-          "unit": "%",
-          "aggregation": "ncu_metric",
+          "semantic_id": "kernel.redundant_dram_traffic",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
           "comparison": null
         }],
         "counter": [{
@@ -503,11 +503,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.long_scoreboard_pct",
-          "statuses": ["observed"],
-          "scope_all": ["kernel"],
-          "unit": "%",
-          "aggregation": "ncu_metric",
+          "semantic_id": "kernel.memory_latency_hiding_insufficient",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
           "comparison": null
         }],
         "counter": [{
@@ -565,11 +565,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.occupancy_pct",
-          "statuses": ["observed"],
-          "scope_all": ["kernel"],
-          "unit": "%",
-          "aggregation": "ncu_metric",
+          "semantic_id": "kernel.register_or_shared_pressure",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
           "comparison": null
         }],
         "counter": [{
@@ -627,11 +627,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.sm_active_pct",
-          "statuses": ["observed"],
-          "scope_all": ["kernel"],
-          "unit": "%",
-          "aggregation": "ncu_metric",
+          "semantic_id": "kernel.parallelism_or_wave_tail",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
           "comparison": null
         }],
         "counter": [{
@@ -689,11 +689,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.tensor_pipe_pct",
-          "statuses": ["observed"],
-          "scope_all": ["kernel"],
-          "unit": "%",
-          "aggregation": "ncu_metric",
+          "semantic_id": "kernel.compute_pipeline_or_dtype_mismatch",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
           "comparison": null
         }],
         "counter": [{
@@ -751,11 +751,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.barrier_stall_pct",
-          "statuses": ["observed"],
-          "scope_all": ["kernel"],
-          "unit": "%",
-          "aggregation": "ncu_metric",
+          "semantic_id": "kernel.synchronization_or_atomic_contention",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
           "comparison": null
         }],
         "counter": [{

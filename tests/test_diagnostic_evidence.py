@@ -110,65 +110,94 @@ class DiagnosticEvidenceTests(unittest.TestCase):
             [("framework.dispatch_overhead", "present")],
         )
 
-    def test_real_nsys_and_pytorch_measurements_cover_workload_card_semantics(
+    def test_formal_diagnostic_contract_remains_the_frozen_six_signals(
         self,
     ) -> None:
-        cases = (
-            (
-                "nsys_timeline",
-                "nsys-timeline-adapter",
-                [
-                    "launch_gap_short_context",
-                    "h2d_serialized",
-                    "gpu_waiting_for_input",
-                    "rank_arrival_skew",
-                    "queue_or_request_path_dominant",
-                ],
-            ),
-            (
-                "pytorch_profile",
-                "pytorch-profile-adapter",
-                [
-                    "framework_dispatch_overhead",
-                    "gpu_waiting_for_input",
-                ],
-            ),
-        )
-        validated = []
-        for kind, producer_id, signals in cases:
-            raw = (json.dumps(_measurement(signals)) + "\n").encode()
-            evidence = self.module.derive_diagnostic_evidence(
-                raw,
-                kind=kind,
-                producer_id=producer_id,
-                producer_version="1.0.0",
-                implementation_sha256=IMPLEMENTATION_SHA,
-                adapter_request_sha256=REQUEST_SHA,
-                contract_sha256=CONTRACT_SHA,
-                environment_sha256=ENVIRONMENT_SHA,
-                recorded_at=100.0,
-            )
-            validated.append(
-                self.module.validate_diagnostic_evidence(
-                    evidence,
-                    expected_contract_sha256=CONTRACT_SHA,
-                    expected_environment_sha256=ENVIRONMENT_SHA,
-                )
-            )
+        expected = {
+            "nsys_timeline": {
+                "launch_gap_short_context",
+                "gpu_idle_gap",
+                "cpu_launch_overhead",
+            },
+            "pytorch_profile": {
+                "gqa_head_ratio",
+                "shape_fragmentation",
+                "framework_dispatch_overhead",
+            },
+        }
 
-        observations = _load_knowledge().normalize_observations(
-            diagnostic_evidence=validated
-        )
-
-        self.assertTrue(
+        self.assertEqual(self.module._PRODUCERS, {
+            "nsys_timeline": "nsys-timeline-adapter",
+            "pytorch_profile": "pytorch-profile-adapter",
+        })
+        self.assertEqual(self.module._SIGNALS, expected)
+        self.assertEqual(
             {
-                "runtime.launch_gap_short_context",
-                "framework.dispatch_overhead",
-                "transfer.h2d_serialized",
-                "runtime.gpu_waiting_for_input",
-                "communication.rank_arrival_skew",
-                "serving.queue_or_request_path_dominant",
-            }.issubset({item["semantic_id"] for item in observations})
+                kind: set(contract["signals"])
+                for kind, contract in self.module.diagnostic_signal_contract().items()
+            },
+            expected,
+        )
+        for signal in (
+            "h2d_serialized",
+            "gpu_waiting_for_input",
+            "rank_arrival_skew",
+            "queue_or_request_path_dominant",
+        ):
+            with self.subTest(signal=signal), self.assertRaisesRegex(
+                ValueError, "unsupported signals"
+            ):
+                self.module.derive_diagnostic_evidence(
+                    json.dumps(_measurement([signal])).encode(),
+                    kind="nsys_timeline",
+                    producer_id="nsys-timeline-adapter",
+                    producer_version="1.0.0",
+                    implementation_sha256=IMPLEMENTATION_SHA,
+                    adapter_request_sha256=REQUEST_SHA,
+                    contract_sha256=CONTRACT_SHA,
+                    environment_sha256=ENVIRONMENT_SHA,
+                    recorded_at=100.0,
+                )
+
+    def test_producer_contract_separates_raw_ncu_from_adapter_semantics(
+        self,
+    ) -> None:
+        contract = self.module.semantic_producer_contract()[
+            "ncu-targeted-kernel"
+        ]
+
+        self.assertEqual(
+            set(contract),
+            {"evidence_kind", "raw_semantic_ids", "derived_semantic_ids"},
+        )
+        self.assertEqual(
+            set(contract["raw_semantic_ids"]),
+            {
+                "kernel.dram_bytes",
+                "kernel.dram_throughput_pct",
+                "kernel.long_scoreboard_pct",
+                "kernel.occupancy_pct",
+                "kernel.sm_active_pct",
+                "kernel.tensor_pipe_pct",
+                "kernel.barrier_stall_pct",
+            },
+        )
+        self.assertEqual(
+            set(contract["derived_semantic_ids"]),
+            {
+                "kernel.global_memory_transaction_amplification",
+                "kernel.redundant_dram_traffic",
+                "kernel.memory_latency_hiding_insufficient",
+                "kernel.register_or_shared_pressure",
+                "kernel.parallelism_or_wave_tail",
+                "kernel.compute_pipeline_or_dtype_mismatch",
+                "kernel.synchronization_or_atomic_contention",
+            },
+        )
+        self.assertTrue(
+            set(contract["raw_semantic_ids"]).isdisjoint(
+                contract["derived_semantic_ids"]
+            )
         )
 
     def test_kind_signal_vocabulary_and_raw_metadata_are_closed(self) -> None:

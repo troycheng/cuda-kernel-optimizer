@@ -215,6 +215,64 @@ class ProfileNcuTests(unittest.TestCase):
             },
         )
 
+    def test_zero_raw_metrics_remain_stable_inputs_not_mechanism_positives(
+        self,
+    ) -> None:
+        profile_ncu = _load("profile_ncu")
+        cards = json.loads(
+            (
+                SCRIPTS.parent / "references" / "diagnostic_cards.json"
+            ).read_text(encoding="utf-8")
+        )["cards"]
+        kernel_mechanisms = {
+            "global_memory_transactions",
+            "redundant_dram_traffic",
+            "memory_latency_hiding",
+            "register_or_shared_pressure",
+            "parallelism_or_wave_tail",
+            "compute_pipeline_or_dtype",
+            "synchronization_or_atomic_contention",
+        }
+        card_positives = {
+            rule["semantic_id"]
+            for card in cards
+            if card["mechanism_key"] in kernel_mechanisms
+            for rule in card["observation_rules"]["positive"]
+        }
+        metrics = [
+            ("dram__bytes.sum", "byte"),
+            ("dram__throughput.avg.pct_of_peak_sustained_elapsed", "%"),
+            (
+                "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct",
+                "%",
+            ),
+            ("sm__warps_active.avg.pct_of_peak_sustained_active", "%"),
+            ("sm__cycles_active.avg.pct_of_peak_sustained_elapsed", "%"),
+            (
+                "sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active",
+                "%",
+            ),
+            (
+                "smsp__average_warp_latency_issue_stalled_barrier_per_warp_active.pct",
+                "%",
+            ),
+        ]
+        csv_text = (
+            '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
+            + "".join(
+                f'"target","{metric}","{unit}","0"\n'
+                for metric, unit in metrics
+            )
+        )
+
+        result = profile_ncu._semantic_ncu_observations(csv_text, "2026.2")
+        raw_semantics = {
+            item["semantic_id"] for item in result["semantic_observations"]
+        }
+
+        self.assertEqual(len(raw_semantics), 7)
+        self.assertTrue(card_positives.isdisjoint(raw_semantics))
+
     def test_profile_main_uses_actual_ncu_version_not_state_snapshot(self) -> None:
         profile_ncu = _load("profile_ncu")
         csv_text = (

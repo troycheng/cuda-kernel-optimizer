@@ -1002,13 +1002,13 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
     ) -> None:
         produced = {
             "ncu-targeted-kernel": {
-                "kernel.dram_bytes",
-                "kernel.dram_throughput_pct",
-                "kernel.long_scoreboard_pct",
-                "kernel.occupancy_pct",
-                "kernel.sm_active_pct",
-                "kernel.tensor_pipe_pct",
-                "kernel.barrier_stall_pct",
+                "kernel.global_memory_transaction_amplification",
+                "kernel.redundant_dram_traffic",
+                "kernel.memory_latency_hiding_insufficient",
+                "kernel.register_or_shared_pressure",
+                "kernel.parallelism_or_wave_tail",
+                "kernel.compute_pipeline_or_dtype_mismatch",
+                "kernel.synchronization_or_atomic_contention",
             },
             "nsys-global-timeline": {
                 "runtime.launch_gap_short_context",
@@ -1049,6 +1049,55 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
             }
             with self.subTest(card_id=card["id"]):
                 self.assertTrue(positive & producible)
+
+    def test_w2_through_w5_semantics_arrive_via_active_evidence_results(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "nsys-os-runtime-slice",
+                "os_runtime",
+                "transfer.h2d_serialized",
+            ),
+            (
+                "pytorch-operator-trace",
+                "framework_trace",
+                "runtime.gpu_waiting_for_input",
+            ),
+            (
+                "nsys-os-runtime-slice",
+                "os_runtime",
+                "communication.rank_arrival_skew",
+            ),
+            (
+                "nsys-os-runtime-slice",
+                "os_runtime",
+                "serving.queue_or_request_path_dominant",
+            ),
+        )
+
+        for action_id, evidence_kind, semantic_id in cases:
+            envelope = _active_result(
+                [
+                    _semantic_observation(
+                        semantic_id=semantic_id,
+                        status="present",
+                        value=True,
+                        unit="state",
+                        aggregation="presence",
+                    )
+                ]
+            )
+            envelope["action_id"] = action_id
+            envelope["evidence_kind"] = evidence_kind
+            with self.subTest(semantic_id=semantic_id):
+                observations = self.module.normalize_observations(
+                    active_evidence_results=[envelope]
+                )
+                self.assertEqual(
+                    [item["semantic_id"] for item in observations],
+                    [semantic_id],
+                )
 
     def test_package_rejects_positive_semantic_without_a_trusted_producer(
         self,
