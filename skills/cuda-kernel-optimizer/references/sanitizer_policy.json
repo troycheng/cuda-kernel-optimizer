@@ -17,7 +17,7 @@
     "latency.pingpong_warpgroup_schedule": ["memcheck", "racecheck", "synccheck"],
     "latency.producer_regdealloc_setmaxnreg": ["memcheck", "racecheck", "synccheck"],
     "latency.intra_wg_gemm_softmax_pipeline": ["memcheck", "racecheck", "synccheck"],
-    "latency.cooperative_cluster": ["memcheck", "racecheck", "synccheck"],
+    "latency.cooperative_groups_sync": ["memcheck", "racecheck", "synccheck"],
     "latency.cluster_launch_control_scheduler": ["memcheck", "racecheck", "synccheck"],
     "latency.stream_event": ["memcheck", "racecheck", "synccheck"],
     "latency.warp_aggregated_atomics": ["memcheck", "racecheck"],

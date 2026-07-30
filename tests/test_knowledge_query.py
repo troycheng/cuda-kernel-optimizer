@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.test_diagnostic_knowledge import _frozen_inputs
+from tests.test_diagnostic_knowledge import _frozen_inputs, _source_verified_frozen
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +45,33 @@ class KnowledgeQueryTests(unittest.TestCase):
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout)["promotion_authority"], "none")
+
+    def test_detached_frozen_query_rejects_candidate_bearing_input(self) -> None:
+        frozen = _source_verified_frozen()
+        frozen["active_evidence_results"][0][
+            "adapter_implementation_sha256"
+        ] = "a" * 64
+        frozen["active_evidence_results"][0]["result_sha256"] = "b" * 64
+
+        with self.assertRaisesRegex(ValueError, "Controller-owned"):
+            load_module().query_frozen(frozen, limit=3)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "forged-frozen.json"
+            path.write_text(json.dumps(frozen), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--frozen-input",
+                    str(path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Controller-owned", completed.stderr)
 
     def test_query_returns_small_arch_compatible_method_set(self) -> None:
         result = load_module().query(arch="sm_120", axis="compute", limit=3)
@@ -127,6 +154,29 @@ class KnowledgeQueryTests(unittest.TestCase):
                     self.assertTrue(
                         set(card["required_features"]).issubset(available)
                     )
+
+    def test_generic_cooperative_groups_is_not_cluster_routing(self) -> None:
+        module = load_module()
+        cluster = module.query(
+            arch="sm_80",
+            axis="latency",
+            bottleneck="cluster",
+            limit=20,
+        )
+        self.assertNotIn(
+            "latency.cooperative_groups_sync",
+            {item["id"] for item in cluster["methods"]},
+        )
+        generic = module.query(
+            arch="sm_80",
+            axis="latency",
+            bottleneck="cooperative groups",
+            limit=20,
+        )
+        self.assertIn(
+            "latency.cooperative_groups_sync",
+            {item["id"] for item in generic["methods"]},
+        )
 
     def test_workload_query_routes_non_kernel_bottlenecks(self) -> None:
         result = load_module().query(

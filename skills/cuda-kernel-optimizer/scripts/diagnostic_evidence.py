@@ -136,6 +136,11 @@ def semantic_producer_contract() -> dict:
                     "kernel.warp_stall_mapping_unmodeled",
                 }
             ),
+            "source_version_coverage": {
+                "ncu": {
+                    "2026.2": ["nvidia-nsight-compute"],
+                },
+            },
         },
         "nsys-global-timeline": {
             "evidence_kind": "nsys_timeline",
@@ -155,6 +160,11 @@ def semantic_producer_contract() -> dict:
                     "serving.queue_or_request_path_dominant",
                 }
             ),
+            "source_version_coverage": {
+                "nsys": {
+                    "2026.3": ["nvidia-nsight-systems"],
+                },
+            },
         },
         "nsys-os-runtime-slice": {
             "evidence_kind": "os_runtime",
@@ -174,6 +184,11 @@ def semantic_producer_contract() -> dict:
                     "serving.queue_or_request_path_dominant",
                 }
             ),
+            "source_version_coverage": {
+                "nsys": {
+                    "2026.3": ["nvidia-nsight-systems"],
+                },
+            },
         },
         "pytorch-operator-trace": {
             "evidence_kind": "framework_trace",
@@ -188,6 +203,14 @@ def semantic_producer_contract() -> dict:
                     "runtime.timeline_boundary_ambiguous",
                 }
             ),
+            "source_version_coverage": {
+                "pytorch": {
+                    "2.11.0": [
+                        "pytorch-compile-profiling",
+                        "pytorch-profiler",
+                    ],
+                },
+            },
         },
     }
 

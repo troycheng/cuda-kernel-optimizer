@@ -324,6 +324,7 @@ def _prepare_valid_contract(reference_dir: Path) -> None:
                 "rationale": "Test the mechanism against a bounded timeline.",
             },
             content_status="source_verified",
+            source_ids=["nvidia-nsight-systems"],
             case_ids=[],
         )
     _write_json(card_path, cards)
@@ -1036,6 +1037,17 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
                 ]["semantic_observations"][0]["tool"].update(version="2.10.0"),
             ),
             (
+                "source_version_unverified",
+                lambda frozen: (
+                    frozen["knowledge_identity"]["framework_versions"][
+                        "pytorch"
+                    ].update(value="9999.0"),
+                    frozen["active_evidence_results"][0]["observations"][
+                        "semantic_observations"
+                    ][0]["tool"].update(version="9999.0"),
+                ),
+            ),
+            (
                 "identity_unverified",
                 lambda frozen: frozen["knowledge_identity"][
                     "framework_versions"
@@ -1591,6 +1603,21 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
         _write_json(card_path, package)
 
         with self.assertRaisesRegex(ValueError, "positive semantic|action"):
+            self.module.validate_knowledge_package(reference_dir)
+
+    def test_package_rejects_rule_without_source_version_coverage(self) -> None:
+        reference_dir = self._copied_references()
+        card_path = reference_dir / "diagnostic_cards.json"
+        package = json.loads(card_path.read_text(encoding="utf-8"))
+        card = next(
+            item
+            for item in package["cards"]
+            if item["id"] == "diagnostic.framework.launch-gaps"
+        )
+        card["source_ids"] = ["nvidia-cuda-programming-guide"]
+        _write_json(card_path, package)
+
+        with self.assertRaisesRegex(ValueError, "source version coverage"):
             self.module.validate_knowledge_package(reference_dir)
 
     def test_general_cards_have_no_transferable_tuning_claims(self) -> None:

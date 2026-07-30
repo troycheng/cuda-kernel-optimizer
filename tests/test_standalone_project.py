@@ -140,6 +140,11 @@ class StandaloneProjectTests(unittest.TestCase):
         self.assertIn(
             f"{skipped:,} physical RTX 5090 opt-in tests were skipped", validation
         )
+        self.assertIn("post-adapter semantic routing contracts", validation)
+        self.assertNotIn(
+            "checks all 12 mechanisms against six pinned public code paths",
+            validation,
+        )
 
 
 if __name__ == "__main__":

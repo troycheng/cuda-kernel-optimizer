@@ -341,6 +341,17 @@ def _active_observation_trust(
         return False, "identity_unverified"
     if tool.get("version") != fact.get("value"):
         return False, "tool_version_mismatch"
+    source_coverage = contract.get("source_version_coverage")
+    tool_coverage = (
+        source_coverage.get(tool["name"])
+        if isinstance(source_coverage, Mapping)
+        else None
+    )
+    if (
+        not isinstance(tool_coverage, Mapping)
+        or tool.get("version") not in tool_coverage
+    ):
+        return False, "source_version_unverified"
     return True, "validated"
 
 
@@ -430,8 +441,9 @@ def _matching_untrusted_reason(
         "quality_untrusted": 0,
         "tool_unmodeled": 1,
         "tool_version_mismatch": 2,
-        "identity_unverified": 3,
-        "producer_untrusted": 4,
+        "source_version_unverified": 3,
+        "identity_unverified": 4,
+        "producer_untrusted": 5,
     }
     reasons = {
         _observation_trust_reason(observation, trust_index)
@@ -1217,6 +1229,7 @@ def build_knowledge_context(
         "producer_untrusted": 0,
         "tool_unmodeled": 0,
         "tool_version_mismatch": 0,
+        "source_version_unverified": 0,
         "canonical_duplicate": 0,
         "pareto_dominated": 0,
         "byte_trimmed": 0,
@@ -1689,10 +1702,16 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
     )
     producer_contract = evidence_module.semantic_producer_contract()
     declared_derived_semantics: set[str] = set()
+    producer_source_coverage: dict[str, set[str]] = {}
     for action_id, raw in producer_contract.items():
         contract = _closed(
             raw,
-            {"evidence_kind", "raw_semantic_ids", "derived_semantic_ids"},
+            {
+                "evidence_kind",
+                "raw_semantic_ids",
+                "derived_semantic_ids",
+                "source_version_coverage",
+            },
             f"semantic producer {action_id}",
         )
         if action_id not in action_evidence_kinds:
@@ -1722,6 +1741,48 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
                 f"semantic producer {action_id} semantic_id",
             )
         declared_derived_semantics.update(derived_semantic_ids)
+        source_version_coverage = contract["source_version_coverage"]
+        if type(source_version_coverage) is not dict or not source_version_coverage:
+            raise ValueError(
+                f"semantic producer {action_id} source version coverage "
+                "must be a non-empty object"
+            )
+        expected_tools = _ACTIVE_EVIDENCE_TOOLS.get(contract["evidence_kind"])
+        if expected_tools is None or not set(source_version_coverage).issubset(
+            expected_tools[0]
+        ):
+            raise ValueError(
+                f"semantic producer {action_id} source version coverage "
+                "uses a tool outside its evidence kind"
+            )
+        covered_sources: set[str] = set()
+        for tool_name, versions in source_version_coverage.items():
+            _observation_identifier(
+                tool_name,
+                f"semantic producer {action_id} source version coverage tool",
+            )
+            if type(versions) is not dict or not versions:
+                raise ValueError(
+                    f"semantic producer {action_id} source version coverage "
+                    f"for {tool_name} must be a non-empty object"
+                )
+            for tool_version, version_source_ids in versions.items():
+                _text(
+                    tool_version,
+                    f"semantic producer {action_id} source version coverage version",
+                )
+                covered = _canonical_strings(
+                    version_source_ids,
+                    f"semantic producer {action_id} source version coverage "
+                    f"{tool_name} {tool_version}",
+                )
+                if not set(covered).issubset(source_ids):
+                    raise ValueError(
+                        f"semantic producer {action_id} source version coverage "
+                        "references unknown source"
+                    )
+                covered_sources.update(covered)
+        producer_source_coverage[action_id] = covered_sources
 
     _closed(cases, {"schema_version", "cases"}, "case memory")
     if cases["schema_version"] != "cuda-optimizer/case-memory-v1":
@@ -1931,12 +1992,17 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
             compatible_actions = set(preferred_actions)
             compatible_actions.add(falsifier_id)
             compatible_semantics = set()
+            compatible_sources_by_semantic: dict[str, set[str]] = {}
             for action_id in compatible_actions:
                 contract = producer_contract.get(action_id)
                 if contract is not None:
                     compatible_semantics.update(
                         contract["derived_semantic_ids"]
                     )
+                    for semantic_id in contract["derived_semantic_ids"]:
+                        compatible_sources_by_semantic.setdefault(
+                            semantic_id, set()
+                        ).update(producer_source_coverage[action_id])
             for group, semantic_ids in rule_semantics.items():
                 for semantic_id in semantic_ids:
                     label = (
@@ -1959,6 +2025,22 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
         )
         if not set(referenced_sources).issubset(source_ids):
             raise ValueError(f"diagnostic card {card_id} references unknown source")
+        if item["content_status"] == "source_verified":
+            for group, semantic_ids in rule_semantics.items():
+                for semantic_id in semantic_ids:
+                    if not (
+                        compatible_sources_by_semantic.get(semantic_id, set())
+                        & set(referenced_sources)
+                    ):
+                        label = (
+                            "invalidator"
+                            if group == "invalidators"
+                            else group
+                        )
+                        raise ValueError(
+                            f"diagnostic card {card_id} {label} semantic has "
+                            "no source version coverage"
+                        )
         if item["content_status"] == "source_verified" and positive_semantics:
             runtime_candidates.append(card_id)
         referenced_cases = _strings(

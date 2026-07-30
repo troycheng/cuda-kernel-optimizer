@@ -544,12 +544,11 @@
 - **CUTLASS**: `-DCUTLASS_ENABLE_GDC_FOR_SM90=1`；Blackwell 默认启用
 - **验证**: Nsight Systems 连续 kernel 出现执行重叠
 
-### P14: `latency.cooperative_cluster` — Cooperative Groups / Cluster 同步
+### P14: `latency.cooperative_groups_sync` — Cooperative Groups 细粒度同步
 - **典型收益**: varies
-- **触发条件**: 需跨 warp/block 灵活同步粒度；全 block sync 粒度过粗
+- **触发条件**: 单个 thread block 内需要比整块同步更细的线程组同步
 - **跳过条件**: warp shuffle 已足够
-- **CUDA**: `tiled_partition<8>`；`grid_group.sync()`
-- **CUTLASS (Hopper)**: Thread Block Cluster（1-16 CTA）+ DSMEM + `cluster_arrive/wait`
+- **CUDA**: `cooperative_groups::tiled_partition<8>`；按线程组调用 `sync()`
 - **验证**: `Stall Barrier` 下降
 
 ### P15: `latency.static_launch_grid_graph` — 静态最大 grid + CUDA Graph + 内部早退

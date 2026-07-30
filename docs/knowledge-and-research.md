@@ -50,9 +50,12 @@ not infer units from text, convert incompatible metrics, or treat a profiler
 permission error as evidence against a mechanism.
 
 The Controller-owned file is the authoritative runtime value.
-`knowledge_query.py --frozen-input` is an inspection path for the same closed
-input. The architecture-only CLI mode remains a reference catalog and is not a
-substitute for current workload evidence.
+`knowledge_query.py --frozen-input` is limited to candidate-free structural
+inspection because a detached file cannot prove adapter, artifact, or ledger
+identity. If the same input would produce a candidate, the command fails closed
+and directs the reader to the Controller-owned `knowledge_context.json`. The
+architecture-only CLI mode remains a reference catalog and is not a substitute
+for current workload evidence.
 
 ## Bundled coverage
 
@@ -63,18 +66,21 @@ The bundled catalog has 12 general mechanism families:
 | Kernel | global-memory transactions, redundant DRAM traffic, memory-latency hiding, register or shared-memory pressure, parallelism or wave tail, compute pipeline or data type, synchronization or atomic contention |
 | Workload | framework launch fragmentation, serialized host/device transfer, CPU or data-pipeline starvation, collective wait or rank skew, serving scheduling or request path |
 
-The cards route observations across CUDA kernels, CUTLASS/CuTe, Triton,
-PyTorch, serving, and NCCL. Architecture facts cover `sm_80`, `sm_86`,
-`sm_89`, `sm_90`, `sm_100`, `sm_103`, `sm_110`, `sm_120`, and `sm_121`.
-Architecture-specific methods require both an exact-SM feature match and the
-current local identity; a numerically newer SM does not inherit another SM's
-features.
+The cards are post-adapter semantic routing contracts across CUDA kernels,
+CUTLASS/CuTe, Triton, PyTorch, serving, and NCCL. Project evidence adapters
+produce the versioned semantics and remain responsible for tool-specific export
+parsing. The bundled package normalizes a small stable subset of NCU metrics; it
+does not parse raw Nsys or PyTorch reports, serving traces, or NCCL reports.
+Architecture facts cover `sm_80`, `sm_86`, `sm_89`, `sm_90`, `sm_100`,
+`sm_103`, `sm_110`, `sm_120`, and `sm_121`. Architecture-specific methods
+require both an exact-SM feature match and the current local identity; a
+numerically newer SM does not inherit another SM's features.
 
-This is source-backed diagnostic coverage, not physical performance validation
-on every architecture. The offline coverage lane disables case memory and
-checks all 12 mechanisms against six pinned public code paths. Separate
-counterfactual tests check feature leakage between the nine SM identities.
-Physical GPU results remain limited to the environments listed in
+This is source-backed post-adapter routing coverage. It is not physical performance validation on every architecture. The offline coverage lane disables case
+memory and supplies versioned semantic fixtures for all 12 mechanisms. Six
+pinned public code paths act as provenance anchors; the lane does not execute
+or parse them. Separate counterfactual tests check feature leakage between the
+nine SM identities. Physical GPU results remain limited to the environments listed in
 [Validation records](validation.md). The retained RTX 5090 cases test
 regression behavior and do not predict gains elsewhere.
 

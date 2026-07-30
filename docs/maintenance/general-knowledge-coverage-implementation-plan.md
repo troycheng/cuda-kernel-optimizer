@@ -527,7 +527,8 @@ fixture 根结构固定为：
 
 12 个 fixture 一一对应 K1–K7、W1–W5；`stack_family` 合计覆盖
 `cuda_kernel`、`cutlass_cute`、`triton`、`pytorch`、`serving`、`nccl`，且至少来自六个
-不同的公开代码路径。fixture 只保存语义输入和期望机制，不保存或复制 5090 winner。
+不同的公开代码路径。fixture 只保存 adapter 输出后的语义输入和期望机制，不执行或解析公开
+代码路径，也不保存或复制 5090 winner。
 
 六个来源路径固定为：
 

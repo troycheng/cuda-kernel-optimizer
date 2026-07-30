@@ -43,6 +43,18 @@ def _missing_required_features(registry: dict, arch: str | None, method: dict) -
     return sorted(required - available)
 
 
+def _below_min_sm(arch: str | None, method: dict) -> bool:
+    min_sm = method.get("min_sm", 0)
+    if type(min_sm) is not int or isinstance(min_sm, bool) or min_sm < 0:
+        return True
+    if min_sm == 0:
+        return False
+    normalized = _normalize_sm_arch(arch)
+    if normalized is None:
+        return True
+    return int(normalized.removeprefix("sm_")) < min_sm
+
+
 def _higher_priority_ids(registry: dict, axis: str, priority: int) -> list[tuple[str, int]]:
     out = []
     for mid, meta in registry["methods"].items():
@@ -170,8 +182,14 @@ def validate(
         if reg["priority"] != priority:
             errors.append(f"{prefix}: P{priority} != registry P{reg['priority']} for '{mid}'")
 
-        # Architecture compatibility is exact and feature-based. Numeric SM
-        # ordering is not a valid proxy across Blackwell product families.
+        if _below_min_sm(detected_arch, reg):
+            errors.append(
+                f"{prefix}: '{mid}' requires sm_{reg.get('min_sm')} or newer "
+                f"but detected {detected_arch or 'unknown architecture'}"
+            )
+
+        # Feature compatibility remains exact. Numeric SM ordering is not a
+        # proxy for capabilities across Blackwell product families.
         missing_features = _missing_required_features(registry, detected_arch, reg)
         if missing_features:
             errors.append(

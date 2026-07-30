@@ -289,10 +289,10 @@
       "require_any": true,
       "note": "Programmatic Dependent Launch: griddepcontrol.launch_dependents / griddepcontrol.wait"
     },
-    "latency.cooperative_cluster": {
-      "sass_patterns": ["BAR\\.ARRIVE", "MBARRIER"],
+    "latency.cooperative_groups_sync": {
+      "sass_patterns": ["WARPSYNC", "BAR\\.SYNC"],
       "require_any": true,
-      "note": "Cooperative group/cluster barrier instructions"
+      "note": "Cooperative Groups block or tiled-partition synchronization"
     },
     "latency.static_launch_grid_graph": {
       "sass_patterns": [],

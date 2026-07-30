@@ -168,7 +168,12 @@ class DiagnosticEvidenceTests(unittest.TestCase):
 
         self.assertEqual(
             set(contract),
-            {"evidence_kind", "raw_semantic_ids", "derived_semantic_ids"},
+            {
+                "evidence_kind",
+                "raw_semantic_ids",
+                "derived_semantic_ids",
+                "source_version_coverage",
+            },
         )
         self.assertEqual(
             set(contract["raw_semantic_ids"]),

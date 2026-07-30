@@ -110,14 +110,16 @@ evidence gaps. A benefit ceiling is the amount of time a direction could affect,
 not a promised speedup.
 
 ChatGPT proposes no more than three competing hypotheses from the execution
-map, source code, and relevant knowledge. V1.3 has 12 mechanism families for
-common performance problems across CUDA kernels, CUTLASS/CuTe, Triton, PyTorch,
-serving, and NCCL. Architecture capabilities from Ampere through Blackwell are
-filtered by exact SM and current local identity. The knowledge layer accepts
-only sealed semantic observations and never treats historical speedup numbers
-as current benefit. A missing knowledge match does not block a model-proposed
-direction from the profile, execution path, and source. The Controller checks evidence binding, mechanism duplication, and claim layer before selecting the
-cheapest distinguishing check; new evidence updates the next round.
+map, source code, and relevant knowledge. V1.3 provides 12 mechanism families
+as post-adapter semantic routing contracts across CUDA kernels, CUTLASS/CuTe,
+Triton, PyTorch, serving, and NCCL. The versioned semantics emitted by project
+evidence adapters are filtered by source version, then by exact SM and current local identity.
+This does not mean that raw profiler report parsers are bundled: raw Nsys,
+PyTorch, serving, or NCCL outputs still require a project adapter validated in the target environment.
+The knowledge layer never treats historical speedup numbers as current benefit. A missing knowledge match does not block a model-proposed direction from the
+profile, execution path, and source. The Controller checks evidence binding,
+mechanism duplication, and claim layer before selecting the cheapest
+distinguishing check; new evidence updates the next round.
 
 External search and third-party AI may challenge a direction or review a final
 result. Only the necessary technical summary is shared. External opinions
@@ -192,16 +194,14 @@ required for an end-to-end result. A serving KPI requires a controlled service
 validation environment. An existing NCU report supports only read-only analysis
 within the report's coverage.
 
-[Validation records](docs/validation.md) list automated checks, the physical RTX
-5090 path, tool permissions, and actual GPU test coverage. [Case
-studies](docs/case-studies.md) record historical workload results separately.
+[Validation records](docs/validation.md) list automated checks, the physical RTX 5090 path, tool permissions, and actual GPU test coverage. [Case studies](docs/case-studies.md) record historical workload results separately.
 Neither predicts the speedup of a new project.
 
 ## Release notes
 
 ### V1.3.0
 
-- The local knowledge engine provides 12 mechanism families across six software layers; source-backed coverage from Ampere through Blackwell passed offline routing and architecture-counterfactual tests.
+- The local knowledge engine provides 12 post-adapter semantic routing contracts across six software stacks; source-version and Ampere-through-Blackwell constraints passed offline routing and architecture-counterfactual tests.
 - Architecture-specific capabilities are filtered by exact SM and local identity; knowledge candidates still have no execution or promotion authority.
 - When a raw profile lacks mechanism-level observations, the Controller allows one low-cost read-only check. A neutral result is not support, and an empty knowledge match does not block a model direction.
 - Historical cases support or reject only identity-bound mechanisms; historical gains do not transfer to a new workload.

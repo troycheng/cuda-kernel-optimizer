@@ -194,7 +194,7 @@
 | `latency.producer_regdealloc_setmaxnreg` | P11 | WS + consumer spill; sm_90+ |
 | `latency.intra_wg_gemm_softmax_pipeline` | P12 | Softmax→GEMM2 dep exposed; sm_90+ |
 | `latency.pdl_overlap` | P13 | Inter-kernel gaps; sm_90+ |
-| `latency.cooperative_cluster` | P14 | Fine-grain sync needs |
+| `latency.cooperative_groups_sync` | P14 | Fine-grain Cooperative Groups sync needs |
 | `latency.static_launch_grid_graph` | P15 | Short kernel + variable shape |
 | `latency.cuda_graphs` | P16 | Launch overhead > 10% + fixed shape |
 | `latency.cluster_launch_control_scheduler` | P17 | sm_100+ persistent + atomic contention |

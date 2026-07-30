@@ -245,8 +245,8 @@ class PublicDocsTests(unittest.TestCase):
             "missing knowledge match",
             "does not block",
             "12 general mechanism families",
-            "six pinned public code paths",
-            "source-backed diagnostic coverage",
+            "post-adapter semantic routing contracts",
+            "does not parse raw nsys or pytorch reports",
             "not physical performance validation",
         ):
             self.assertIn(marker, text)

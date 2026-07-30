@@ -68,6 +68,13 @@ class CompatibilityTests(unittest.TestCase):
         )
         self.assertIn("wgmma", missing)
 
+    def test_validator_enforces_min_sm_independently_of_features(self) -> None:
+        validator = _load_validator()
+        method = {"min_sm": 90, "required_features": []}
+        self.assertTrue(validator._below_min_sm("sm_80", method))
+        self.assertFalse(validator._below_min_sm("sm_90", method))
+        self.assertTrue(validator._below_min_sm(None, method))
+
     def test_version_targets_and_capability_rules_are_documented(self) -> None:
         text = COMPATIBILITY.read_text(encoding="utf-8")
         for expected in (

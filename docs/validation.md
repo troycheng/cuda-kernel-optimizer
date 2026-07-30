@@ -5,7 +5,7 @@ predict the speedup of a new workload.
 
 ## Automated checks
 
-Current branch validation on 2026-07-30 covered 1,417 tests: 1,406 passed and
+Current branch validation on 2026-07-30 covered 1,421 tests: 1,410 passed and
 11 physical RTX 5090 opt-in tests were skipped. Ten require a GPU; the remaining
 read-only replay test requires the 5090 archive to be mounted locally. The suite covers input validation, state recovery,
 evidence binding, shared-host guards, timeouts, restoration, capability retrieval,
@@ -18,13 +18,14 @@ tamper detection, interruption handling, concurrent start/resume, readiness-capa
 replay, and project-copy direction experiments. These checks do not
 validate the reader's CUDA environment.
 
-The general-knowledge lane disables case memory and exercises 12 source-backed
-mechanism families across CUDA kernels, CUTLASS/CuTe, Triton, PyTorch, serving,
-and NCCL. Its fixtures use six pinned paths from official repositories.
-Architecture counterfactuals cover exact identities from `sm_80` through
-`sm_121` without allowing adjacent-SM feature leakage. These are offline
-routing, provenance, and rejection tests; they are not measurements of
-performance on Ampere, Ada, Hopper, or Blackwell hardware.
+The general-knowledge lane disables case memory and exercises 12 post-adapter semantic routing contracts across CUDA kernels, CUTLASS/CuTe, Triton, PyTorch,
+serving, and NCCL. Fixtures supply versioned semantic observations; six pinned
+official repository paths are provenance anchors, not inputs that the suite
+executes or parses. Architecture counterfactuals cover exact identities from
+`sm_80` through `sm_121` without adjacent-SM feature leakage. These offline
+tests cover rule matching, source and tool version gates, case-off behavior, and
+exact-SM rejection; they are not measurements on Ampere, Ada, Hopper, or
+Blackwell hardware.
 
 ## Physical GPU lane
 

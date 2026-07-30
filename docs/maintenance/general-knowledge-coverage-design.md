@@ -159,19 +159,22 @@ Controller 仍然只相信本地封存证据。知识层不能直接修改代码
 
 ## 8. 稳定语义与版本差异
 
-机制卡不直接依赖某个 profiler 版本的原始 metric 名称。现有解析器负责将原始数据转换为稳定语义，并保留原始值、工具版本和来源摘要。
+机制卡不直接依赖某个 profiler 版本的原始 metric 名称。V1.3 验证的是项目 evidence adapter
+输出稳定语义之后的路由契约；adapter 必须保留原始值、工具版本和来源摘要。安装包只内置一小组
+稳定 NCU metric 的归一化，其他来源由目标项目的 adapter 解析，不能把测试 fixture 当作原始报告解析能力。
 
-| 来源 | 首批归一化内容 |
+| 来源 | V1.3 接入边界 |
 |---|---|
-| Nsight Compute | 计算与内存吞吐、访存交易、缓存、occupancy 限制、spill、warp stall、barrier、atomic、wave tail |
-| Nsight Systems | launch gap、GPU idle、copy 串行、同步等待、rank 到达偏斜、请求路径时间 |
-| PyTorch Profiler / compile 诊断 | graph break、recompile、compiled region 碎片、dispatch、CPU 数据等待 |
-| PTX / SASS / 编译器输出 | 访问宽度、spill、Tensor Core、async copy、TMA、同步和中间结果物化 |
-| workload KPI | 正确性、吞吐、延迟、TTFT、ITL、goodput、queue、batch 和资源稳定性 |
+| Nsight Compute | 安装包归一化稳定 metric 子集；其余观测由项目 adapter 产生 |
+| Nsight Systems | 项目 adapter 产生 launch、idle、copy、同步和 rank 等版本化语义 |
+| PyTorch Profiler / compile 诊断 | 项目 adapter 产生 graph、dispatch 和数据等待等版本化语义 |
+| PTX / SASS / 编译器输出 | 现有编译证据链或项目 adapter 产生版本化语义 |
+| workload KPI | 原始 workload 与服务测量链提供，不由知识卡推导 |
 
 约束：
 
 - 原始 metric 名称必须按安装版本查询，不能假定所有版本一致；
+- 测试中的六个公开代码路径只作为来源锚点，fixture 直接提供后适配语义，不执行或解析这些路径；
 - 通用阈值只用于判断是否值得补证据，不能直接产生实现建议；
 - raw profile 无法支撑机制语义时，保留 `unmodeled`，不猜测具体机制；
 - NCU 不可用时降级到时间线、生成代码或源码证据，不把权限错误解释为机制不存在。

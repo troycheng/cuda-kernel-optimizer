@@ -165,10 +165,16 @@ def query(
 def query_frozen(
     frozen_inputs: Mapping[str, object], *, limit: int = 3
 ) -> Dict[str, Any]:
-    return _load_diagnostic_knowledge().build_knowledge_context(
+    result = _load_diagnostic_knowledge().build_knowledge_context(
         frozen_inputs,
         limit=limit,
     )
+    if result["candidates"]:
+        raise ValueError(
+            "Detached frozen-input inspection cannot verify execution provenance; "
+            "inspect the Controller-owned knowledge_context.json instead"
+        )
+    return result
 
 
 def main() -> int:

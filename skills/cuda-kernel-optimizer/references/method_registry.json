@@ -458,9 +458,9 @@
       "required_features": ["pdl"],
       "reference_impl": "CUTLASS -DCUTLASS_ENABLE_GDC_FOR_SM90"
     },
-    "latency.cooperative_cluster": {
-      "axis": "latency", "priority": 14, "min_sm": 0,
-      "name": "Cooperative Groups / Cluster 同步",
+    "latency.cooperative_groups_sync": {
+      "axis": "latency", "priority": 14, "min_sm": 70,
+      "name": "Cooperative Groups 细粒度同步",
       "trigger_metric": null, "trigger_good": null, "trigger_bad": null, "trigger_direction": null,
       "required_features": [],
       "reference_impl": "cooperative_groups::tiled_partition<8>"
