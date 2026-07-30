@@ -110,6 +110,67 @@ class DiagnosticEvidenceTests(unittest.TestCase):
             [("framework.dispatch_overhead", "present")],
         )
 
+    def test_real_nsys_and_pytorch_measurements_cover_workload_card_semantics(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "nsys_timeline",
+                "nsys-timeline-adapter",
+                [
+                    "launch_gap_short_context",
+                    "h2d_serialized",
+                    "gpu_waiting_for_input",
+                    "rank_arrival_skew",
+                    "queue_or_request_path_dominant",
+                ],
+            ),
+            (
+                "pytorch_profile",
+                "pytorch-profile-adapter",
+                [
+                    "framework_dispatch_overhead",
+                    "gpu_waiting_for_input",
+                ],
+            ),
+        )
+        validated = []
+        for kind, producer_id, signals in cases:
+            raw = (json.dumps(_measurement(signals)) + "\n").encode()
+            evidence = self.module.derive_diagnostic_evidence(
+                raw,
+                kind=kind,
+                producer_id=producer_id,
+                producer_version="1.0.0",
+                implementation_sha256=IMPLEMENTATION_SHA,
+                adapter_request_sha256=REQUEST_SHA,
+                contract_sha256=CONTRACT_SHA,
+                environment_sha256=ENVIRONMENT_SHA,
+                recorded_at=100.0,
+            )
+            validated.append(
+                self.module.validate_diagnostic_evidence(
+                    evidence,
+                    expected_contract_sha256=CONTRACT_SHA,
+                    expected_environment_sha256=ENVIRONMENT_SHA,
+                )
+            )
+
+        observations = _load_knowledge().normalize_observations(
+            diagnostic_evidence=validated
+        )
+
+        self.assertTrue(
+            {
+                "runtime.launch_gap_short_context",
+                "framework.dispatch_overhead",
+                "transfer.h2d_serialized",
+                "runtime.gpu_waiting_for_input",
+                "communication.rank_arrival_skew",
+                "serving.queue_or_request_path_dominant",
+            }.issubset({item["semantic_id"] for item in observations})
+        )
+
     def test_kind_signal_vocabulary_and_raw_metadata_are_closed(self) -> None:
         invalid = [
             _measurement(["kv_gather_dram"]),

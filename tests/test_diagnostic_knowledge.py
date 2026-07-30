@@ -277,6 +277,20 @@ def _prepare_valid_contract(reference_dir: Path) -> None:
     for card in cards["cards"]:
         card.update(
             mechanism_key=card["id"].removeprefix("diagnostic."),
+            observation_rules={
+                "positive": [_observation_rule()],
+                "counter": [
+                    _observation_rule(
+                        statuses=["absent"],
+                    )
+                ],
+                "invalidators": [
+                    _observation_rule(
+                        semantic_id="runtime.timeline_boundary_ambiguous",
+                        scope_all=["cpu-submit", "gpu-kernel"],
+                    )
+                ],
+            },
             execution_layers=["gpu"],
             applies_when=["test applicability is observed"],
             required_evidence=["test evidence"],
@@ -616,6 +630,11 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
         )
         kernel = by_id["diagnostic.kernel.resource-or-memory"]
         kernel.update(content_status="replay_verified", case_ids=["X01"])
+        kernel["preferred_actions"] = ["compiler-sass-inspection"]
+        kernel["cheapest_falsifier"] = {
+            "action_id": "compiler-sass-inspection",
+            "rationale": "Test fixture uses the available read-only generated-code action.",
+        }
         kernel["observation_rules"]["positive"] = [
             _observation_rule(
                 semantic_id="kernel.memory_pressure",
@@ -977,6 +996,96 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
                 self.assertIn(action_id, action_scopes)
                 self.assertEqual(action_scopes[action_id], "read_only")
                 self.assertTrue(card["cheapest_falsifier"]["rationale"])
+
+    def test_each_general_card_has_a_positive_semantic_from_a_compatible_action(
+        self,
+    ) -> None:
+        produced = {
+            "ncu-targeted-kernel": {
+                "kernel.dram_bytes",
+                "kernel.dram_throughput_pct",
+                "kernel.long_scoreboard_pct",
+                "kernel.occupancy_pct",
+                "kernel.sm_active_pct",
+                "kernel.tensor_pipe_pct",
+                "kernel.barrier_stall_pct",
+            },
+            "nsys-global-timeline": {
+                "runtime.launch_gap_short_context",
+                "transfer.h2d_serialized",
+                "runtime.gpu_waiting_for_input",
+                "communication.rank_arrival_skew",
+                "serving.queue_or_request_path_dominant",
+            },
+            "nsys-os-runtime-slice": {
+                "runtime.launch_gap_short_context",
+                "transfer.h2d_serialized",
+                "runtime.gpu_waiting_for_input",
+                "communication.rank_arrival_skew",
+                "serving.queue_or_request_path_dominant",
+            },
+            "pytorch-operator-trace": {
+                "framework.dispatch_overhead",
+                "runtime.gpu_waiting_for_input",
+            },
+        }
+        package = json.loads(
+            (REFERENCE_DIR / "diagnostic_cards.json").read_text(encoding="utf-8")
+        )
+
+        for card in package["cards"]:
+            if card["mechanism_key"] not in GENERAL_MECHANISM_KEYS:
+                continue
+            actions = {
+                card["cheapest_falsifier"]["action_id"],
+                *card["preferred_actions"],
+            }
+            producible = set().union(
+                *(produced.get(action_id, set()) for action_id in actions)
+            )
+            positive = {
+                rule["semantic_id"]
+                for rule in card["observation_rules"]["positive"]
+            }
+            with self.subTest(card_id=card["id"]):
+                self.assertTrue(positive & producible)
+
+    def test_package_rejects_positive_semantic_without_a_trusted_producer(
+        self,
+    ) -> None:
+        reference_dir = self._copied_references()
+        card_path = reference_dir / "diagnostic_cards.json"
+        package = json.loads(card_path.read_text(encoding="utf-8"))
+        card = next(
+            item
+            for item in package["cards"]
+            if item["mechanism_key"] == "global_memory_transactions"
+        )
+        card["observation_rules"]["positive"][0][
+            "semantic_id"
+        ] = "kernel.no_trusted_producer"
+        _write_json(card_path, package)
+
+        with self.assertRaisesRegex(ValueError, "positive semantic|producer"):
+            self.module.validate_knowledge_package(reference_dir)
+
+    def test_package_rejects_action_that_cannot_produce_positive_semantic(
+        self,
+    ) -> None:
+        reference_dir = self._copied_references()
+        card_path = reference_dir / "diagnostic_cards.json"
+        package = json.loads(card_path.read_text(encoding="utf-8"))
+        card = next(
+            item
+            for item in package["cards"]
+            if item["mechanism_key"] == "global_memory_transactions"
+        )
+        card["preferred_actions"] = ["pytorch-operator-trace"]
+        card["cheapest_falsifier"]["action_id"] = "pytorch-operator-trace"
+        _write_json(card_path, package)
+
+        with self.assertRaisesRegex(ValueError, "positive semantic|action"):
+            self.module.validate_knowledge_package(reference_dir)
 
     def test_general_cards_have_no_transferable_tuning_claims(self) -> None:
         package = json.loads(

@@ -39,31 +39,6 @@ _LAYER_TO_DIAGNOSIS_CATEGORY = {
     "io": "io",
     "transfer": "transfer",
 }
-_DIAGNOSTIC_PRODUCERS = {
-    "nsys_timeline": "nsys-timeline-adapter",
-    "pytorch_profile": "pytorch-profile-adapter",
-}
-_DIAGNOSTIC_SIGNALS = {
-    "nsys_timeline": {
-        "launch_gap_short_context": (
-            "runtime.launch_gap_short_context",
-            ["cpu-submit", "gpu-kernel"],
-        ),
-        "gpu_idle_gap": ("runtime.gpu_idle_gap", ["gpu-kernel"]),
-        "cpu_launch_overhead": ("runtime.cpu_launch_overhead", ["cpu-submit"]),
-    },
-    "pytorch_profile": {
-        "gqa_head_ratio": (
-            "framework.gqa_head_ratio",
-            ["framework", "gpu-kernel"],
-        ),
-        "shape_fragmentation": ("framework.shape_fragmentation", ["framework"]),
-        "framework_dispatch_overhead": (
-            "framework.dispatch_overhead",
-            ["framework", "cpu-submit"],
-        ),
-    },
-}
 _ACTIVE_ACTIONS = {
     "compiler-sass-inspection": "compiler_sass",
     "direction-experiment-project-copy": "direction_experiment",
@@ -451,6 +426,11 @@ def normalize_observations(
     ):
         raise ValueError("active_evidence_results must be a sequence")
 
+    evidence_module = _load_sibling(
+        "diagnostic_evidence.py",
+        "cuda_optimizer_diagnostic_evidence_knowledge_runtime",
+    )
+    signal_contract = evidence_module.diagnostic_signal_contract()
     normalized: dict[tuple, dict] = {}
     diagnostic_fields = {
         "kind",
@@ -466,16 +446,17 @@ def normalize_observations(
     for index, raw in enumerate(diagnostic_evidence):
         item = _closed(raw, diagnostic_fields, f"diagnostic evidence {index}")
         kind = item["kind"]
-        if kind not in _DIAGNOSTIC_PRODUCERS:
+        if kind not in signal_contract:
             raise ValueError(f"diagnostic evidence {index} has unknown producer kind")
+        contract = signal_contract[kind]
         producer = _closed(
             item["producer"],
             {"id", "version", "implementation_sha256"},
             f"diagnostic evidence {index} producer",
         )
         if (
-            producer["id"] != _DIAGNOSTIC_PRODUCERS[kind]
-            or producer["version"] != "1.0.0"
+            producer["id"] != contract["producer_id"]
+            or producer["version"] != contract["producer_version"]
         ):
             raise ValueError(f"diagnostic evidence {index} producer/version is unknown")
         implementation_sha = _sha256(
@@ -522,7 +503,7 @@ def normalize_observations(
             f"diagnostic evidence {index} signals",
             nonempty=False,
         )
-        unknown_signals = set(signals) - set(_DIAGNOSTIC_SIGNALS[kind])
+        unknown_signals = set(signals) - set(contract["signals"])
         if unknown_signals:
             raise ValueError(
                 f"diagnostic evidence {index} has unknown signals: "
@@ -541,15 +522,15 @@ def normalize_observations(
             }
         )
         for signal in signals:
-            semantic_id, scope = _DIAGNOSTIC_SIGNALS[kind][signal]
+            semantic = contract["signals"][signal]
             _append_observation(
                 normalized,
                 {
-                    "semantic_id": semantic_id,
+                    "semantic_id": semantic["semantic_id"],
                     "status": "present",
                     "value": True,
                     "unit": "state",
-                    "scope": list(scope),
+                    "scope": list(semantic["scope"]),
                     "aggregation": "presence",
                     "tool": {
                         "name": producer["id"],
@@ -1519,6 +1500,7 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
         "repeatable",
     }
     action_scopes: dict[str, str] = {}
+    action_evidence_kinds: dict[str, str] = {}
     for index, item in enumerate(action_items):
         item = _closed(item, action_fields, f"evidence action {index}")
         action_id = _text(item["action_id"], f"evidence action {index} action_id")
@@ -1536,6 +1518,38 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
         if type(item["repeatable"]) is not bool:
             raise ValueError(f"evidence action {action_id} repeatable must be boolean")
         action_scopes[action_id] = item["control_scope"]
+        action_evidence_kinds[action_id] = item["evidence_kind"]
+
+    evidence_module = _load_sibling(
+        "diagnostic_evidence.py",
+        "cuda_optimizer_diagnostic_evidence_package_validation",
+    )
+    producer_contract = evidence_module.semantic_producer_contract()
+    produced_semantics: set[str] = set()
+    for action_id, raw in producer_contract.items():
+        contract = _closed(
+            raw,
+            {"evidence_kind", "semantic_ids"},
+            f"semantic producer {action_id}",
+        )
+        if action_id not in action_evidence_kinds:
+            raise ValueError(
+                f"semantic producer {action_id} references unknown action"
+            )
+        if contract["evidence_kind"] != action_evidence_kinds[action_id]:
+            raise ValueError(
+                f"semantic producer {action_id} evidence kind mismatches action"
+            )
+        semantic_ids = _strings(
+            contract["semantic_ids"],
+            f"semantic producer {action_id} semantic_ids",
+        )
+        for semantic_id in semantic_ids:
+            _observation_identifier(
+                semantic_id,
+                f"semantic producer {action_id} semantic_id",
+            )
+        produced_semantics.update(semantic_ids)
 
     _closed(cases, {"schema_version", "cases"}, "case memory")
     if cases["schema_version"] != "cuda-optimizer/case-memory-v1":
@@ -1732,6 +1746,28 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
             falsifier["rationale"],
             f"diagnostic card {card_id} cheapest_falsifier rationale",
         )
+        positive_semantics = {
+            rule["semantic_id"]
+            for rule in item["observation_rules"]["positive"]
+        }
+        if item["content_status"] == "source_verified" and positive_semantics:
+            if positive_semantics.isdisjoint(produced_semantics):
+                raise ValueError(
+                    f"diagnostic card {card_id} positive semantic has no "
+                    "trusted producer"
+                )
+            compatible_actions = set(preferred_actions)
+            compatible_actions.add(falsifier_id)
+            compatible_semantics = set()
+            for action_id in compatible_actions:
+                contract = producer_contract.get(action_id)
+                if contract is not None:
+                    compatible_semantics.update(contract["semantic_ids"])
+            if positive_semantics.isdisjoint(compatible_semantics):
+                raise ValueError(
+                    f"diagnostic card {card_id} positive semantic has no "
+                    "compatible action"
+                )
         referenced_sources = _strings(
             item["source_ids"], f"diagnostic card {card_id} source_ids"
         )

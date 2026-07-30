@@ -131,11 +131,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.global_memory_transaction_amplification",
-          "statuses": ["present"],
-          "scope_all": ["gpu-kernel"],
-          "unit": "state",
-          "aggregation": "presence",
+          "semantic_id": "kernel.dram_bytes",
+          "statuses": ["observed"],
+          "scope_all": ["kernel"],
+          "unit": "byte",
+          "aggregation": "ncu_metric",
           "comparison": null
         }],
         "counter": [{
@@ -174,8 +174,8 @@
       "distinguishing_question": "Do generated addresses and transaction accounting show amplification beyond useful bytes?",
       "preferred_actions": ["ncu-targeted-kernel", "compiler-sass-inspection"],
       "cheapest_falsifier": {
-        "action_id": "compiler-sass-inspection",
-        "rationale": "Inspect generated code and static resources before paying for counter replay."
+        "action_id": "ncu-targeted-kernel",
+        "rationale": "Measure the target kernel's memory traffic and transaction evidence before attributing amplification."
       },
       "required_evidence": ["identity-bound transaction accounting", "generated addresses or access widths for the same kernel"],
       "positive_signals": ["transaction count is amplified relative to useful requested bytes"],
@@ -441,11 +441,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.redundant_dram_traffic",
-          "statuses": ["present"],
-          "scope_all": ["gpu-kernel"],
-          "unit": "state",
-          "aggregation": "presence",
+          "semantic_id": "kernel.dram_throughput_pct",
+          "statuses": ["observed"],
+          "scope_all": ["kernel"],
+          "unit": "%",
+          "aggregation": "ncu_metric",
           "comparison": null
         }],
         "counter": [{
@@ -484,8 +484,8 @@
       "distinguishing_question": "Does a byte-flow lower bound explain less traffic than the measured or generated path?",
       "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
       "cheapest_falsifier": {
-        "action_id": "compiler-sass-inspection",
-        "rationale": "Account for loads, stores, and materialized intermediates before collecting replay counters."
+        "action_id": "ncu-targeted-kernel",
+        "rationale": "Measure DRAM activity for the target kernel before testing whether reuse or materialization explains it."
       },
       "required_evidence": ["identity-bound byte-flow lower bound", "generated or measured memory traffic for the same path"],
       "positive_signals": ["the path reloads reusable data or writes an avoidable intermediate"],
@@ -503,11 +503,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.memory_latency_hiding_insufficient",
-          "statuses": ["present"],
-          "scope_all": ["gpu-kernel"],
-          "unit": "state",
-          "aggregation": "presence",
+          "semantic_id": "kernel.long_scoreboard_pct",
+          "statuses": ["observed"],
+          "scope_all": ["kernel"],
+          "unit": "%",
+          "aggregation": "ncu_metric",
           "comparison": null
         }],
         "counter": [{
@@ -546,8 +546,8 @@
       "distinguishing_question": "Do scheduler eligibility and dependency stalls remain limiting when bandwidth is not saturated?",
       "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
       "cheapest_falsifier": {
-        "action_id": "compiler-sass-inspection",
-        "rationale": "Inspect dependency distance and asynchronous movement before requesting focused scheduler counters."
+        "action_id": "ncu-targeted-kernel",
+        "rationale": "Measure version-mapped dependency stalls and scheduler evidence on the target kernel."
       },
       "required_evidence": ["version-mapped scheduler and stall semantics", "generated dependency path for the same kernel"],
       "positive_signals": ["memory-dependency stalls coincide with low scheduler eligibility"],
@@ -565,11 +565,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.register_or_shared_pressure",
-          "statuses": ["present"],
-          "scope_all": ["gpu-kernel"],
-          "unit": "state",
-          "aggregation": "presence",
+          "semantic_id": "kernel.occupancy_pct",
+          "statuses": ["observed"],
+          "scope_all": ["kernel"],
+          "unit": "%",
+          "aggregation": "ncu_metric",
           "comparison": null
         }],
         "counter": [{
@@ -608,8 +608,8 @@
       "distinguishing_question": "Which exact static resource constrains residency, and does the critical path require more residency?",
       "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
       "cheapest_falsifier": {
-        "action_id": "compiler-sass-inspection",
-        "rationale": "Read exact registers, spills, and shared-memory use from the generated artifact before replay."
+        "action_id": "ncu-targeted-kernel",
+        "rationale": "Measure occupancy and resource-limit evidence for the exact target kernel."
       },
       "required_evidence": ["generated-artifact resource accounting", "exact architecture and kernel identity"],
       "positive_signals": ["one static resource or spilling constrains residency on the observed path"],
@@ -627,11 +627,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.parallelism_or_wave_tail",
-          "statuses": ["present"],
-          "scope_all": ["gpu-kernel"],
-          "unit": "state",
-          "aggregation": "presence",
+          "semantic_id": "kernel.sm_active_pct",
+          "statuses": ["observed"],
+          "scope_all": ["kernel"],
+          "unit": "%",
+          "aggregation": "ncu_metric",
           "comparison": null
         }],
         "counter": [{
@@ -670,8 +670,8 @@
       "distinguishing_question": "Does launch geometry account for idle SM capacity after resource limits are included?",
       "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
       "cheapest_falsifier": {
-        "action_id": "compiler-sass-inspection",
-        "rationale": "Check exact launch metadata and static resource limits before collecting wave metrics."
+        "action_id": "ncu-targeted-kernel",
+        "rationale": "Measure launch and SM-activity evidence for the exact target kernel before attributing a tail."
       },
       "required_evidence": ["exact launch geometry", "device SM count and generated-kernel resource identity"],
       "positive_signals": ["grid coverage or the final wave leaves observed device capacity idle"],
@@ -689,11 +689,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.compute_pipeline_or_dtype_mismatch",
-          "statuses": ["present"],
-          "scope_all": ["gpu-kernel"],
-          "unit": "state",
-          "aggregation": "presence",
+          "semantic_id": "kernel.tensor_pipe_pct",
+          "statuses": ["observed"],
+          "scope_all": ["kernel"],
+          "unit": "%",
+          "aggregation": "ncu_metric",
           "comparison": null
         }],
         "counter": [{
@@ -732,8 +732,8 @@
       "distinguishing_question": "Does the generated instruction and conversion path match the exact precision contract and architecture facts?",
       "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
       "cheapest_falsifier": {
-        "action_id": "compiler-sass-inspection",
-        "rationale": "Compare generated arithmetic and conversion instructions with the precision contract."
+        "action_id": "ncu-targeted-kernel",
+        "rationale": "Measure the target compute pipeline before comparing it with the exact precision contract."
       },
       "required_evidence": ["exact precision contract", "generated instructions bound to the current architecture and binary"],
       "positive_signals": ["the actual arithmetic or conversion path differs from the permitted target path"],
@@ -751,11 +751,11 @@
       "requested_claims": [],
       "observation_rules": {
         "positive": [{
-          "semantic_id": "kernel.synchronization_or_atomic_contention",
-          "statuses": ["present"],
-          "scope_all": ["gpu-kernel"],
-          "unit": "state",
-          "aggregation": "presence",
+          "semantic_id": "kernel.barrier_stall_pct",
+          "statuses": ["observed"],
+          "scope_all": ["kernel"],
+          "unit": "%",
+          "aggregation": "ncu_metric",
           "comparison": null
         }],
         "counter": [{
@@ -794,8 +794,8 @@
       "distinguishing_question": "Which dependency requires the observed barrier or atomic scope, and is contention visible on that path?",
       "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
       "cheapest_falsifier": {
-        "action_id": "compiler-sass-inspection",
-        "rationale": "Map synchronization and atomic instructions to required dependencies before counter replay."
+        "action_id": "ncu-targeted-kernel",
+        "rationale": "Measure barrier waiting on the target kernel before inspecting the responsible dependency or atomic site."
       },
       "required_evidence": ["generated synchronization or atomic instructions", "source dependency and correctness scope"],
       "positive_signals": ["the same synchronization or atomic site accounts for validated waiting or contention"],

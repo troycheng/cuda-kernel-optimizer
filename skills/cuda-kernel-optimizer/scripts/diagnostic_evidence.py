@@ -14,20 +14,62 @@ EVIDENCE_SCHEMA = "cuda-optimizer/diagnostic-evidence-v1"
 MEASUREMENT_SCHEMA = "cuda-optimizer/diagnostic-measurement-v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-_PRODUCERS = {
-    "nsys_timeline": "nsys-timeline-adapter",
-    "pytorch_profile": "pytorch-profile-adapter",
-}
-_SIGNALS = {
+_DIAGNOSTIC_SIGNAL_CONTRACT = {
     "nsys_timeline": {
-        "launch_gap_short_context",
-        "gpu_idle_gap",
-        "cpu_launch_overhead",
+        "producer_id": "nsys-timeline-adapter",
+        "producer_version": "1.0.0",
+        "signals": {
+            "launch_gap_short_context": {
+                "semantic_id": "runtime.launch_gap_short_context",
+                "scope": ["cpu-submit", "gpu-kernel"],
+            },
+            "gpu_idle_gap": {
+                "semantic_id": "runtime.gpu_idle_gap",
+                "scope": ["gpu-kernel"],
+            },
+            "cpu_launch_overhead": {
+                "semantic_id": "runtime.cpu_launch_overhead",
+                "scope": ["cpu-submit"],
+            },
+            "h2d_serialized": {
+                "semantic_id": "transfer.h2d_serialized",
+                "scope": ["transfer", "gpu-kernel"],
+            },
+            "gpu_waiting_for_input": {
+                "semantic_id": "runtime.gpu_waiting_for_input",
+                "scope": ["cpu-submit", "gpu-kernel"],
+            },
+            "rank_arrival_skew": {
+                "semantic_id": "communication.rank_arrival_skew",
+                "scope": ["communication", "gpu-kernel"],
+            },
+            "queue_or_request_path_dominant": {
+                "semantic_id": "serving.queue_or_request_path_dominant",
+                "scope": ["request", "gpu-kernel"],
+            },
+        },
     },
     "pytorch_profile": {
-        "gqa_head_ratio",
-        "shape_fragmentation",
-        "framework_dispatch_overhead",
+        "producer_id": "pytorch-profile-adapter",
+        "producer_version": "1.0.0",
+        "signals": {
+            "gqa_head_ratio": {
+                "semantic_id": "framework.gqa_head_ratio",
+                "scope": ["framework", "gpu-kernel"],
+            },
+            "shape_fragmentation": {
+                "semantic_id": "framework.shape_fragmentation",
+                "scope": ["framework"],
+            },
+            "framework_dispatch_overhead": {
+                "semantic_id": "framework.dispatch_overhead",
+                "scope": ["framework", "cpu-submit"],
+            },
+            "gpu_waiting_for_input": {
+                "semantic_id": "runtime.gpu_waiting_for_input",
+                "scope": ["framework", "cpu-submit", "gpu-kernel"],
+            },
+        },
     },
 }
 _NCU_MAPPING_VERSION = "ncu-semantic-v1"
@@ -36,6 +78,26 @@ _NCU_METRIC_MAPPINGS = {
     "2026.2": {
         "dram__throughput.avg.pct_of_peak_sustained_elapsed": {
             "semantic_id": "kernel.dram_throughput_pct",
+            "unit": "%",
+        },
+        "dram__bytes.sum": {
+            "semantic_id": "kernel.dram_bytes",
+            "unit": "byte",
+        },
+        "sm__warps_active.avg.pct_of_peak_sustained_active": {
+            "semantic_id": "kernel.occupancy_pct",
+            "unit": "%",
+        },
+        "sm__cycles_active.avg.pct_of_peak_sustained_elapsed": {
+            "semantic_id": "kernel.sm_active_pct",
+            "unit": "%",
+        },
+        "sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active": {
+            "semantic_id": "kernel.tensor_pipe_pct",
+            "unit": "%",
+        },
+        "smsp__average_warp_latency_issue_stalled_barrier_per_warp_active.pct": {
+            "semantic_id": "kernel.barrier_stall_pct",
             "unit": "%",
         },
         "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct": {
@@ -48,6 +110,56 @@ _NCU_METRIC_MAPPINGS = {
         },
     }
 }
+
+
+def diagnostic_signal_contract() -> dict:
+    """Return the closed diagnostic producer/signal routing contract."""
+    return json.loads(json.dumps(_DIAGNOSTIC_SIGNAL_CONTRACT))
+
+
+def semantic_producer_contract() -> dict:
+    """Return action/evidence-kind to stable semantics from real producers."""
+    ncu_semantics = sorted(
+        {
+            rule["semantic_id"]
+            for mapping in _NCU_METRIC_MAPPINGS.values()
+            for rule in mapping.values()
+        }
+    )
+    nsys_semantics = sorted(
+        {
+            rule["semantic_id"]
+            for rule in _DIAGNOSTIC_SIGNAL_CONTRACT["nsys_timeline"][
+                "signals"
+            ].values()
+        }
+    )
+    pytorch_semantics = sorted(
+        {
+            rule["semantic_id"]
+            for rule in _DIAGNOSTIC_SIGNAL_CONTRACT["pytorch_profile"][
+                "signals"
+            ].values()
+        }
+    )
+    return {
+        "ncu-targeted-kernel": {
+            "evidence_kind": "ncu_kernel",
+            "semantic_ids": ncu_semantics,
+        },
+        "nsys-global-timeline": {
+            "evidence_kind": "nsys_timeline",
+            "semantic_ids": nsys_semantics,
+        },
+        "nsys-os-runtime-slice": {
+            "evidence_kind": "os_runtime",
+            "semantic_ids": nsys_semantics,
+        },
+        "pytorch-operator-trace": {
+            "evidence_kind": "framework_trace",
+            "semantic_ids": pytorch_semantics,
+        },
+    }
 
 
 class ValidationError(ValueError):
@@ -242,7 +354,9 @@ def _signals(kind: str, value: Any) -> list[str]:
     result = [_identifier(item, "diagnostic signal") for item in value]
     if len(result) != len(set(result)):
         raise ValidationError("diagnostic signals must not contain duplicates")
-    unknown = set(result) - _SIGNALS[kind]
+    unknown = set(result) - set(
+        _DIAGNOSTIC_SIGNAL_CONTRACT[kind]["signals"]
+    )
     if unknown:
         raise ValidationError(f"unsupported signals for {kind}: {sorted(unknown)}")
     return sorted(result)
@@ -290,9 +404,13 @@ def derive_diagnostic_evidence(
     environment_sha256: str,
     recorded_at: float,
 ) -> bytes:
-    if kind not in _PRODUCERS:
+    if kind not in _DIAGNOSTIC_SIGNAL_CONTRACT:
         raise ValidationError(f"unsupported diagnostic kind: {kind}")
-    if producer_id != _PRODUCERS[kind] or producer_version != "1.0.0":
+    producer = _DIAGNOSTIC_SIGNAL_CONTRACT[kind]
+    if (
+        producer_id != producer["producer_id"]
+        or producer_version != producer["producer_version"]
+    ):
         raise ValidationError(f"untrusted producer for {kind}")
     measurement = _strict_json(raw_measurement, "diagnostic measurement")
     _closed(
@@ -365,14 +483,18 @@ def validate_diagnostic_evidence(
     if evidence["schema_version"] != EVIDENCE_SCHEMA:
         raise ValidationError("unsupported diagnostic evidence schema")
     kind = evidence["kind"]
-    if kind not in _PRODUCERS:
+    if kind not in _DIAGNOSTIC_SIGNAL_CONTRACT:
         raise ValidationError(f"unsupported diagnostic kind: {kind}")
+    producer_contract = _DIAGNOSTIC_SIGNAL_CONTRACT[kind]
     producer = _closed(
         evidence["producer"],
         {"id", "version", "implementation_sha256"},
         "diagnostic producer",
     )
-    if producer["id"] != _PRODUCERS[kind] or producer["version"] != "1.0.0":
+    if (
+        producer["id"] != producer_contract["producer_id"]
+        or producer["version"] != producer_contract["producer_version"]
+    ):
         raise ValidationError(f"untrusted producer for {kind}")
     _sha(producer["implementation_sha256"], "producer.implementation_sha256")
     request_sha = _sha(evidence["adapter_request_sha256"], "adapter_request_sha256")
@@ -390,7 +512,10 @@ def validate_diagnostic_evidence(
     return {
         "kind": kind,
         "layer": "workload",
-        "summary": f"Validated {kind} observation from {_PRODUCERS[kind]}.",
+        "summary": (
+            f"Validated {kind} observation from "
+            f"{producer_contract['producer_id']}."
+        ),
         "signals": _signals(kind, evidence["signals"]),
         "producer": dict(producer),
         "adapter_request_sha256": request_sha,

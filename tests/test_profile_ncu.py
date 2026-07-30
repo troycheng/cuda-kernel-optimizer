@@ -158,6 +158,63 @@ class ProfileNcuTests(unittest.TestCase):
             [{"metric_name": "unknown__metric", "reason": "unknown_metric"}],
         )
 
+    def test_real_profile_csv_covers_all_kernel_card_positive_semantics(self) -> None:
+        profile_ncu = _load("profile_ncu")
+        rows = [
+            ("dram__bytes.sum", "byte", "4096"),
+            ("dram__throughput.avg.pct_of_peak_sustained_elapsed", "%", "75"),
+            (
+                "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct",
+                "%",
+                "32",
+            ),
+            (
+                "sm__warps_active.avg.pct_of_peak_sustained_active",
+                "%",
+                "61",
+            ),
+            (
+                "sm__cycles_active.avg.pct_of_peak_sustained_elapsed",
+                "%",
+                "84",
+            ),
+            (
+                "sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active",
+                "%",
+                "47",
+            ),
+            (
+                "smsp__average_warp_latency_issue_stalled_barrier_per_warp_active.pct",
+                "%",
+                "9",
+            ),
+        ]
+        csv_text = (
+            '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
+            + "".join(
+                f'"target","{metric}","{unit}","{value}"\n'
+                for metric, unit, value in rows
+            )
+        )
+
+        result = profile_ncu._semantic_ncu_observations(csv_text, "2026.2")
+
+        self.assertEqual(
+            {
+                item["semantic_id"]
+                for item in result["semantic_observations"]
+            },
+            {
+                "kernel.dram_bytes",
+                "kernel.dram_throughput_pct",
+                "kernel.long_scoreboard_pct",
+                "kernel.occupancy_pct",
+                "kernel.sm_active_pct",
+                "kernel.tensor_pipe_pct",
+                "kernel.barrier_stall_pct",
+            },
+        )
+
     def test_profile_main_uses_actual_ncu_version_not_state_snapshot(self) -> None:
         profile_ncu = _load("profile_ncu")
         csv_text = (
