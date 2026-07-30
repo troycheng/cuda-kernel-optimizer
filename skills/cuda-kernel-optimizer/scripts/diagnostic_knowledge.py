@@ -1461,8 +1461,8 @@ def validate_knowledge_package(reference_dir: Path = REFERENCE_DIR) -> dict:
     source_as_of = _iso_date(sources["as_of"], "knowledge sources as_of")
     _text(sources["staleness_policy"], "knowledge sources staleness_policy")
     source_items = sources["sources"]
-    if type(source_items) is not list or len(source_items) != 14:
-        raise ValueError("knowledge sources must contain exactly 14 entries")
+    if type(source_items) is not list or not source_items:
+        raise ValueError("knowledge sources must be a nonempty array")
     source_fields = {
         "id",
         "title",

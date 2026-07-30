@@ -24,6 +24,40 @@ FRESH_REPLAY_FIXTURE = (
 IMPLEMENTATION_SHA = "1" * 64
 REQUEST_SHA = "2" * 64
 RESULT_SHA = "3" * 64
+GENERAL_MECHANISM_KEYS = {
+    "global_memory_transactions",
+    "redundant_dram_traffic",
+    "memory_latency_hiding",
+    "register_or_shared_pressure",
+    "parallelism_or_wave_tail",
+    "compute_pipeline_or_dtype",
+    "synchronization_or_atomic_contention",
+    "framework_launch_fragmentation",
+    "host_device_transfer_serialization",
+    "cpu_or_data_pipeline_starvation",
+    "collective_wait_or_rank_skew",
+    "serving_scheduling_or_request_path",
+}
+RTX_5090_CARD_SHA256 = {
+    "diagnostic.triton.nms-fp32-output-store": (
+        "a6f63aff65b7ea82e1954005261bdd8cad4c0d748eff97f37059435fe7bd47ef"
+    ),
+    "diagnostic.triton.fastsort-store-path": (
+        "2520b315fed0b36a064a1a51ddb5c41195b440315385134f4bab0be6e1d83e73"
+    ),
+    "diagnostic.triton.group-reserve-path": (
+        "bc4e479881c54afb492dc16af1240b8aba4cdf19e23770da1d9b0b238de10ca0"
+    ),
+    "diagnostic.triton.aux-stream-overlap": (
+        "2e9e453caf85f915b8fbc6418724ff609b9e77f47d8522189cfa0248afe52260"
+    ),
+    "diagnostic.triton.persistent-counters": (
+        "a9e44c5b75956cd88882fe9770b4bc56ecb68a18551892d7abe54d12dbfc0307"
+    ),
+    "diagnostic.triton.fastsort-map-fusion": (
+        "c9512a7cf4b5fb290efabe7d3e1518e36fe276146095eadc0c46fa570c02a6db"
+    ),
+}
 
 
 def _load():
@@ -341,7 +375,7 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
             all("serving" in item["requested_claims"] for item in triton_cards)
         )
 
-    def test_raw_serving_profile_selects_one_measure_only_route(self) -> None:
+    def test_raw_serving_profile_does_not_admit_unobserved_mechanisms(self) -> None:
         replay = json.loads(FRESH_REPLAY_FIXTURE.read_text(encoding="utf-8"))
         frozen = copy.deepcopy(
             next(
@@ -382,18 +416,8 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
             ),
             6,
         )
-        self.assertEqual(len(context["candidates"]), 1)
-        candidate = context["candidates"][0]
-        self.assertEqual(candidate["admission"], "measure_only")
-        self.assertEqual(
-            candidate["cheapest_falsifier"]["action_id"],
-            "compiler-sass-inspection",
-        )
-        self.assertEqual(candidate["cheapest_falsifier"]["cost"], "low")
-        self.assertEqual(candidate["cheapest_falsifier"]["control_scope"], "read_only")
-        self.assertEqual(candidate["cheapest_falsifier"]["risk"], "none")
-        self.assertEqual(candidate["confidence"], "inconclusive")
-        self.assertEqual(candidate["promotion_authority"], "none")
+        self.assertEqual(context["candidates"], [])
+        self.assertEqual(context["promotion_authority"], "none")
 
         for status in ("observed", "inconclusive"):
             with self.subTest(status=status):
@@ -574,7 +598,7 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
         cards = json.loads(card_path.read_text(encoding="utf-8"))
         by_id = {item["id"]: item for item in cards["cards"]}
         duplicate = by_id["diagnostic.cross-layer.triage"]
-        duplicate["mechanism_key"] = "framework_launch_gaps"
+        duplicate["mechanism_key"] = "framework-launch-fragmentation"
         framework = by_id["diagnostic.framework.launch-gaps"]
         framework.update(content_status="locally_measured", case_ids=["R01"])
         framework["observation_rules"]["positive"].append(
@@ -700,7 +724,7 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
         self.assertTrue(
             any(
                 item["card_id"] == "diagnostic.io.request-path"
-                and item["reason"] == "read_only_action_unavailable"
+                and item["reason"] == "positive_observation_missing"
                 for item in context["explanations"]
             )
         )
@@ -732,7 +756,7 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
         ):
             self.module.build_knowledge_context(forged_availability, limit=3)
         self.assertGreaterEqual(context["filtered_counts"]["canonical_duplicate"], 1)
-        self.assertGreaterEqual(context["filtered_counts"]["pareto_dominated"], 1)
+        self.assertEqual(context["filtered_counts"]["pareto_dominated"], 0)
         surviving_keys = [
             item["mechanism_key"]
             for field in ("candidates", "explanations")
@@ -779,7 +803,7 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
         self.assertNotEqual(rebound["input_sha256"], context["input_sha256"])
 
         closed = copy.deepcopy(frozen)
-        closed["closed_mechanism_keys"] = ["framework-launch-gaps"]
+        closed["closed_mechanism_keys"] = ["framework-launch-fragmentation"]
         closed_context = self.module.build_knowledge_context(closed, limit=3)
         self.assertNotIn(
             "diagnostic.framework.launch-gaps",
@@ -894,7 +918,184 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
         result = self.module.validate_knowledge_package(REFERENCE_DIR)
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["case_count"], 15)
-        self.assertEqual(result["card_count"], 13)
+        self.assertEqual(result["card_count"], 19)
+
+    def test_source_verified_general_cards_cover_exact_mechanism_set(self) -> None:
+        package = json.loads(
+            (REFERENCE_DIR / "diagnostic_cards.json").read_text(encoding="utf-8")
+        )
+        cards = [
+            card
+            for card in package["cards"]
+            if card["content_status"] == "source_verified"
+            and card["id"] != "diagnostic.cross-layer.triage"
+        ]
+
+        self.assertEqual(
+            {card["mechanism_key"] for card in cards},
+            GENERAL_MECHANISM_KEYS,
+        )
+        self.assertEqual(len(cards), len(GENERAL_MECHANISM_KEYS))
+        runtime_ids = set(
+            self.module.validate_knowledge_package(REFERENCE_DIR)[
+                "runtime_candidate_card_ids"
+            ]
+        )
+        for card in cards:
+            with self.subTest(card_id=card["id"]):
+                self.assertEqual(card["status"], "routing_only")
+                self.assertEqual(card["case_ids"], [])
+                self.assertNotIn(card["id"], runtime_ids)
+                self.assertTrue(card["observation_rules"]["positive"])
+                self.assertTrue(card["observation_rules"]["counter"])
+                self.assertTrue(card["observation_rules"]["invalidators"])
+                self.assertTrue(card["positive_signals"])
+                self.assertTrue(card["counter_signals"])
+                self.assertTrue(card["invalidators"])
+
+    def test_general_cards_only_use_existing_read_only_falsifiers(self) -> None:
+        package = json.loads(
+            (REFERENCE_DIR / "diagnostic_cards.json").read_text(encoding="utf-8")
+        )
+        actions = json.loads(
+            (REFERENCE_DIR / "evidence_action_catalog.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        action_scopes = {
+            item["action_id"]: item["control_scope"] for item in actions["actions"]
+        }
+        cards = [
+            card
+            for card in package["cards"]
+            if card["mechanism_key"] in GENERAL_MECHANISM_KEYS
+        ]
+
+        for card in cards:
+            with self.subTest(card_id=card["id"]):
+                action_id = card["cheapest_falsifier"]["action_id"]
+                self.assertIn(action_id, action_scopes)
+                self.assertEqual(action_scopes[action_id], "read_only")
+                self.assertTrue(card["cheapest_falsifier"]["rationale"])
+
+    def test_general_cards_have_no_transferable_tuning_claims(self) -> None:
+        package = json.loads(
+            (REFERENCE_DIR / "diagnostic_cards.json").read_text(encoding="utf-8")
+        )
+        cards = [
+            card
+            for card in package["cards"]
+            if card["mechanism_key"] in GENERAL_MECHANISM_KEYS
+        ]
+        forbidden_keys = {
+            "speedup",
+            "typical_speedup",
+            "tile",
+            "tile_size",
+            "num_warps",
+            "warps",
+            "num_stages",
+            "stages",
+            "default_config",
+            "default_configuration",
+        }
+
+        def keys(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    yield key.lower()
+                    yield from keys(item)
+            elif isinstance(value, list):
+                for item in value:
+                    yield from keys(item)
+
+        for card in cards:
+            with self.subTest(card_id=card["id"]):
+                self.assertTrue(forbidden_keys.isdisjoint(set(keys(card))))
+                prose = json.dumps(card, ensure_ascii=False).lower()
+                self.assertNotIn("speedup", prose)
+                self.assertNotIn("default configuration", prose)
+
+    def test_cross_layer_triage_has_no_runtime_candidate_permission(self) -> None:
+        package = json.loads(
+            (REFERENCE_DIR / "diagnostic_cards.json").read_text(encoding="utf-8")
+        )
+        triage = next(
+            card
+            for card in package["cards"]
+            if card["id"] == "diagnostic.cross-layer.triage"
+        )
+        validated = self.module.validate_knowledge_package(REFERENCE_DIR)
+
+        self.assertEqual(triage["status"], "routing_only")
+        self.assertEqual(triage["requested_claims"], [])
+        self.assertEqual(triage["observation_rules"]["positive"], [])
+        self.assertNotIn(
+            triage["id"],
+            validated["runtime_candidate_card_ids"],
+        )
+
+    def test_rtx_5090_cards_remain_field_identical(self) -> None:
+        package = json.loads(
+            (REFERENCE_DIR / "diagnostic_cards.json").read_text(encoding="utf-8")
+        )
+        actual = {
+            card["id"]: _canonical_sha256(card)
+            for card in package["cards"]
+            if card["id"].startswith("diagnostic.triton.")
+        }
+        self.assertEqual(actual, RTX_5090_CARD_SHA256)
+
+    def test_all_card_sources_are_verified_official_primary_sources(self) -> None:
+        sources = json.loads(
+            (REFERENCE_DIR / "knowledge_sources.json").read_text(encoding="utf-8")
+        )
+        cards = json.loads(
+            (REFERENCE_DIR / "diagnostic_cards.json").read_text(encoding="utf-8")
+        )
+        by_id = {source["id"]: source for source in sources["sources"]}
+        allowed_hosts = (
+            "https://docs.nvidia.com/",
+            "https://nvidia.github.io/TensorRT-LLM/",
+            "https://triton-lang.org/",
+            "https://docs.pytorch.org/",
+            "https://docs.vllm.ai/",
+        )
+
+        self.assertTrue(by_id)
+        self.assertEqual(len(by_id), len(sources["sources"]))
+        for card in cards["cards"]:
+            for source_id in card["source_ids"]:
+                with self.subTest(card_id=card["id"], source_id=source_id):
+                    self.assertIn(source_id, by_id)
+                    self.assertEqual(by_id[source_id]["status"], "verified")
+                    self.assertEqual(by_id[source_id]["source_kind"], "primary")
+                    self.assertTrue(by_id[source_id]["url"].startswith(allowed_hosts))
+
+    def test_loader_accepts_any_nonempty_unique_source_count(self) -> None:
+        reference_dir = self._copied_references()
+        source_path = reference_dir / "knowledge_sources.json"
+        sources = json.loads(source_path.read_text(encoding="utf-8"))
+        summary = "Defines CUDA release documentation used to test variable source counts."
+        sources["sources"].append(
+            {
+                "id": "nvidia-cuda-release-notes-count-test",
+                "title": "CUDA Toolkit Release Notes",
+                "url": "https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/",
+                "version": "13.x family",
+                "source_kind": "primary",
+                "locator": "Release Notes",
+                "summary": summary,
+                "summary_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+                "last_verified": sources["as_of"],
+                "status": "verified",
+            }
+        )
+        _write_json(source_path, sources)
+
+        result = self.module.validate_knowledge_package(reference_dir)
+
+        self.assertEqual(result["source_count"], len(sources["sources"]))
 
     def _mutated_references(self):
         temporary = tempfile.TemporaryDirectory()

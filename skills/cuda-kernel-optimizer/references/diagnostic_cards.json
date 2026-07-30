@@ -1,6 +1,6 @@
 {
   "schema_version": "cuda-optimizer/diagnostic-cards-v1",
-  "as_of": "2026-07-28",
+  "as_of": "2026-07-30",
   "cards": [
     {
       "id": "diagnostic.cross-layer.triage",
@@ -45,7 +45,7 @@
     },
     {
       "id": "diagnostic.framework.launch-gaps",
-      "mechanism_key": "framework.launch-gaps",
+      "mechanism_key": "framework_launch_fragmentation",
       "status": "routing_only",
       "content_status": "source_verified",
       "requested_claims": [],
@@ -76,8 +76,22 @@
             "comparison": null
           }
         ],
-        "counter": [],
-        "invalidators": []
+        "counter": [{
+          "semantic_id": "runtime.launch_gap_short_context",
+          "statuses": ["absent"],
+          "scope_all": ["cpu-submit", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "runtime.timeline_boundary_ambiguous",
+          "statuses": ["present"],
+          "scope_all": ["cpu-submit", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
       },
       "identity_constraints": {
         "match": "exact_only",
@@ -105,20 +119,41 @@
       "positive_signals": ["repeated CPU-side gaps precede short kernels", "graph or compile breaks align with gaps"],
       "counter_signals": ["GPU kernels occupy the critical path", "gaps disappear without instrumentation"],
       "invalidators": ["trace lacks CPU runtime events", "workload shape distribution changed"],
-      "source_ids": ["nvidia-nsight-systems", "pytorch-compile-profiling"],
+      "source_ids": ["nvidia-nsight-systems", "pytorch-profiler", "pytorch-compile-profiling"],
       "case_ids": [],
-      "last_reviewed": "2026-07-28"
+      "last_reviewed": "2026-07-30"
     },
     {
       "id": "diagnostic.kernel.resource-or-memory",
-      "mechanism_key": "kernel.resource-or-memory",
+      "mechanism_key": "global_memory_transactions",
       "status": "routing_only",
       "content_status": "source_verified",
       "requested_claims": [],
       "observation_rules": {
-        "positive": [],
-        "counter": [],
-        "invalidators": []
+        "positive": [{
+          "semantic_id": "kernel.global_memory_transaction_amplification",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "kernel.global_memory_transaction_amplification",
+          "statuses": ["absent"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "kernel.memory_access_path_unmodeled",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
       },
       "identity_constraints": {
         "match": "exact_only",
@@ -134,32 +169,53 @@
       "priority": 1,
       "match_terms": ["kernel", "gemm", "attention", "norm", "rope", "moe"],
       "applies_when": ["an identity-stable GPU kernel occupies enough observed critical-path time to clear the local minimum-effect floor"],
-      "mechanism": "A hot kernel may be limited by instruction throughput, memory traffic, latency hiding or resource pressure.",
-      "competing_explanations": ["launch-bound workload", "unrepresentative shape", "replay perturbation"],
-      "distinguishing_question": "Which small counter set separates compute, memory, latency and occupancy explanations for the hot range?",
+      "mechanism": "The observed access pattern may require more global-memory transactions than the useful bytes demand.",
+      "competing_explanations": ["redundant useful-data movement", "cache misses", "replay perturbation"],
+      "distinguishing_question": "Do generated addresses and transaction accounting show amplification beyond useful bytes?",
       "preferred_actions": ["ncu-targeted-kernel", "compiler-sass-inspection"],
       "cheapest_falsifier": {
         "action_id": "compiler-sass-inspection",
         "rationale": "Inspect generated code and static resources before paying for counter replay."
       },
-      "required_evidence": ["an identity-bound hot-kernel interval", "stable kernel identity and generated-code evidence"],
-      "positive_signals": ["targeted counters and generated code agree on one mechanism"],
-      "counter_signals": ["kernel has low end-to-end time share", "counter values vary across replay passes"],
-      "invalidators": ["NCU replay is nondeterministic", "target kernel identity changed"],
-      "source_ids": ["nvidia-nsight-compute", "nvidia-cuda-best-practices"],
+      "required_evidence": ["identity-bound transaction accounting", "generated addresses or access widths for the same kernel"],
+      "positive_signals": ["transaction count is amplified relative to useful requested bytes"],
+      "counter_signals": ["transactions match the aligned useful-byte lower bound"],
+      "invalidators": ["kernel identity changed or the access path is unmodeled"],
+      "source_ids": ["nvidia-cuda-programming-guide", "nvidia-cuda-best-practices", "nvidia-nsight-compute", "nvidia-ptx-isa"],
       "case_ids": [],
-      "last_reviewed": "2026-07-28"
+      "last_reviewed": "2026-07-30"
     },
     {
       "id": "diagnostic.cpu-data.starvation",
-      "mechanism_key": "cpu-data.input-starvation",
+      "mechanism_key": "cpu_or_data_pipeline_starvation",
       "status": "routing_only",
       "content_status": "source_verified",
       "requested_claims": [],
       "observation_rules": {
-        "positive": [],
-        "counter": [],
-        "invalidators": []
+        "positive": [{
+          "semantic_id": "runtime.gpu_waiting_for_input",
+          "statuses": ["present"],
+          "scope_all": ["cpu-submit", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "runtime.gpu_waiting_for_input",
+          "statuses": ["absent"],
+          "scope_all": ["cpu-submit", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "runtime.input_workload_changed",
+          "statuses": ["present"],
+          "scope_all": ["cpu-submit", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
       },
       "identity_constraints": {
         "match": "exact_only",
@@ -187,20 +243,41 @@
       "positive_signals": ["preloaded input removes the same GPU idle interval"],
       "counter_signals": ["idle persists with input preparation bypassed"],
       "invalidators": ["preloaded inputs change shape or request distribution"],
-      "source_ids": ["pytorch-profiler"],
+      "source_ids": ["nvidia-nsight-systems", "pytorch-profiler"],
       "case_ids": [],
-      "last_reviewed": "2026-07-28"
+      "last_reviewed": "2026-07-30"
     },
     {
       "id": "diagnostic.transfer.h2d",
-      "mechanism_key": "transfer.host-device-serialization",
+      "mechanism_key": "host_device_transfer_serialization",
       "status": "routing_only",
       "content_status": "source_verified",
       "requested_claims": [],
       "observation_rules": {
-        "positive": [],
-        "counter": [],
-        "invalidators": []
+        "positive": [{
+          "semantic_id": "transfer.h2d_serialized",
+          "statuses": ["present"],
+          "scope_all": ["transfer", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "transfer.h2d_serialized",
+          "statuses": ["absent"],
+          "scope_all": ["transfer", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "transfer.boundary_ambiguous",
+          "statuses": ["present"],
+          "scope_all": ["transfer"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
       },
       "identity_constraints": {
         "match": "exact_only",
@@ -228,20 +305,41 @@
       "positive_signals": ["copy intervals serialize with the hot path and byte counts match the input"],
       "counter_signals": ["copies overlap compute or are outside the critical path"],
       "invalidators": ["copy and kernel correlation IDs are unavailable"],
-      "source_ids": ["nvidia-nsight-systems", "nvidia-cuda-best-practices"],
+      "source_ids": ["nvidia-cuda-programming-guide", "nvidia-cuda-best-practices", "nvidia-nsight-systems"],
       "case_ids": [],
-      "last_reviewed": "2026-07-28"
+      "last_reviewed": "2026-07-30"
     },
     {
       "id": "diagnostic.communication.collective",
-      "mechanism_key": "communication.collective-critical-path",
+      "mechanism_key": "collective_wait_or_rank_skew",
       "status": "routing_only",
       "content_status": "source_verified",
       "requested_claims": [],
       "observation_rules": {
-        "positive": [],
-        "counter": [],
-        "invalidators": []
+        "positive": [{
+          "semantic_id": "communication.rank_arrival_skew",
+          "statuses": ["present"],
+          "scope_all": ["communication", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "communication.rank_arrival_skew",
+          "statuses": ["absent"],
+          "scope_all": ["communication", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "communication.rank_timeline_unaligned",
+          "statuses": ["present"],
+          "scope_all": ["communication"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
       },
       "identity_constraints": {
         "match": "exact_only",
@@ -269,20 +367,41 @@
       "positive_signals": ["collective is on the critical path across ranks"],
       "counter_signals": ["one rank arrives late because of upstream compute"],
       "invalidators": ["rank clocks or trace windows are not aligned"],
-      "source_ids": ["nvidia-nsight-systems"],
+      "source_ids": ["nvidia-nsight-systems", "nvidia-nccl-user-guide", "nvidia-ampere-tuning", "nvidia-hopper-tuning", "nvidia-blackwell-tuning"],
       "case_ids": [],
-      "last_reviewed": "2026-07-28"
+      "last_reviewed": "2026-07-30"
     },
     {
       "id": "diagnostic.io.request-path",
-      "mechanism_key": "io.request-path",
+      "mechanism_key": "serving_scheduling_or_request_path",
       "status": "routing_only",
       "content_status": "source_verified",
       "requested_claims": [],
       "observation_rules": {
-        "positive": [],
-        "counter": [],
-        "invalidators": []
+        "positive": [{
+          "semantic_id": "serving.queue_or_request_path_dominant",
+          "statuses": ["present"],
+          "scope_all": ["request", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "serving.queue_or_request_path_dominant",
+          "statuses": ["absent"],
+          "scope_all": ["request", "gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "serving.request_corpus_changed",
+          "statuses": ["present"],
+          "scope_all": ["request"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
       },
       "identity_constraints": {
         "match": "exact_only",
@@ -310,9 +429,381 @@
       "positive_signals": ["component timing explains the endpoint latency gap"],
       "counter_signals": ["request-path time is overlapped or outside the critical path"],
       "invalidators": ["request corpus or load changed between observations"],
-      "source_ids": ["nvidia-nsight-systems"],
+      "source_ids": ["nvidia-nsight-systems", "vllm-optimization", "tensorrt-llm-performance"],
       "case_ids": [],
-      "last_reviewed": "2026-07-28"
+      "last_reviewed": "2026-07-30"
+    },
+    {
+      "id": "diagnostic.kernel.redundant-dram-traffic",
+      "mechanism_key": "redundant_dram_traffic",
+      "status": "routing_only",
+      "content_status": "source_verified",
+      "requested_claims": [],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "kernel.redundant_dram_traffic",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "kernel.redundant_dram_traffic",
+          "statuses": ["absent"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "kernel.dram_byte_lower_bound_unavailable",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu"],
+      "priority": 1,
+      "match_terms": ["dram", "cache", "fusion", "materialization"],
+      "applies_when": ["identity-bound traffic exceeds the workload byte lower bound or intermediates are materialized off chip"],
+      "mechanism": "Insufficient reuse or intermediate materialization may move the same useful data through DRAM repeatedly.",
+      "competing_explanations": ["transaction amplification", "compulsory traffic", "measurement replay variation"],
+      "distinguishing_question": "Does a byte-flow lower bound explain less traffic than the measured or generated path?",
+      "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Account for loads, stores, and materialized intermediates before collecting replay counters."
+      },
+      "required_evidence": ["identity-bound byte-flow lower bound", "generated or measured memory traffic for the same path"],
+      "positive_signals": ["the path reloads reusable data or writes an avoidable intermediate"],
+      "counter_signals": ["observed traffic is consistent with compulsory input and output bytes"],
+      "invalidators": ["the workload byte lower bound or kernel identity is unavailable"],
+      "source_ids": ["nvidia-cuda-best-practices", "nvidia-nsight-compute", "triton-tutorials", "nvidia-cutlass"],
+      "case_ids": [],
+      "last_reviewed": "2026-07-30"
+    },
+    {
+      "id": "diagnostic.kernel.memory-latency-hiding",
+      "mechanism_key": "memory_latency_hiding",
+      "status": "routing_only",
+      "content_status": "source_verified",
+      "requested_claims": [],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "kernel.memory_latency_hiding_insufficient",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "kernel.memory_latency_hiding_insufficient",
+          "statuses": ["absent"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "kernel.warp_stall_mapping_unmodeled",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu"],
+      "priority": 1,
+      "match_terms": ["latency", "scoreboard", "eligible warp", "pipeline"],
+      "applies_when": ["validated stall and scheduler observations indicate memory dependencies leave too few eligible warps"],
+      "mechanism": "Outstanding memory latency may not be covered by independent work or sufficient resident warps.",
+      "competing_explanations": ["memory bandwidth saturation", "resource-limited residency", "synchronization wait"],
+      "distinguishing_question": "Do scheduler eligibility and dependency stalls remain limiting when bandwidth is not saturated?",
+      "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Inspect dependency distance and asynchronous movement before requesting focused scheduler counters."
+      },
+      "required_evidence": ["version-mapped scheduler and stall semantics", "generated dependency path for the same kernel"],
+      "positive_signals": ["memory-dependency stalls coincide with low scheduler eligibility"],
+      "counter_signals": ["bandwidth or synchronization explains the same stalled interval"],
+      "invalidators": ["the profiler version has no verified stall-semantic mapping"],
+      "source_ids": ["nvidia-cuda-best-practices", "nvidia-nsight-compute", "triton-language-range", "nvidia-cutlass", "nvidia-ampere-tuning", "nvidia-hopper-tuning", "nvidia-blackwell-tuning"],
+      "case_ids": [],
+      "last_reviewed": "2026-07-30"
+    },
+    {
+      "id": "diagnostic.kernel.register-or-shared-pressure",
+      "mechanism_key": "register_or_shared_pressure",
+      "status": "routing_only",
+      "content_status": "source_verified",
+      "requested_claims": [],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "kernel.register_or_shared_pressure",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "kernel.register_or_shared_pressure",
+          "statuses": ["absent"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "kernel.static_resource_identity_mismatch",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu"],
+      "priority": 1,
+      "match_terms": ["register", "spill", "shared memory", "occupancy"],
+      "applies_when": ["static resources or spills limit residency for the exact generated kernel"],
+      "mechanism": "Register allocation, local-memory spills, or shared-memory use may constrain useful residency.",
+      "competing_explanations": ["latency is already hidden", "grid parallelism is insufficient", "occupancy is not performance limiting"],
+      "distinguishing_question": "Which exact static resource constrains residency, and does the critical path require more residency?",
+      "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Read exact registers, spills, and shared-memory use from the generated artifact before replay."
+      },
+      "required_evidence": ["generated-artifact resource accounting", "exact architecture and kernel identity"],
+      "positive_signals": ["one static resource or spilling constrains residency on the observed path"],
+      "counter_signals": ["resources permit residency and more occupancy would not cover the observed limiter"],
+      "invalidators": ["resource accounting belongs to a different binary or architecture"],
+      "source_ids": ["nvidia-cuda-programming-guide", "nvidia-cuda-best-practices", "nvidia-nsight-compute", "nvidia-ampere-tuning", "nvidia-hopper-tuning", "nvidia-blackwell-tuning"],
+      "case_ids": [],
+      "last_reviewed": "2026-07-30"
+    },
+    {
+      "id": "diagnostic.kernel.parallelism-or-wave-tail",
+      "mechanism_key": "parallelism_or_wave_tail",
+      "status": "routing_only",
+      "content_status": "source_verified",
+      "requested_claims": [],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "kernel.parallelism_or_wave_tail",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "kernel.parallelism_or_wave_tail",
+          "statuses": ["absent"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "kernel.launch_shape_unavailable",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu"],
+      "priority": 1,
+      "match_terms": ["grid", "parallelism", "wave tail", "sm utilization"],
+      "applies_when": ["the exact launch shape leaves SMs unused or a partial final wave occupies the critical interval"],
+      "mechanism": "The available work may not distribute evenly enough to keep the device busy through the kernel tail.",
+      "competing_explanations": ["resource-limited residency", "load imbalance inside blocks", "short-kernel launch overhead"],
+      "distinguishing_question": "Does launch geometry account for idle SM capacity after resource limits are included?",
+      "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Check exact launch metadata and static resource limits before collecting wave metrics."
+      },
+      "required_evidence": ["exact launch geometry", "device SM count and generated-kernel resource identity"],
+      "positive_signals": ["grid coverage or the final wave leaves observed device capacity idle"],
+      "counter_signals": ["the grid supplies enough resident work and another limiter explains utilization"],
+      "invalidators": ["launch geometry or exact device identity is unavailable"],
+      "source_ids": ["nvidia-cuda-best-practices", "nvidia-nsight-compute", "triton-tutorials", "nvidia-cutlass", "nvidia-ampere-tuning", "nvidia-hopper-tuning", "nvidia-blackwell-tuning"],
+      "case_ids": [],
+      "last_reviewed": "2026-07-30"
+    },
+    {
+      "id": "diagnostic.kernel.compute-pipeline-or-dtype",
+      "mechanism_key": "compute_pipeline_or_dtype",
+      "status": "routing_only",
+      "content_status": "source_verified",
+      "requested_claims": [],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "kernel.compute_pipeline_or_dtype_mismatch",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "kernel.compute_pipeline_or_dtype_mismatch",
+          "statuses": ["absent"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "kernel.precision_contract_unavailable",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu"],
+      "priority": 1,
+      "match_terms": ["dtype", "tensor core", "instruction pipe", "precision"],
+      "applies_when": ["generated instructions and validated pipe observations disagree with the workload precision contract"],
+      "mechanism": "The generated arithmetic path may use a different instruction pipeline or data type than the workload permits and expects.",
+      "competing_explanations": ["memory limitation", "unsupported architecture capability", "precision conversion outside the hot kernel"],
+      "distinguishing_question": "Does the generated instruction and conversion path match the exact precision contract and architecture facts?",
+      "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Compare generated arithmetic and conversion instructions with the precision contract."
+      },
+      "required_evidence": ["exact precision contract", "generated instructions bound to the current architecture and binary"],
+      "positive_signals": ["the actual arithmetic or conversion path differs from the permitted target path"],
+      "counter_signals": ["generated instructions match the precision contract and observed compute pipe"],
+      "invalidators": ["precision requirements or exact architecture capability is unknown"],
+      "source_ids": ["nvidia-ptx-isa", "nvidia-nsight-compute", "nvidia-cutlass", "nvidia-ampere-tuning", "nvidia-hopper-tuning", "nvidia-blackwell-tuning"],
+      "case_ids": [],
+      "last_reviewed": "2026-07-30"
+    },
+    {
+      "id": "diagnostic.kernel.synchronization-or-atomic",
+      "mechanism_key": "synchronization_or_atomic_contention",
+      "status": "routing_only",
+      "content_status": "source_verified",
+      "requested_claims": [],
+      "observation_rules": {
+        "positive": [{
+          "semantic_id": "kernel.synchronization_or_atomic_contention",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "counter": [{
+          "semantic_id": "kernel.synchronization_or_atomic_contention",
+          "statuses": ["absent"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }],
+        "invalidators": [{
+          "semantic_id": "kernel.dependency_scope_unavailable",
+          "statuses": ["present"],
+          "scope_all": ["gpu-kernel"],
+          "unit": "state",
+          "aggregation": "presence",
+          "comparison": null
+        }]
+      },
+      "identity_constraints": {
+        "match": "exact_only",
+        "gpu_architecture": [],
+        "driver_version": [],
+        "cuda_runtime_version": [],
+        "framework_versions": {},
+        "compiler_versions": {},
+        "profiler_versions": {}
+      },
+      "categories": ["kernel"],
+      "execution_layers": ["gpu", "synchronization"],
+      "priority": 1,
+      "match_terms": ["barrier", "membar", "atomic", "contention"],
+      "applies_when": ["validated barrier or atomic observations align with the hot kernel dependency path"],
+      "mechanism": "A synchronization scope or contended atomic update may serialize otherwise parallel work.",
+      "competing_explanations": ["memory dependency latency", "load imbalance", "required correctness ordering"],
+      "distinguishing_question": "Which dependency requires the observed barrier or atomic scope, and is contention visible on that path?",
+      "preferred_actions": ["compiler-sass-inspection", "ncu-targeted-kernel"],
+      "cheapest_falsifier": {
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Map synchronization and atomic instructions to required dependencies before counter replay."
+      },
+      "required_evidence": ["generated synchronization or atomic instructions", "source dependency and correctness scope"],
+      "positive_signals": ["the same synchronization or atomic site accounts for validated waiting or contention"],
+      "counter_signals": ["the operation is uncontended or required ordering is not on the critical path"],
+      "invalidators": ["dependency scope or generated-code identity is unavailable"],
+      "source_ids": ["nvidia-cuda-programming-guide", "nvidia-ptx-isa", "nvidia-nsight-compute"],
+      "case_ids": [],
+      "last_reviewed": "2026-07-30"
     },
     {
       "id": "diagnostic.triton.nms-fp32-output-store",
