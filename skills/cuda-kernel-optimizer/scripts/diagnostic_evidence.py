@@ -61,6 +61,37 @@ def _ncu_major_minor(tool_version: Any) -> str | None:
     return match.group(1) if match is not None else None
 
 
+def _ncu_metric_value(raw: Any) -> tuple[float | None, str | None, str | None]:
+    if isinstance(raw, Mapping):
+        value = raw.get("value")
+        units = raw.get("sample_units")
+        if type(units) is not list or not units:
+            return None, None, "missing_unit"
+        if any(type(unit) is not str or not unit.strip() for unit in units):
+            return None, None, "missing_unit"
+        unique_units = set(units)
+        if len(unique_units) != 1:
+            return None, None, "inconsistent_units"
+        unit = next(iter(unique_units))
+        invalid_samples = raw.get("invalid_value_samples", 0)
+        if type(invalid_samples) is not int or invalid_samples < 0:
+            return None, None, "invalid_metric_value"
+        if invalid_samples:
+            return None, None, "invalid_metric_value"
+    elif type(raw) in {tuple, list} and len(raw) == 2:
+        value, unit = raw
+        if type(unit) is not str or not unit.strip():
+            return None, None, "missing_unit"
+    else:
+        return None, None, "invalid_metric_value"
+
+    if type(value) not in {int, float}:
+        return None, None, "invalid_metric_value"
+    if not math.isfinite(value):
+        return None, None, "non_finite_value"
+    return float(value), unit, None
+
+
 def normalize_ncu_metrics(metrics: Mapping[str, Any], tool_version: str) -> dict:
     """Map versioned raw NCU metrics to stable routing-only observations."""
     if not isinstance(metrics, Mapping):
@@ -93,41 +124,19 @@ def normalize_ncu_metrics(metrics: Mapping[str, Any], tool_version: str) -> dict
             )
             continue
         semantic_id = rule["semantic_id"]
-        raw = metrics[metric_name]
-        if type(raw) not in {tuple, list} or len(raw) != 2:
+        value, unit, reason = _ncu_metric_value(metrics[metric_name])
+        if reason is not None:
             invalid_semantics.add(semantic_id)
-            unmodeled.append(
-                {"metric_name": metric_name, "reason": "invalid_metric_value"}
-            )
-            continue
-        value, unit = raw
-        if (
-            type(value) not in {int, float}
-            or not math.isfinite(value)
-        ):
-            invalid_semantics.add(semantic_id)
-            reason = (
-                "non_finite_value"
-                if type(value) in {int, float}
-                else "invalid_metric_value"
-            )
             unmodeled.append({"metric_name": metric_name, "reason": reason})
             continue
-        if type(unit) is not str or not unit.strip():
-            invalid_semantics.add(semantic_id)
-            unmodeled.append(
-                {"metric_name": metric_name, "reason": "missing_unit"}
-            )
-            continue
+        assert value is not None and unit is not None
         if unit != rule["unit"]:
             invalid_semantics.add(semantic_id)
             unmodeled.append(
                 {"metric_name": metric_name, "reason": "unexpected_unit"}
             )
             continue
-        candidates.setdefault(semantic_id, []).append(
-            (metric_name, float(value), unit)
-        )
+        candidates.setdefault(semantic_id, []).append((metric_name, value, unit))
 
     observations = []
     for semantic_id in sorted(candidates):

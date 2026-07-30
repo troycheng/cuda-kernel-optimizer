@@ -333,21 +333,40 @@ def _aggregate_across_kernels(rows: list[dict]) -> dict[str, dict]:
         name = r.get("Metric Name")
         if not name:
             continue
-        v = _to_float(r.get("Metric Value", ""))
         unit = r.get("Metric Unit", "")
-        if v is None:
-            continue
-        a = agg.setdefault(name, {"sum": 0.0, "n": 0, "unit": unit, "kernels": set()})
-        a["sum"] += v
-        a["n"] += 1
+        a = agg.setdefault(
+            name,
+            {
+                "sum": 0.0,
+                "numeric_samples": 0,
+                "invalid_value_samples": 0,
+                "sample_units": [],
+                "kernels": set(),
+            },
+        )
+        a["sample_units"].append(unit)
         if r.get("Kernel Name"):
             a["kernels"].add(r["Kernel Name"])
+        v = _to_float(r.get("Metric Value", ""))
+        if v is None:
+            a["invalid_value_samples"] += 1
+            continue
+        a["sum"] += v
+        a["numeric_samples"] += 1
     out = {}
     for name, a in agg.items():
+        sample_units = sorted(a["sample_units"])
+        unique_units = set(sample_units)
         out[name] = {
-            "value": a["sum"] / a["n"] if a["n"] else None,
-            "unit": a["unit"],
-            "samples": a["n"],
+            "value": (
+                a["sum"] / a["numeric_samples"]
+                if a["numeric_samples"]
+                else None
+            ),
+            "unit": sample_units[0] if len(unique_units) == 1 else None,
+            "sample_units": sample_units,
+            "samples": len(sample_units),
+            "invalid_value_samples": a["invalid_value_samples"],
             "kernels": sorted(a["kernels"]),
         }
     return out
@@ -360,11 +379,24 @@ def _semantic_ncu_observations(
 ) -> dict:
     rows = _parse_ncu_csv(csv_text, kernel_name_hints=kernel_name_hints)
     aggregate = _aggregate_across_kernels(rows)
-    metrics = {
-        name: (info.get("value"), info.get("unit"))
-        for name, info in aggregate.items()
-    }
-    return diagnostic_evidence.normalize_ncu_metrics(metrics, tool_version)
+    return diagnostic_evidence.normalize_ncu_metrics(aggregate, tool_version)
+
+
+def _query_ncu_version(ncu_bin: str, timeout: float = 5.0) -> str | None:
+    try:
+        result = subprocess.run(
+            [ncu_bin, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return diagnostic_evidence._ncu_major_minor(result.stdout)
 
 
 def _build_profile_command(
@@ -632,6 +664,8 @@ def main() -> None:
         print(json.dumps({"degraded": True, "reason": top["reason"]}, indent=2))
         return
 
+    tool_version = _query_ncu_version(ncu_bin)
+
     # 1) collect
     rc, log = _run_ncu_profile(
         ncu_bin=ncu_bin,
@@ -691,11 +725,8 @@ def main() -> None:
     agg = _aggregate_across_kernels(rows)
     by_axis = _rank_by_axis(agg, state.get("ncu_num", 5))
     semantics = diagnostic_evidence.normalize_ncu_metrics(
-        {
-            name: (info.get("value"), info.get("unit"))
-            for name, info in agg.items()
-        },
-        ncu_info.get("version") if isinstance(ncu_info, dict) else None,
+        agg,
+        tool_version,
     )
 
     top = {

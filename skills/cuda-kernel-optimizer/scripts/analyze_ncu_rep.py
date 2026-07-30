@@ -262,13 +262,7 @@ def _analyze_csv(
     """Normalize and rank imported CSV through the optimizer's shared rubric."""
     rows = profile_ncu._parse_ncu_csv(csv_text)
     aggregate = profile_ncu._aggregate_across_kernels(rows)
-    semantics = diagnostic_evidence.normalize_ncu_metrics(
-        {
-            name: (info.get("value"), info.get("unit"))
-            for name, info in aggregate.items()
-        },
-        tool_version,
-    )
+    semantics = diagnostic_evidence.normalize_ncu_metrics(aggregate, tool_version)
     aggregate = {
         name: info
         for name, info in aggregate.items()
@@ -423,17 +417,22 @@ def _run_analysis(args: argparse.Namespace) -> int:
             tool_version=version_result["stdout"] if version_available else None,
         )
     )
-    available["raw"] = available["raw"] and csv_analysis["metric_count"] > 0
+    raw_metrics_interpretable = csv_analysis["metric_count"] > 0
     for name, result in results.items():
         commands[name] = _command_result(result, available=available[name])
 
-    interpretable = available["summary"] or available["details"] or available["raw"]
+    interpretable = (
+        available["summary"]
+        or available["details"]
+        or raw_metrics_interpretable
+    )
     if not interpretable:
         raise RuntimeError("all NCU report imports failed or were uninterpretable")
     complete = (
         version_available
         and all(results[name]["returncode"] == 0 for name in results)
         and all(available.values())
+        and raw_metrics_interpretable
         and not version_result["truncated"]
         and not any(result["truncated"] for result in results.values())
     )

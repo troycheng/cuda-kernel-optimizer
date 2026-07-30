@@ -481,17 +481,24 @@ class AnalyzeNcuRepImportTests(unittest.TestCase):
         )
         expected_rows = profile._parse_ncu_csv(long_csv)
         expected_agg = profile._aggregate_across_kernels(expected_rows)
-        expected_rankings = profile._rank_by_axis(expected_agg, 3)
+        expected_rankable = {
+            name: info
+            for name, info in expected_agg.items()
+            if isinstance(info.get("value"), (int, float))
+            and not isinstance(info.get("value"), bool)
+            and math.isfinite(float(info["value"]))
+        }
+        expected_rankings = profile._rank_by_axis(expected_rankable, 3)
         with mock.patch.object(profile, "_parse_ncu_csv", wraps=profile._parse_ncu_csv) as parse, mock.patch.object(
             profile, "_aggregate_across_kernels", wraps=profile._aggregate_across_kernels
         ) as aggregate, mock.patch.object(profile, "_rank_by_axis", wraps=profile._rank_by_axis) as rank:
             result = module._analyze_csv(long_csv, 3)
         parse.assert_called_once_with(long_csv)
         aggregate.assert_called_once_with(expected_rows)
-        rank.assert_called_once_with(expected_agg, 3)
+        rank.assert_called_once_with(expected_rankable, 3)
         self.assertEqual(result["rankings"], expected_rankings)
         self.assertEqual(result["kernels"], ["kernel-a", "kernel-b"])
-        self.assertEqual(result["metric_count"], len(expected_agg))
+        self.assertEqual(result["metric_count"], len(expected_rankable))
         self.assertEqual(result["primary_axis"]["quality"], "heuristic")
 
     def test_wide_csv_and_unclassified_csv_use_profile_behavior(self) -> None:
@@ -698,6 +705,60 @@ class AnalyzeNcuRepImportTests(unittest.TestCase):
         self.assertNotIn(": NaN", encoded)
         self.assertNotIn(": Infinity", encoded)
         self.assertNotIn(": -Infinity", encoded)
+
+    def test_nonempty_raw_import_is_preserved_when_metrics_are_uninterpretable(self) -> None:
+        module = _load()
+        raws = [
+            (
+                '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
+                '"kernel","dram__throughput.avg.pct_of_peak_sustained_elapsed","%","NaN"\n'
+            ),
+            (
+                '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
+                '"kernel","dram__throughput.avg.pct_of_peak_sustained_elapsed","%","invalid"\n'
+            ),
+        ]
+        for raw in raws:
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                report = root / "input.ncu-rep"
+                report.write_bytes(b"report")
+                output = root / "analysis"
+                ncu = _fake_ncu(root)
+                result = {
+                    "timed_out": False,
+                    "truncated": False,
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                }
+                responses = [
+                    {**result, "stdout": "NVIDIA Nsight Compute 2026.2"},
+                    {**result, "stdout": "summary"},
+                    {**result, "stdout": "details"},
+                    {**result, "stdout": raw},
+                ]
+                with mock.patch.object(
+                    module, "_run_bounded", side_effect=responses
+                ):
+                    returncode = module.main(
+                        [
+                            str(report),
+                            "--out-dir",
+                            str(output),
+                            "--ncu-bin",
+                            str(ncu),
+                        ]
+                    )
+                payload = json.loads(
+                    (output / "analysis.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(returncode, 2)
+                self.assertEqual(
+                    (output / "raw.csv").read_text(encoding="utf-8"), raw
+                )
+                self.assertTrue(payload["commands"]["raw"]["available"])
+                self.assertTrue(payload["artifacts"]["raw.csv"]["available"])
 
     def test_whitespace_only_imports_are_unavailable_and_do_not_publish_marker(self) -> None:
         module = _load()

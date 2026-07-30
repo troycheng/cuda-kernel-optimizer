@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -156,6 +157,147 @@ class ProfileNcuTests(unittest.TestCase):
             result["unmodeled_metrics"],
             [{"metric_name": "unknown__metric", "reason": "unknown_metric"}],
         )
+
+    def test_profile_main_uses_actual_ncu_version_not_state_snapshot(self) -> None:
+        profile_ncu = _load("profile_ncu")
+        csv_text = (
+            '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
+            '"target","dram__throughput.avg.pct_of_peak_sustained_elapsed","%","75"\n'
+        )
+        cases = [
+            ("2026.3", "2026.2", ["kernel.dram_throughput_pct"]),
+            ("2026.2", "2026.3", []),
+        ]
+        for state_version, actual_version, expected_ids in cases:
+            with self.subTest(
+                state_version=state_version, actual_version=actual_version
+            ), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                solution = root / "kernel.py"
+                solution.write_text("def solve(): pass\n", encoding="utf-8")
+                ncu = root / "ncu"
+                ncu.write_text(
+                    "#!/bin/sh\n"
+                    f"printf 'NVIDIA Nsight Compute {actual_version}\\n'\n",
+                    encoding="utf-8",
+                )
+                ncu.chmod(0o700)
+                state_path = root / "state.json"
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "run_dir": str(root),
+                            "best_file": str(solution),
+                            "dims": {},
+                            "ptr_size": 0,
+                            "ncu_num": 5,
+                            "env": {
+                                "ncu": {
+                                    "available": True,
+                                    "path": str(ncu),
+                                    "version": state_version,
+                                }
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                def profile(**kwargs):
+                    Path(kwargs["rep_path"]).write_bytes(b"report")
+                    return 0, "profiled"
+
+                argv = [
+                    "profile_ncu.py",
+                    "--state",
+                    str(state_path),
+                    "--iter",
+                    "1",
+                    "--which",
+                    "best_input",
+                ]
+                with mock.patch.object(
+                    profile_ncu, "_run_ncu_profile", side_effect=profile
+                ), mock.patch.object(
+                    profile_ncu,
+                    "_import_metrics_csv",
+                    return_value=(0, csv_text, ""),
+                ), mock.patch.object(profile_ncu.sys, "argv", argv):
+                    profile_ncu.main()
+
+                result = json.loads(
+                    (root / "iterv1" / "ncu_top.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    [
+                        item["semantic_id"]
+                        for item in result["semantic_observations"]
+                    ],
+                    expected_ids,
+                )
+
+    def test_ncu_version_query_timeout_returns_none(self) -> None:
+        profile_ncu = _load("profile_ncu")
+        with mock.patch.object(
+            profile_ncu.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["ncu", "--version"], 2),
+        ) as run:
+            self.assertIsNone(profile_ncu._query_ncu_version("ncu", timeout=2))
+        run.assert_called_once_with(
+            ["ncu", "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2,
+        )
+
+    def test_all_metric_sample_units_fail_closed_independent_of_row_order(self) -> None:
+        profile_ncu = _load("profile_ncu")
+        metric = "dram__throughput.avg.pct_of_peak_sustained_elapsed"
+        cases = [
+            (("%", ""), "missing_unit"),
+            (("", "%"), "missing_unit"),
+            (("%", "percent"), "inconsistent_units"),
+            (("percent", "%"), "inconsistent_units"),
+        ]
+        for units, reason in cases:
+            with self.subTest(units=units, reason=reason):
+                text = (
+                    '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
+                    f'"kernel-a","{metric}","{units[0]}","70"\n'
+                    f'"kernel-b","{metric}","{units[1]}","80"\n'
+                )
+                result = profile_ncu._semantic_ncu_observations(text, "2026.2")
+                self.assertEqual(result["semantic_observations"], [])
+                self.assertEqual(
+                    result["unmodeled_metrics"],
+                    [{"metric_name": metric, "reason": reason}],
+                )
+
+    def test_invalid_value_sample_cannot_hide_its_unit_failure(self) -> None:
+        profile_ncu = _load("profile_ncu")
+        metric = "dram__throughput.avg.pct_of_peak_sustained_elapsed"
+        cases = [
+            ((("%", "70"), ("", "invalid")), "missing_unit"),
+            ((("", "invalid"), ("%", "70")), "missing_unit"),
+            ((("%", "70"), ("percent", "invalid")), "inconsistent_units"),
+            ((("percent", "invalid"), ("%", "70")), "inconsistent_units"),
+        ]
+        for samples, reason in cases:
+            with self.subTest(samples=samples, reason=reason):
+                text = (
+                    '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
+                    f'"kernel-a","{metric}","{samples[0][0]}","{samples[0][1]}"\n'
+                    f'"kernel-b","{metric}","{samples[1][0]}","{samples[1][1]}"\n'
+                )
+                result = profile_ncu._semantic_ncu_observations(text, "2026.2")
+                self.assertEqual(result["semantic_observations"], [])
+                self.assertEqual(
+                    result["unmodeled_metrics"],
+                    [{"metric_name": metric, "reason": reason}],
+                )
 
 
 if __name__ == "__main__":
