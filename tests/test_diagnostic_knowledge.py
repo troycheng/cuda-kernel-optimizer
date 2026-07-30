@@ -1099,7 +1099,7 @@ class DiagnosticKnowledgeTests(unittest.TestCase):
                     [semantic_id],
                 )
 
-    def test_package_rejects_positive_semantic_without_a_trusted_producer(
+    def test_package_rejects_positive_semantic_outside_declared_vocabulary(
         self,
     ) -> None:
         reference_dir = self._copied_references()

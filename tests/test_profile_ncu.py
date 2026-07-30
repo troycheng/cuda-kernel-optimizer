@@ -158,7 +158,7 @@ class ProfileNcuTests(unittest.TestCase):
             [{"metric_name": "unknown__metric", "reason": "unknown_metric"}],
         )
 
-    def test_real_profile_csv_covers_all_kernel_card_positive_semantics(self) -> None:
+    def test_real_profile_csv_preserves_all_stable_raw_kernel_semantics(self) -> None:
         profile_ncu = _load("profile_ncu")
         rows = [
             ("dram__bytes.sum", "byte", "4096"),
