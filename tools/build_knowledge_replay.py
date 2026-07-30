@@ -57,42 +57,70 @@ def canonical_sha256(value: object) -> str:
     ).hexdigest()
 
 
-def _validate_controller_source_identity(
-    value: object,
-    *,
-    verify_commit: bool = False,
-) -> dict:
+def _controller_source_identity(value: object) -> dict:
     required = {"source_repo_head", *_CONTROLLER_SOURCE_FILES}
     if type(value) is not dict or set(value) != required:
         raise ValueError("Controller source-state fields are invalid")
     source = copy.deepcopy(value)
     if re.fullmatch(r"[0-9a-f]{40}", source["source_repo_head"]) is None:
         raise ValueError("Controller source-state commit is invalid")
-    for field, path in _CONTROLLER_SOURCE_FILES.items():
+    for field in _CONTROLLER_SOURCE_FILES:
         digest = source[field]
         if type(digest) is not str or _SHA256.fullmatch(digest) is None:
             raise ValueError("Controller source-state digest is invalid")
-        if verify_commit:
-            relative_path = path.relative_to(ROOT).as_posix()
-            result = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(ROOT),
-                    "show",
-                    f"{source['source_repo_head']}:{relative_path}",
-                ],
-                check=False,
-                capture_output=True,
+    return source
+
+
+def _current_repo_head() -> str:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    head = result.stdout.strip()
+    if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        raise ValueError("Current controller source commit is unavailable")
+    return head
+
+
+def _controller_file_at_commit(commit: str, path: Path) -> bytes:
+    relative_path = path.relative_to(ROOT).as_posix()
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{commit}:{relative_path}"],
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise ValueError("Controller source commit is unavailable")
+    return result.stdout
+
+
+def validate_historical_controller_source_identity(value: object) -> dict:
+    """Verify recorded digests against the files at the recorded commit."""
+    source = _controller_source_identity(value)
+    for field, path in _CONTROLLER_SOURCE_FILES.items():
+        recorded = _controller_file_at_commit(source["source_repo_head"], path)
+        if hashlib.sha256(recorded).hexdigest() != source[field]:
+            raise ValueError(
+                "Controller source commit does not reproduce recorded files"
             )
-            if result.returncode != 0:
-                raise ValueError("Controller source commit is unavailable")
-            if hashlib.sha256(result.stdout).hexdigest() != digest:
-                raise ValueError(
-                    "Controller source commit does not reproduce recorded files"
-                )
-        elif digest != hashlib.sha256(path.read_bytes()).hexdigest():
+    return source
+
+
+def validate_current_controller_source_identity(value: object) -> dict:
+    """Require current files and current HEAD to reproduce the same identity."""
+    source = _controller_source_identity(value)
+    current_head = _current_repo_head()
+    if source["source_repo_head"] != current_head:
+        raise ValueError("Controller source-state commit is not current HEAD")
+    for field, path in _CONTROLLER_SOURCE_FILES.items():
+        digest = source[field]
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise ValueError("Controller source-state digest is invalid")
+        committed = _controller_file_at_commit(current_head, path)
+        if hashlib.sha256(committed).hexdigest() != digest:
+            raise ValueError("Current HEAD does not reproduce controller source files")
     return source
 
 
@@ -104,7 +132,7 @@ def _load_controller_source_identity(run_root: Path) -> dict:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError("Controller source-state.json is invalid") from error
-    return _validate_controller_source_identity(value)
+    return validate_current_controller_source_identity(value)
 
 
 def _load_v1_2_router_snapshot() -> dict:
@@ -731,7 +759,7 @@ def extract_scoreable_controller_case(run_dir: Path, label_path: Path) -> dict:
         "v1_2_card_to_mechanism": copy.deepcopy(_V1_2_CARD_TO_MECHANISM),
         "label": label,
     }
-    validate_scoreable_case(case, verify_source_commit=False)
+    validate_scoreable_case(case)
     return case
 
 
@@ -911,7 +939,6 @@ def _validate_controller_replay_case(
     case: dict,
     *,
     eligibility_status: str,
-    verify_source_commit: bool = False,
 ) -> None:
     if type(case) is not dict or case.get("scoring_group") != "triton":
         raise ValueError("scoreable case must belong to the Triton scoring group")
@@ -1027,10 +1054,7 @@ def _validate_controller_replay_case(
     )
     if eligibility_status == "scoreable" or source_identity is not None:
         try:
-            _validate_controller_source_identity(
-                source_identity,
-                verify_commit=verify_source_commit,
-            )
+            validate_historical_controller_source_identity(source_identity)
         except ValueError as error:
             raise ValueError(
                 f"{eligibility_status} controller source identity drifted: {error}"
@@ -1085,32 +1109,10 @@ def _validate_controller_replay_case(
             raise ValueError("scoreable timing provenance value drifted")
 
 
-def validate_scoreable_case(
-    case: dict,
-    *,
-    verify_source_commit: bool | None = None,
-) -> None:
-    if verify_source_commit is None:
-        source_identity = (
-            case.get("input_snapshot", {})
-            .get("archive_identity_facts", {})
-            .get("controller_source_identity", {})
-        )
-        result = subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise ValueError("Current controller source commit is unavailable")
-        verify_source_commit = (
-            source_identity.get("source_repo_head") != result.stdout.strip()
-        )
+def validate_scoreable_case(case: dict) -> None:
     _validate_controller_replay_case(
         case,
         eligibility_status="scoreable",
-        verify_source_commit=verify_source_commit,
     )
 
 

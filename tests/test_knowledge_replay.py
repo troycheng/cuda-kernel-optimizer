@@ -452,6 +452,80 @@ class KnowledgeReplayTest(unittest.TestCase):
             self.assertTrue(baseline["next_actions"])
             self.assertRegex(baseline["route_output_sha256"], r"[0-9a-f]{64}\Z")
 
+    def test_extractor_runs_current_then_historical_source_validation(self):
+        calls = []
+        current_impl = (
+            build_knowledge_replay.validate_current_controller_source_identity
+        )
+        historical_impl = (
+            build_knowledge_replay.validate_historical_controller_source_identity
+        )
+
+        def current(value):
+            calls.append("current")
+            return current_impl(value)
+
+        def historical(value):
+            calls.append("historical")
+            return historical_impl(value)
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            build_knowledge_replay,
+            "validate_current_controller_source_identity",
+            side_effect=current,
+        ), mock.patch.object(
+            build_knowledge_replay,
+            "validate_historical_controller_source_identity",
+            side_effect=historical,
+        ):
+            self._scoreable_controller_case(Path(directory).resolve())
+
+        self.assertIn("current", calls)
+        self.assertIn("historical", calls)
+        self.assertLess(calls.index("current"), calls.index("historical"))
+
+    def test_scoreable_case_has_no_current_file_validation_bypass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, _outcome_path, _label_path = self._scoreable_controller_case(
+                Path(directory).resolve()
+            )
+            with self.assertRaises(TypeError):
+                build_knowledge_replay.validate_scoreable_case(
+                    case,
+                    verify_source_commit=False,
+                )
+
+    def test_current_source_identity_requires_current_reproducible_head(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, _outcome_path, _label_path = self._scoreable_controller_case(
+                Path(directory).resolve()
+            )
+            source = case["input_snapshot"]["archive_identity_facts"][
+                "controller_source_identity"
+            ]
+            wrong_head = copy.deepcopy(source)
+            wrong_head["source_repo_head"] = "1" * 40
+            with self.assertRaisesRegex(ValueError, "current HEAD"):
+                build_knowledge_replay.validate_current_controller_source_identity(
+                    wrong_head
+                )
+
+            real_run = subprocess.run
+
+            def corrupt_show(args, **kwargs):
+                if "show" in args:
+                    return subprocess.CompletedProcess(args, 0, stdout=b"drifted")
+                return real_run(args, **kwargs)
+
+            with mock.patch.object(
+                build_knowledge_replay.subprocess,
+                "run",
+                side_effect=corrupt_show,
+            ), self.assertRaisesRegex(ValueError, "HEAD does not reproduce"):
+                build_knowledge_replay.validate_current_controller_source_identity(
+                    source
+                )
+
     def test_scoreable_case_rejects_unverifiable_source_commit(self):
         with tempfile.TemporaryDirectory() as directory:
             case, _outcome_path, _label_path = self._scoreable_controller_case(
@@ -757,9 +831,8 @@ class PostFreezeControllerReplayTest(unittest.TestCase):
             ]
             with self.subTest(case=case["case_id"]):
                 validated = (
-                    build_knowledge_replay._validate_controller_source_identity(
-                        source,
-                        verify_commit=True,
+                    build_knowledge_replay.validate_historical_controller_source_identity(
+                        source
                     )
                 )
                 self.assertEqual(
