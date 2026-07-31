@@ -1,763 +1,557 @@
 #!/usr/bin/env python3
-"""Profile a kernel with Nsight Compute and extract top metrics per axis.
-
-Usage:
-  profile_ncu.py --state state.json --iter 1 --which best_input \
-                 --benchmark ./benchmark.py
-
-Writes (under {run_dir}/iterv{i}/):
-  {which}.ncu-rep   — full ncu report (binary)
-  ncu_top.json      — top-ncu_num metrics per axis
-                      (compute / memory / latency) with rank + raw value
-
-`--which` values:
-  best_input   profile state.best_file (snapshot going INTO the iter)
-  kernel       profile iterv{i}/kernel.<ext> (the iteration's product)
-"""
+"""Parse one frozen, version-bound Nsight Compute CSV report."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import importlib.util
 import io
 import json
+import math
 import os
 import re
-import shutil
-import subprocess
+import statistics
 import sys
+import time
 from pathlib import Path
-from typing import Iterable
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import diagnostic_evidence  # noqa: E402
+INPUT_VERSION = "cuda-kernel-optimizer/ncu-input-v1"
+RESULT_VERSION = "cuda-kernel-optimizer/profiler-result-v1"
+TOOL_IDENTITY_VERSION = "cuda-kernel-optimizer/ncu-tool-v1"
+PARSER_VERSION = "cuda-kernel-optimizer/ncu-csv-long-v1"
+
+_INPUT_REQUIRED = {
+    "format_version",
+    "operation",
+    "artifact_root",
+    "target_ref",
+    "report_ref",
+    "kernel_name_hints",
+    "resources",
+    "operation_timeout_seconds",
+    "command_timeout_seconds",
+    "resource_wait_timeout_seconds",
+    "cleanup_timeout_seconds",
+    "launch_deadline",
+}
+_INPUT_OPTIONAL = {"absolute_deadline", "retry_of"}
+_TARGET_REF_FIELDS = {"id", "sha256"}
+_REPORT_REF_FIELDS = {"id", "sha256"}
+_RESOURCE_FIELDS = {"host_id", "gpu_uuids"}
+_MATERIAL_FIELDS = {
+    "id",
+    "sha256",
+    "kind",
+    "tool",
+    "tool_version",
+    "dialect",
+    "object_ref",
+}
+_OBJECT_REF_REQUIRED = {"digest", "locator"}
+_CSV_COLUMNS = {"Kernel Name", "Metric Name", "Metric Unit", "Metric Value"}
+_VERSION = re.compile(r"2026\.2(?:\.\d+)*\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_NUMBER = re.compile(
+    r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?\Z"
+)
+_MAX_CSV_BYTES = 16 * 1024 * 1024
+_MAX_CSV_ROWS = 100_000
+_MAX_UNMODELED = 128
+
+# The seven semantics with accepted, fixture-backed NCU 2026.2 long-form names.
+_METRICS = {
+    "dram__throughput.avg.pct_of_peak_sustained_elapsed": (
+        "kernel.dram_throughput_pct",
+        "%",
+    ),
+    "dram__bytes.sum": ("kernel.dram_bytes", "byte"),
+    "sm__warps_active.avg.pct_of_peak_sustained_active": (
+        "kernel.occupancy_pct",
+        "%",
+    ),
+    "sm__cycles_active.avg.pct_of_peak_sustained_elapsed": (
+        "kernel.sm_active_pct",
+        "%",
+    ),
+    "sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active": (
+        "kernel.tensor_pipe_pct",
+        "%",
+    ),
+    "smsp__average_warp_latency_issue_stalled_barrier_per_warp_active.pct": (
+        "kernel.barrier_stall_pct",
+        "%",
+    ),
+    "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct": (
+        "kernel.long_scoreboard_pct",
+        "%",
+    ),
+}
 
 
-# ---------------------------------------------------------------------------
-# Axis rubric — which metric ID patterns belong to which axis, and whether
-# higher values are "worse" (i.e. indicate a bottleneck on that axis).
-# Order inside each list matters: earlier patterns win when classifying.
-# ---------------------------------------------------------------------------
-
-# (regex, axis, higher_is_worse)
-# "higher_is_worse" is used for ranking: we sort by "severity" on each axis.
-METRIC_RUBRIC: list[tuple[str, str, bool]] = [
-    # ------------- COMPUTE / utilization --------------
-    (r"sm__pipe_tensor.*\.pct_of_peak", "compute", False),     # tensor core busy — low is a miss
-    (r"sm__pipe_fp32_cycles_active.*\.pct_of_peak", "compute", False),
-    (r"sm__pipe_fp64_cycles_active.*\.pct_of_peak", "compute", False),
-    (r"sm__inst_executed\..*per_cycle_active", "compute", False),  # IPC
-    (r"smsp__sass_thread_inst_executed_op_(f|i|h)(add|mul|fma).*sum", "compute", False),
-    (r"sm__warps_active.*pct_of_peak_sustained_active", "compute", False),  # occupancy
-    (r"sm__cycles_active.*pct_of_peak", "compute", False),
-    (r"launch__occupancy_limit", "compute", False),
-    (r"sm__throughput.*pct_of_peak", "compute", False),
-
-    # ------------- MEMORY (dram / l2 / l1 / shared) --------------
-    (r"dram__throughput.*pct_of_peak", "memory", True),
-    (r"dram__bytes.*sum", "memory", True),
-    (r"lts__t_sector_hit_rate\.pct", "memory", False),   # low hit rate = bad
-    (r"l1tex__t_sector_hit_rate\.pct", "memory", False),
-    (r"l1tex__data_bank_conflicts.*sum", "memory", True),
-    (r"smsp__inst_executed_op_shared_(ld|st).*sum", "memory", True),
-    (r"gpu__compute_memory_throughput.*pct_of_peak", "memory", True),
-    (r"l1tex__throughput.*pct_of_peak", "memory", True),
-    (r"lts__throughput.*pct_of_peak", "memory", True),
-
-    # ------------- LATENCY / stalls --------------
-    (r"smsp__average_warp_latency.*pct", "latency", True),
-    (r"smsp__warp_issue_stalled.*per_inst_issued", "latency", True),
-    (r"smsp__pcsamp_warps_issue_stalled_.*", "latency", True),
-    (r"smsp__warp_issue_stalled_.*long_scoreboard.*", "latency", True),
-    (r"smsp__warp_issue_stalled_.*short_scoreboard.*", "latency", True),
-    (r"smsp__warp_issue_stalled_.*barrier.*", "latency", True),
-    (r"smsp__warp_issue_stalled_.*mio_throttle.*", "latency", True),
-    (r"smsp__warp_issue_stalled_.*lg_throttle.*", "latency", True),
-    (r"smsp__warp_issue_stalled_.*wait.*", "latency", True),
-    (r"gpc__cycles_elapsed\.max", "latency", True),
-    (r"sm__cycles_elapsed\..*(avg|max)", "latency", True),
-]
+def _load_sibling(filename: str, name: str):
+    path = Path(__file__).with_name(filename)
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load NCU dependency: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-# Metrics we explicitly ask ncu to capture. Extending --set full already
-# gives us most of these, but listing them explicitly keeps the import
-# step fast even when ncu collected a huge superset.
-EXPLICIT_METRICS = [
-    # compute
-    "sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active",
-    "sm__pipe_tensor_op_imma_cycles_active.avg.pct_of_peak_sustained_active",
-    "sm__pipe_fp32_cycles_active.avg.pct_of_peak_sustained_active",
-    "sm__pipe_fp64_cycles_active.avg.pct_of_peak_sustained_active",
-    "sm__inst_executed.avg.per_cycle_active",
-    "sm__warps_active.avg.pct_of_peak_sustained_active",
-    "sm__cycles_active.avg.pct_of_peak_sustained_elapsed",
-    "sm__throughput.avg.pct_of_peak_sustained_elapsed",
-    # memory
-    "dram__throughput.avg.pct_of_peak_sustained_elapsed",
-    "dram__bytes.sum",
-    "lts__t_sector_hit_rate.pct",
-    "l1tex__t_sector_hit_rate.pct",
-    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum",
-    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum",
-    "smsp__inst_executed_op_shared_ld.sum",
-    "smsp__inst_executed_op_shared_st.sum",
-    "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed",
-    "l1tex__throughput.avg.pct_of_peak_sustained_elapsed",
-    "lts__throughput.avg.pct_of_peak_sustained_elapsed",
-    # latency / stalls
-    "smsp__average_warp_latency_issue_stalled_long_scoreboard_per_warp_active.pct",
-    "smsp__average_warp_latency_issue_stalled_short_scoreboard_per_warp_active.pct",
-    "smsp__average_warp_latency_issue_stalled_barrier_per_warp_active.pct",
-    "smsp__average_warp_latency_issue_stalled_mio_throttle_per_warp_active.pct",
-    "smsp__average_warp_latency_issue_stalled_lg_throttle_per_warp_active.pct",
-    "smsp__average_warp_latency_issue_stalled_wait_per_warp_active.pct",
-    "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct",
-    "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct",
-    "gpc__cycles_elapsed.max",
-    "sm__cycles_elapsed.avg",
-]
+STORE = _load_sibling("artifact_store.py", "cuda_optimizer_ncu_store")
+RUNTIME = _load_sibling("_invocation_runtime.py", "cuda_optimizer_ncu_runtime")
 
 
-_BUNDLED_BENCHMARK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "benchmark.py")
+class NcuError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-def _read_state(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _write_json(path: str, obj) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
-
-
-def _counter_access_verdict(
-    returncode: int, log: str, report_exists: bool
-) -> tuple[bool | None, str | None]:
-    """Classify counter access only from a real target profile."""
-    if "ERR_NVGPUCTRPERM" in log or (
-        "permission" in log.lower() and "performance counter" in log.lower()
-    ):
-        return False, "ERR_NVGPUCTRPERM"
-    if returncode == 0 and report_exists:
-        return True, None
-    return None, None
-
-
-def _record_counter_access(
-    state_path: str,
-    state: dict,
-    verdict: bool | None,
-    error: str | None,
-) -> None:
-    """Persist a real-profile counter verdict in state and its env snapshot."""
-    if verdict is None:
-        return
-
-    ncu = state.setdefault("env", {}).setdefault("ncu", {})
-    ncu["can_read_counters"] = verdict
-    if error:
-        ncu["counter_access_error"] = error
-    else:
-        ncu.pop("counter_access_error", None)
-    _write_json(state_path, state)
-
-    env_path = state.get("env_path")
-    if not env_path or not os.path.isfile(env_path):
-        return
-    try:
-        env = _read_state(env_path)
-    except (OSError, json.JSONDecodeError):
-        return
-    env_ncu = env.setdefault("ncu", {})
-    env_ncu["can_read_counters"] = verdict
-    if error:
-        env_ncu["counter_access_error"] = error
-    else:
-        env_ncu.pop("counter_access_error", None)
-    _write_json(env_path, env)
-
-
-def _detect_backend(file: str) -> str:
-    ext = os.path.splitext(file)[1].lower()
-    if ext == ".py":
-        return "triton"
-    return "cuda"  # cuda / cutlass indistinguishable here — both use -k solve
-
-
-def _dims_argv(dims: dict) -> list[str]:
-    return [f"--{k}={v}" for k, v in dims.items()]
-
-
-def _ptr_size_argv(ptr_size: int) -> list[str]:
-    return ["--ptr-size", str(ptr_size)] if ptr_size and ptr_size > 0 else []
-
-
-def _classify(metric_name: str) -> tuple[str | None, bool]:
-    for pat, axis, higher_is_worse in METRIC_RUBRIC:
-        if re.search(pat, metric_name):
-            return axis, higher_is_worse
-    return None, False
-
-
-def _kernel_duration(row: dict) -> float:
-    for key in ("gpu__time_duration.sum", "gpu__time_duration.avg"):
-        value = _to_float(row.get(key, ""))
-        if value is not None:
-            return value
-    return float("-inf")
-
-
-def _select_target_kernel_rows(rows: list[dict], kernel_name_hints: list[str] | None = None) -> list[dict]:
-    if not rows or "Kernel Name" not in rows[0]:
-        return rows
-
-    by_kernel: dict[str, list[dict]] = {}
-    for row in rows:
-        kernel_name = row.get("Kernel Name", "").strip()
-        if not kernel_name:
-            continue
-        by_kernel.setdefault(kernel_name, []).append(row)
-
-    if not by_kernel:
-        return rows
-
-    # Prefer kernels originating from the target solution file when possible.
-    # This avoids picking unrelated PyTorch init kernels (e.g. RNG) that may run
-    # before the operator under test.
-    if kernel_name_hints:
-        hinted = []
-        for kname, krows in by_kernel.items():
-            if any(hint in kname for hint in kernel_name_hints):
-                hinted.append((kname, krows))
-        if hinted:
-            target_kernel = max(
-                hinted,
-                key=lambda item: max(_kernel_duration(row) for row in item[1]),
-            )[0]
-            return by_kernel[target_kernel]
-
-    target_kernel = max(
-        by_kernel.items(),
-        key=lambda item: max(_kernel_duration(row) for row in item[1]),
-    )[0]
-    return by_kernel[target_kernel]
-
-
-def _parse_ncu_csv(csv_text: str, kernel_name_hints: list[str] | None = None) -> list[dict]:
-    """Parse both old long-form and newer wide-form ncu CSV exports.
-
-    Returns a normalized long-form list with Metric Name / Value / Unit / Kernel Name.
-    """
-    rows: list[dict] = []
-    reader = csv.reader(io.StringIO(csv_text))
-    header = None
-    buffered_rows: list[dict] = []
-
-    for row in reader:
-        if not row:
-            continue
-        cols = [c.strip() for c in row]
-        if header is None:
-            if "Metric Name" in cols and "Metric Value" in cols:
-                header = cols
-                continue
-            if "Kernel Name" in cols:
-                header = cols
-                continue
-            continue
-
-        if len(cols) != len(header):
-            continue
-        entry = dict(zip(header, cols))
-
-        if "Metric Name" in entry and "Metric Value" in entry:
-            rows.append(entry)
-            continue
-
-        buffered_rows.append(entry)
-
-    if rows:
-        return rows
-
-    if not buffered_rows or header is None:
-        return []
-
-    # When using the bundled benchmark, all kernels spawned by the solution
-    # share a common substring from the .cu file name (e.g. "batchnorm"), while
-    # unrelated framework kernels typically do not.
-    hints = []
-    if kernel_name_hints:
-        hints = list(kernel_name_hints)
-    target_rows = _select_target_kernel_rows(buffered_rows, kernel_name_hints=hints)
-    normalized: list[dict] = []
-    for entry in target_rows:
-        kernel_name = entry.get("Kernel Name", "")
-        for metric_name, metric_value in entry.items():
-            axis, _ = _classify(metric_name)
-            if axis is None:
-                continue
-            normalized.append(
-                {
-                    "Kernel Name": kernel_name,
-                    "Metric Name": metric_name,
-                    "Metric Value": metric_value,
-                    "Metric Unit": "",
-                }
-            )
-    return normalized
-
-
-def _to_float(s: str) -> float | None:
-    if s is None:
-        return None
-    s = s.strip().replace(",", "")
-    if not s:
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def _aggregate_across_kernels(rows: list[dict]) -> dict[str, dict]:
-    """Collapse multiple kernel launches into one average per metric."""
-    agg: dict[str, dict] = {}
-    for r in rows:
-        name = r.get("Metric Name")
-        if not name:
-            continue
-        unit = r.get("Metric Unit", "")
-        a = agg.setdefault(
-            name,
-            {
-                "sum": 0.0,
-                "numeric_samples": 0,
-                "invalid_value_samples": 0,
-                "sample_units": [],
-                "kernels": set(),
-            },
+def _closed(value, required: set[str], optional: set[str], label: str) -> dict:
+    if type(value) is not dict:
+        raise NcuError("invalid_ncu_input", f"{label} must be an object")
+    missing = required - set(value)
+    unknown = set(value) - required - optional
+    if missing or unknown:
+        raise NcuError(
+            "invalid_ncu_input",
+            f"{label} has missing={sorted(missing)} unknown={sorted(unknown)}",
         )
-        a["sample_units"].append(unit)
-        if r.get("Kernel Name"):
-            a["kernels"].add(r["Kernel Name"])
-        v = _to_float(r.get("Metric Value", ""))
-        if v is None:
-            a["invalid_value_samples"] += 1
-            continue
-        a["sum"] += v
-        a["numeric_samples"] += 1
-    out = {}
-    for name, a in agg.items():
-        sample_units = sorted(a["sample_units"])
-        unique_units = set(sample_units)
-        out[name] = {
-            "value": (
-                a["sum"] / a["numeric_samples"]
-                if a["numeric_samples"]
-                else None
+    return value
+
+
+def _text(value, label: str, *, maximum: int = 4096) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise NcuError("invalid_ncu_input", f"{label} must be a non-empty bounded string")
+    return value
+
+
+def _sha256(value, label: str) -> str:
+    text = _text(value, label, maximum=64)
+    if _SHA256.fullmatch(text) is None:
+        raise NcuError("invalid_ncu_input", f"{label} must be a lowercase SHA-256")
+    return text
+
+
+def _finite(value, label: str, *, positive: bool = False) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise NcuError("invalid_ncu_input", f"{label} must be a finite number")
+    number = float(value)
+    if not math.isfinite(number) or (positive and number <= 0):
+        raise NcuError("invalid_ncu_input", f"{label} must be a finite number")
+    return number
+
+
+def _strict_json(path) -> dict:
+    raw = STORE.read_regular_bytes(path)
+
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise NcuError("invalid_ncu_input", f"request contains duplicate key: {key}")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                NcuError("invalid_ncu_input", f"request contains non-finite number: {token}")
             ),
-            "unit": sample_units[0] if len(unique_units) == 1 else None,
-            "sample_units": sample_units,
-            "samples": len(sample_units),
-            "invalid_value_samples": a["invalid_value_samples"],
-            "kernels": sorted(a["kernels"]),
-        }
-    return out
-
-
-def _semantic_ncu_observations(
-    csv_text: str,
-    tool_version: str,
-    kernel_name_hints: list[str] | None = None,
-) -> dict:
-    rows = _parse_ncu_csv(csv_text, kernel_name_hints=kernel_name_hints)
-    aggregate = _aggregate_across_kernels(rows)
-    return diagnostic_evidence.normalize_ncu_metrics(aggregate, tool_version)
-
-
-def _query_ncu_version(ncu_bin: str, timeout: float = 5.0) -> str | None:
-    try:
-        result = subprocess.run(
-            [ncu_bin, "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    return diagnostic_evidence._ncu_major_minor(result.stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise NcuError("invalid_ncu_input", "request is invalid JSON") from error
+    if type(value) is not dict:
+        raise NcuError("invalid_ncu_input", "request root must be an object")
+    return value
 
 
-def _build_profile_command(
-    *,
-    ncu_bin: str,
-    rep_path: str,
-    benchmark_py: str,
-    solution: str,
-    dims: dict,
-    warmup: int,
-    launch_count: int,
-    ptr_size: int = 0,
-    python_executable: str | None = None,
-) -> list[str]:
-    if launch_count != 1:
-        raise ValueError("target-bounded profiling requires launch_count=1")
-    cmd = [
-        ncu_bin,
-        "--set", "full",
-        "--profile-from-start", "off",
-        "--launch-count", "1",
-        "--target-processes", "all",
-        "-o", rep_path,
-        "-f",
-    ]
-    cmd += [
-        python_executable or sys.executable,
-        benchmark_py,
-        solution,
-        "--profile-only",
-        "--warmup", str(warmup),
-        "--repeat", "1",
-    ] + _ptr_size_argv(ptr_size) + _dims_argv(dims)
-    return cmd
-
-
-def _run_ncu_profile(
-    *,
-    ncu_bin: str,
-    rep_path: str,
-    benchmark_py: str,
-    solution: str,
-    dims: dict,
-    ptr_size: int,
-    warmup: int,
-    launch_count: int,
-) -> tuple[int, str]:
-    cmd = _build_profile_command(
-        ncu_bin=ncu_bin,
-        rep_path=rep_path,
-        benchmark_py=benchmark_py,
-        solution=solution,
-        dims=dims,
-        ptr_size=ptr_size,
-        warmup=warmup,
-        launch_count=launch_count,
-    )
-
-    print(f"[ncu profile] {' '.join(cmd)}", file=sys.stderr)
+def _target(root: Path, reference) -> dict:
+    reference = _closed(reference, _TARGET_REF_FIELDS, set(), "target_ref")
+    target_path = root / "target.json"
     try:
-        r = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore",
-        )
-    except OSError as e:
-        return -1, f"failed to invoke ncu: {e}"
-    log = (r.stdout or "") + "\n---STDERR---\n" + (r.stderr or "")
-    return r.returncode, log
-
-
-def _import_metrics_csv(ncu_bin: str, rep_path: str) -> tuple[int, str, str]:
-    """Export the ncu-rep to CSV for our top-K analysis.
-
-    We ask for both explicit metrics AND let ncu include everything it
-    collected (we'll just filter on our side). Using the `raw` page makes
-    the CSV tractable.
-    """
-    cmd = [
-        ncu_bin, "--import", rep_path,
-        "--csv", "--page", "raw",
-    ]
+        payload = STORE.read_regular_bytes(target_path)
+    except (OSError, ValueError) as error:
+        raise NcuError("target_not_found", "target record is unavailable") from error
+    if hashlib.sha256(payload).hexdigest() != _sha256(reference["sha256"], "target_ref.sha256"):
+        raise NcuError("target_changed", "target record digest changed")
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    except OSError as e:
-        return -1, "", f"failed to invoke ncu --import: {e}"
-    return r.returncode, r.stdout or "", r.stderr or ""
+        target = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise NcuError("target_invalid", "target record is invalid") from error
+    if (
+        type(target) is not dict
+        or target.get("record_type") != "target"
+        or target.get("format_version") != "cuda-kernel-optimizer/target-v1"
+        or target.get("id") != _text(reference["id"], "target_ref.id", maximum=128)
+        or target.get("target_mode") != "diagnostic"
+    ):
+        raise NcuError("target_invalid", "target record identity is invalid")
+    return target
 
 
-def _rank_by_axis(agg: dict[str, dict], ncu_num: int) -> dict[str, list]:
-    """Pick up to ncu_num metrics per axis.
-
-    We prefer a small, stable set of high-signal metrics (utilization, IPC,
-    occupancy, stall %), then fill remaining slots by severity.
-    """
-
-    def _severity(metric_name: str, value: float) -> float:
-        axis, higher_is_worse = _classify(metric_name)
-        if axis is None:
-            return float("-inf")
-        return value if higher_is_worse else (100.0 - value)
-
-    def _add_worst_matching(out: list, seen: set[str], patterns: list[str], *, exclude_fp64: bool = False):
-        for pat in patterns:
-            matches = []
-            for name, info in agg.items():
-                if name in seen:
-                    continue
-                if exclude_fp64 and "fp64" in name:
-                    continue
-                if re.search(pat, name):
-                    v = info.get("value")
-                    if v is None:
-                        continue
-                    matches.append((name, float(v)))
-            if not matches:
-                continue
-            # choose the worst instance among matches
-            name, v = max(matches, key=lambda nv: _severity(nv[0], nv[1]))
-            axis, higher_is_worse = _classify(name)
-            out.append({
-                "name": name,
-                "value": v,
-                "unit": agg[name].get("unit"),
-                "higher_is_worse": higher_is_worse,
-                "samples": agg[name].get("samples"),
-            })
-            seen.add(name)
-            if len(out) >= ncu_num:
-                return
-
-    preferred = {
-        "compute": [
-            r"sm__pipe_tensor_op_.*pct_of_peak",
-            r"sm__pipe_fp32_cycles_active.*pct_of_peak",
-            r"sm__inst_executed\..*per_cycle_active",
-            r"sm__warps_active.*pct_of_peak",
-            r"sm__cycles_active.*pct_of_peak",
-        ],
-        "memory": [
-            r"dram__throughput.*pct_of_peak",
-            r"gpu__compute_memory_throughput.*pct_of_peak",
-            r"lts__t_sector_hit_rate\.pct",
-            r"l1tex__t_sector_hit_rate\.pct",
-            r"l1tex__data_bank_conflicts.*sum",
-        ],
-        "latency": [
-            r"smsp__warp_issue_stalled_long_scoreboard.*pct",
-            r"smsp__warp_issue_stalled_barrier.*pct",
-            r"smsp__warp_issue_stalled_mio_throttle.*pct",
-            r"smsp__warp_issue_stalled_wait.*pct",
-            r"smsp__average_warp_latency.*pct",
-        ],
+def _material(target: dict, report_ref: dict) -> dict:
+    report_ref = _closed(report_ref, _REPORT_REF_FIELDS, set(), "report_ref")
+    report_id = _text(report_ref["id"], "report_ref.id", maximum=256)
+    report_digest = _sha256(report_ref["sha256"], "report_ref.sha256")
+    materials = target.get("diagnostic_materials")
+    if type(materials) is not list:
+        raise NcuError("report_not_found", "target has no diagnostic materials")
+    matches = []
+    for candidate in materials:
+        if type(candidate) is dict and candidate.get("id") == report_id:
+            matches.append(candidate)
+    if len(matches) != 1:
+        raise NcuError("report_not_found", "report_ref does not select one frozen material")
+    material = _closed(matches[0], _MATERIAL_FIELDS, set(), "diagnostic material")
+    if material["sha256"] != report_digest:
+        raise NcuError("report_changed", "report material digest does not match report_ref")
+    if material["kind"] != "report" or material["tool"] != "ncu":
+        raise NcuError("unsupported_report", "material is not an NCU report")
+    if material["dialect"] != "ncu-csv-long-v1":
+        raise NcuError("unsupported_report", "material is not the accepted NCU CSV dialect")
+    version = _text(material["tool_version"], "material.tool_version", maximum=64)
+    if _VERSION.fullmatch(version) is None:
+        raise NcuError("unsupported_tool_version", "only NCU 2026.2.x CSV is supported")
+    object_ref = material["object_ref"]
+    if type(object_ref) is not dict or not _OBJECT_REF_REQUIRED.issubset(object_ref):
+        raise NcuError("report_invalid", "material object_ref is invalid")
+    if object_ref["digest"] != report_digest:
+        raise NcuError("report_changed", "material object_ref does not match report_ref")
+    identity = {
+        "kind": material["kind"],
+        "tool": material["tool"],
+        "tool_version": material["tool_version"],
+        "dialect": material["dialect"],
+        "object_ref": object_ref,
+    }
+    expected_id = hashlib.sha256(
+        json.dumps(
+            identity,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if report_id != expected_id:
+        raise NcuError("report_changed", "report material identity is invalid")
+    return {
+        "id": report_id,
+        "sha256": report_digest,
+        "kind": "report",
+        "tool": "ncu",
+        "tool_version": version,
+        "dialect": "ncu-csv-long-v1",
+        "object_ref": dict(object_ref),
     }
 
-    by_axis: dict[str, list] = {"compute": [], "memory": [], "latency": []}
-    seen: set[str] = set()
 
-    # 1) preferred picks
-    _add_worst_matching(by_axis["compute"], seen, preferred["compute"], exclude_fp64=True)
-    _add_worst_matching(by_axis["memory"], seen, preferred["memory"])
-    _add_worst_matching(by_axis["latency"], seen, preferred["latency"])
+def _resources(value) -> dict:
+    value = _closed(value, _RESOURCE_FIELDS, set(), "resources")
+    host_id = _text(value["host_id"], "resources.host_id", maximum=256)
+    gpu_uuids = value["gpu_uuids"]
+    if type(gpu_uuids) is not list or any(not isinstance(item, str) or not item for item in gpu_uuids):
+        raise NcuError("invalid_ncu_input", "resources.gpu_uuids must be a string list")
+    if len(gpu_uuids) != len(set(gpu_uuids)):
+        raise NcuError("invalid_ncu_input", "resources.gpu_uuids must not contain duplicates")
+    return {"host_id": host_id, "gpu_uuids": sorted(gpu_uuids)}
 
-    # 2) fill by severity within axis
-    for axis in ("compute", "memory", "latency"):
-        if len(by_axis[axis]) >= ncu_num:
+
+def _hints(value) -> list[str]:
+    if type(value) is not list or any(not isinstance(item, str) or not item or len(item) > 512 for item in value):
+        raise NcuError("invalid_ncu_input", "kernel_name_hints must be a bounded string list")
+    if len(value) > 64 or len(value) != len(set(value)):
+        raise NcuError("invalid_ncu_input", "kernel_name_hints must be unique and bounded")
+    return list(value)
+
+
+def _tool_identity() -> dict:
+    implementations = []
+    for name in ("profile_ncu.py", "_invocation_runtime.py", "artifact_store.py"):
+        path = Path(__file__).with_name(name)
+        implementations.append({"name": name, "sha256": STORE.sha256_file(path)})
+    identity = {
+        "version": TOOL_IDENTITY_VERSION,
+        "result_contract": RESULT_VERSION,
+        "implementations": implementations,
+    }
+    identity["digest"] = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return identity
+
+
+def _validate_analyze(value) -> tuple[dict, Path, dict]:
+    request = _closed(value, _INPUT_REQUIRED, _INPUT_OPTIONAL, "analyze input")
+    if request["format_version"] != INPUT_VERSION or request["operation"] != "analyze":
+        raise NcuError("invalid_ncu_input", "analyze input version or operation is unsupported")
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(request["artifact_root"]))))
+    if not root.is_dir():
+        raise NcuError("target_not_found", "artifact_root is unavailable")
+    target = _target(root, request["target_ref"])
+    material = _material(target, request["report_ref"])
+    normalized = {
+        **request,
+        "artifact_root": str(root),
+        "kernel_name_hints": _hints(request["kernel_name_hints"]),
+        "resources": _resources(request["resources"]),
+    }
+    if normalized["resources"]["gpu_uuids"]:
+        raise NcuError(
+            "invalid_ncu_input",
+            "read-only NCU analysis must not request GPU resources",
+        )
+    for field in (
+        "operation_timeout_seconds",
+        "command_timeout_seconds",
+        "resource_wait_timeout_seconds",
+        "cleanup_timeout_seconds",
+    ):
+        normalized[field] = _finite(request[field], field, positive=True)
+    normalized["launch_deadline"] = _finite(request["launch_deadline"], "launch_deadline")
+    if "absolute_deadline" in request:
+        normalized["absolute_deadline"] = _finite(request["absolute_deadline"], "absolute_deadline")
+    return normalized, root, material
+
+
+def _frozen_request(request: dict, material: dict) -> dict:
+    frozen = {
+        "operation": "analyze",
+        "target_ref": request["target_ref"],
+        "report_ref": request["report_ref"],
+        "report_material": material,
+        "kernel_name_hints": request["kernel_name_hints"],
+        "resources": request["resources"],
+        "tool_identity": _tool_identity(),
+        "operation_timeout_seconds": request["operation_timeout_seconds"],
+        "command_timeout_seconds": request["command_timeout_seconds"],
+        "resource_wait_timeout_seconds": request["resource_wait_timeout_seconds"],
+        "cleanup_timeout_seconds": request["cleanup_timeout_seconds"],
+        "launch_deadline": request["launch_deadline"],
+    }
+    for field in ("absolute_deadline", "retry_of"):
+        if field in request:
+            frozen[field] = request[field]
+    frozen["request_digest"] = RUNTIME.request_digest(frozen)
+    return frozen
+
+
+def _number(value: str, label: str) -> float:
+    if not _NUMBER.fullmatch(value):
+        raise NcuError("invalid_metric_value", f"{label} is not a finite number")
+    try:
+        number = float(value.replace(",", ""))
+    except (TypeError, ValueError) as error:
+        raise NcuError("invalid_metric_value", f"{label} is not a finite number") from error
+    if not math.isfinite(number):
+        raise NcuError("invalid_metric_value", f"{label} is not a finite number")
+    return number
+
+
+def parse_ncu_csv(csv_text: str, tool_version: str, kernel_name_hints: list[str]) -> dict:
+    """Return only the fixed 2026.2 metric observations from a long CSV export."""
+    if _VERSION.fullmatch(tool_version) is None:
+        raise NcuError("unsupported_tool_version", "only NCU 2026.2.x CSV is supported")
+    if not isinstance(csv_text, str) or len(csv_text.encode("utf-8")) > _MAX_CSV_BYTES:
+        raise NcuError("invalid_ncu_csv", "NCU CSV is invalid or exceeds the byte limit")
+    reader = csv.DictReader(io.StringIO(csv_text))
+    if (
+        reader.fieldnames is None
+        or not _CSV_COLUMNS.issubset(set(reader.fieldnames))
+        or len(reader.fieldnames) != len(set(reader.fieldnames))
+    ):
+        raise NcuError("missing_required_column", "NCU CSV is missing required long-form columns")
+    values = {name: [] for name in _METRICS}
+    unmodeled = set()
+    seen_rows = 0
+    matching_rows = 0
+    for row in reader:
+        seen_rows += 1
+        if seen_rows > _MAX_CSV_ROWS:
+            raise NcuError("invalid_ncu_csv", "NCU CSV exceeds the row limit")
+        if None in row:
+            raise NcuError("invalid_ncu_csv", "NCU CSV row has an unexpected column")
+        kernel_name = row["Kernel Name"].strip()
+        if kernel_name_hints and not any(hint in kernel_name for hint in kernel_name_hints):
             continue
-        candidates = []
-        for name, info in agg.items():
-            ax, higher_is_worse = _classify(name)
-            if ax != axis:
-                continue
-            if name in seen:
-                continue
-            if axis == "compute" and "fp64" in name:
-                continue
-            v = info.get("value")
-            if v is None:
-                continue
-            v = float(v)
-            sev = v if higher_is_worse else (100.0 - v)
-            candidates.append((sev, name, v, higher_is_worse, info.get("unit"), info.get("samples")))
-
-        candidates.sort(reverse=True)
-        for sev, name, v, higher_is_worse, unit, samples in candidates:
-            by_axis[axis].append({
-                "name": name,
-                "value": v,
+        matching_rows += 1
+        name = row["Metric Name"].strip()
+        unit = row["Metric Unit"].strip()
+        if name not in _METRICS:
+            unmodeled.add(name)
+            continue
+        semantic_id, expected_unit = _METRICS[name]
+        if unit != expected_unit:
+            raise NcuError("unexpected_unit", f"known NCU metric has an unexpected_unit: {name}")
+        values[name].append(_number(row["Metric Value"].strip(), f"metric {name}"))
+    if not matching_rows:
+        raise NcuError("missing_matching_kernel", "NCU CSV has no matching kernel rows")
+    if not any(values.values()):
+        raise NcuError("missing_modeled_metric", "NCU CSV has no modeled metrics")
+    observations = []
+    for name, (semantic_id, unit) in sorted(_METRICS.items(), key=lambda item: item[1][0]):
+        if not values[name]:
+            continue
+        observations.append(
+            {
+                "semantic_id": semantic_id,
+                "value": statistics.fmean(values[name]),
                 "unit": unit,
-                "higher_is_worse": higher_is_worse,
-                "samples": samples,
-            })
-            seen.add(name)
-            if len(by_axis[axis]) >= ncu_num:
-                break
-
-    return by_axis
-
-
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    p = argparse.ArgumentParser()
-    p.add_argument("--state", required=True)
-    p.add_argument("--iter", required=True, type=int)
-    p.add_argument("--which", required=True, choices=["best_input", "kernel"])
-    p.add_argument("--benchmark", default=_BUNDLED_BENCHMARK,
-                   help="Path to benchmark.py (default: bundled)")
-    p.add_argument("--launch-count", type=int, choices=[1], default=1,
-                   help="Profile exactly one launch inside the explicit CUDA profiler range")
-    p.add_argument("--warmup", type=int, default=3)
-    p.add_argument("--repeat", type=int, default=1, help=argparse.SUPPRESS)
-    p.add_argument("--no-kernel-filter", action="store_true", help=argparse.SUPPRESS)
-    p.add_argument("--ncu-bin", type=str, default="")
-    p.add_argument("--promote-if-best", action="store_true",
-                   help="When --which=kernel, if this kernel is the current best, "
-                        "also update state.best_ncu_rep to this report.")
-    args = p.parse_args()
-
-    state = _read_state(args.state)
-    run_dir = state["run_dir"]
-    iter_dir = os.path.join(run_dir, f"iterv{args.iter}")
-    os.makedirs(iter_dir, exist_ok=True)
-
-    # Pick the solution file to profile
-    if args.which == "best_input":
-        solution = state["best_file"]
-        rep_name = "best_input.ncu-rep"
-    else:
-        # iterv{i}/kernel.*  — find whichever extension is present
-        candidates = [
-            os.path.join(iter_dir, "kernel.cu"),
-            os.path.join(iter_dir, "kernel.py"),
-        ]
-        solution = next((c for c in candidates if os.path.isfile(c)), None)
-        if not solution:
-            sys.exit(f"No iterv{args.iter}/kernel.(cu|py) found — generate it first.")
-        rep_name = "kernel.ncu-rep"
-
-    rep_path = os.path.join(iter_dir, rep_name)
-
-    env_ncu = state.get("env", {}).get("ncu")
-    env_ncu_path = env_ncu.get("path", "") if isinstance(env_ncu, dict) else ""
-    ncu_bin = args.ncu_bin or env_ncu_path or shutil.which("ncu") or "ncu"
-
-    backend = _detect_backend(solution)
-
-    # If state says ncu is unavailable, emit a degraded top-K straight away.
-    ncu_info = state.get("env", {}).get("ncu", {}) or {}
-    ncu_available = (
-        ncu_info.get("available", True)
-        if isinstance(ncu_info, dict)
-        else bool(ncu_info) if isinstance(ncu_info, bool)
-        else True
-    )
-    if not ncu_available or shutil.which(ncu_bin) is None:
-        top = {
-            "degraded": True,
-            "reason": "ncu not available on this system",
-            "profiled_file": solution,
-            "backend": backend,
-            "compute": [], "memory": [], "latency": [],
-        }
-        _write_json(os.path.join(iter_dir, "ncu_top.json"), top)
-        print(json.dumps({"degraded": True, "reason": top["reason"]}, indent=2))
-        return
-
-    tool_version = _query_ncu_version(ncu_bin)
-
-    # 1) collect
-    rc, log = _run_ncu_profile(
-        ncu_bin=ncu_bin,
-        rep_path=rep_path,
-        benchmark_py=os.path.abspath(args.benchmark),
-        solution=solution,
-        dims=state.get("dims", {}),
-        ptr_size=state.get("ptr_size", 0),
-        warmup=args.warmup,
-        launch_count=args.launch_count,
-    )
-    log_path = os.path.join(iter_dir, f"{os.path.splitext(rep_name)[0]}.ncu.log")
-    with open(log_path, "w", encoding="utf-8") as f:
-        f.write(log)
-    counter_verdict, counter_error = _counter_access_verdict(
-        rc, log, report_exists=os.path.isfile(rep_path)
-    )
-    _record_counter_access(
-        args.state, state, counter_verdict, counter_error
-    )
-    if rc != 0 or not os.path.isfile(rep_path):
-        top = {
-            "degraded": True,
-            "reason": f"ncu exited {rc}; see {log_path}",
-            "profiled_file": solution,
-            "backend": backend,
-            "compute": [], "memory": [], "latency": [],
-        }
-        _write_json(os.path.join(iter_dir, "ncu_top.json"), top)
-        print(json.dumps({"degraded": True, "rc": rc, "log": log_path}, indent=2))
-        return
-
-    # 2) import → csv
-    rc2, csv_text, err2 = _import_metrics_csv(ncu_bin, rep_path)
-    if rc2 != 0 or not csv_text:
-        top = {
-            "degraded": True,
-            "reason": f"ncu --import failed rc={rc2}: {err2[:400]}",
-            "profiled_file": solution,
-            "backend": backend,
-            "ncu_rep": rep_path,
-            "compute": [], "memory": [], "latency": [],
-        }
-        _write_json(os.path.join(iter_dir, "ncu_top.json"), top)
-        print(json.dumps({"degraded": True, "rc": rc2}, indent=2))
-        return
-
-    # 3) parse → aggregate → rank
-    kernel_hints = []
-    if backend in {"cuda", "cutlass"}:
-        try:
-            text = Path(solution).read_text(encoding="utf-8", errors="ignore")
-            kernel_hints = re.findall(r"__global__\s+void\s+([A-Za-z_][A-Za-z0-9_]*)", text)
-        except OSError:
-            kernel_hints = []
-    rows = _parse_ncu_csv(csv_text, kernel_name_hints=kernel_hints)
-    agg = _aggregate_across_kernels(rows)
-    by_axis = _rank_by_axis(agg, state.get("ncu_num", 5))
-    semantics = diagnostic_evidence.normalize_ncu_metrics(
-        agg,
-        tool_version,
-    )
-
-    top = {
-        "degraded": False,
-        "profiled_file": solution,
-        "backend": backend,
-        "ncu_rep": rep_path,
-        "metric_count_collected": len(agg),
-        **by_axis,
-        **semantics,
+                "scope": ["kernel"],
+                "aggregation": "mean_across_matching_rows",
+                "source_metric": name,
+                "tool": {"name": "ncu", "version": tool_version},
+            }
+        )
+    return {
+        "observations": observations,
+        "unmodeled": [
+            {"metric_name": name, "reason": "unknown_metric"}
+            for name in sorted(unmodeled)[:_MAX_UNMODELED]
+        ],
     }
-    _write_json(os.path.join(iter_dir, "ncu_top.json"), top)
 
-    # Optionally promote this as best_ncu_rep
-    if args.which == "kernel" and args.promote_if_best:
-        # The caller (run_iteration) is responsible for deciding if this
-        # kernel is "best" — but if it already pointed state.best_file to
-        # our path, we record the rep here.
-        if os.path.abspath(solution) == os.path.abspath(state.get("best_file", "")):
-            state["best_ncu_rep"] = rep_path
-            with open(args.state, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2, ensure_ascii=False)
 
-    print(json.dumps({
-        "ncu_rep": rep_path,
-        "ncu_top": os.path.join(iter_dir, "ncu_top.json"),
-        "compute_count": len(by_axis["compute"]),
-        "memory_count": len(by_axis["memory"]),
-        "latency_count": len(by_axis["latency"]),
-    }, indent=2))
+def analyze(value, *, wait_for_result: bool) -> dict:
+    request, root, material = _validate_analyze(value)
+    frozen = _frozen_request(request, material)
+    return RUNTIME.submit(
+        root,
+        frozen,
+        [sys.executable, str(Path(__file__).resolve()), "_worker"],
+        wait_for_result,
+    )
+
+
+def _base_result(request: dict, started_epoch: float) -> dict:
+    return {
+        "record_type": "profiler_result",
+        "format_version": RESULT_VERSION,
+        "operation": "analyze",
+        "target_ref": request["target_ref"],
+        "report_ref": request["report_ref"],
+        "started_at_epoch": started_epoch,
+        "finished_at_epoch": None,
+        "elapsed_seconds": None,
+        "execution_status": None,
+        "measurement_validity": "invalid",
+        "stop_reason": None,
+        "cleanup_status": "not_required",
+        "observations": [],
+        "unmodeled": [],
+        "provenance": {},
+    }
+
+
+def _finish(result: dict, started_mono: float) -> dict:
+    result["finished_at_epoch"] = time.time()
+    result["elapsed_seconds"] = time.monotonic() - started_mono
+    return result
+
+
+def _worker_main() -> int:
+    artifact_root = Path(os.environ["CKO_ARTIFACT_ROOT"])
+    invocation_dir = Path(os.environ["CKO_INVOCATION_DIR"])
+    request = _strict_json(invocation_dir / "request.json")
+    started_epoch = time.time()
+    started_mono = time.monotonic()
+    result = _base_result(request, started_epoch)
+    try:
+        if request.get("tool_identity") != _tool_identity():
+            result["execution_status"] = "invalid"
+            result["stop_reason"] = "tool_identity_changed"
+        else:
+            target = _target(artifact_root, request["target_ref"])
+            material = _material(target, request["report_ref"])
+            if material != request.get("report_material"):
+                raise NcuError("report_changed", "frozen report material changed before analysis")
+            workspace = invocation_dir / "workspace"
+            workspace.mkdir()
+            report_path = STORE.materialize_object(
+                artifact_root, material["object_ref"], workspace / "report.csv"
+            )
+            csv_bytes = STORE.read_regular_bytes(report_path)
+            try:
+                csv_text = csv_bytes.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise NcuError("invalid_ncu_csv", "NCU CSV is not UTF-8") from error
+            facts = parse_ncu_csv(csv_text, material["tool_version"], request["kernel_name_hints"])
+            result["execution_status"] = "succeeded"
+            result["measurement_validity"] = "valid"
+            result["stop_reason"] = "completed"
+            result["observations"] = facts["observations"]
+            result["unmodeled"] = facts["unmodeled"]
+            result["provenance"] = {
+                "report_ref": request["report_ref"],
+                "report_object_ref": material["object_ref"],
+                "tool": {"name": "ncu", "version": material["tool_version"]},
+                "dialect": material["dialect"],
+                "parser_version": PARSER_VERSION,
+                "tool_identity": request["tool_identity"],
+            }
+    except NcuError as error:
+        result["execution_status"] = "invalid"
+        result["measurement_validity"] = "invalid"
+        result["stop_reason"] = error.code
+        result["diagnostic"] = {"error": str(error)[:1024]}
+    except BaseException as error:
+        result["execution_status"] = "failed"
+        result["measurement_validity"] = "invalid"
+        result["stop_reason"] = "worker_error"
+        result["diagnostic"] = {"error": str(error)[:1024]}
+    STORE.create_regular_json(invocation_dir / "result.json", _finish(result, started_mono))
+    return 0
+
+
+def _status_or_cancel(value, operation: str) -> dict:
+    fields = {"format_version", "operation", "artifact_root", "invocation_id"}
+    value = _closed(value, fields, set(), f"{operation} input")
+    if value["format_version"] != INPUT_VERSION or value["operation"] != operation:
+        raise NcuError("invalid_ncu_input", f"{operation} input is unsupported")
+    return (
+        RUNTIME.status(value["artifact_root"], value["invocation_id"])
+        if operation == "status"
+        else RUNTIME.cancel(value["artifact_root"], value["invocation_id"])
+    )
+
+
+def _emit_error(error: BaseException) -> int:
+    code = error.code if isinstance(error, NcuError) else "ncu_error"
+    print(json.dumps({"status": "rejected", "error_code": code, "error": str(error)[:1024]}, sort_keys=True), file=sys.stderr)
+    return 2
+
+
+def main(argv=None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["_worker"]:
+        return _worker_main()
+    parser = argparse.ArgumentParser(description="Analyze one frozen V1.4 NCU CSV report.")
+    parser.add_argument("operation", choices=("analyze", "status", "cancel"))
+    parser.add_argument("--request", required=True)
+    parser.add_argument("--wait", action="store_true")
+    args = parser.parse_args(arguments)
+    try:
+        request = _strict_json(args.request)
+        if request.get("operation") != args.operation:
+            raise NcuError("invalid_ncu_input", "CLI operation does not match request")
+        if args.operation == "analyze":
+            result = analyze(request, wait_for_result=args.wait)
+        else:
+            if args.wait:
+                raise NcuError("invalid_ncu_input", "--wait is only valid for analyze")
+            result = _status_or_cancel(request, args.operation)
+    except (NcuError, OSError, ValueError, TimeoutError) as error:
+        return _emit_error(error)
+    print(json.dumps(result, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

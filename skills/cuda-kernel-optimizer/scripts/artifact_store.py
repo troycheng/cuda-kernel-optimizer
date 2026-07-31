@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -11,8 +12,12 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
+import sys
+import time
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path, PureWindowsPath
 from typing import Any, Optional, Union
 
@@ -22,9 +27,75 @@ _CANDIDATE_ID = re.compile(r"[A-Za-z0-9._-]+")
 _PathLike = Union[str, os.PathLike]
 
 
+class StaleReferenceError(ValueError):
+    """Raised when a compare-and-swap reference no longer matches."""
+
+
+def publish_directory_noreplace(source: _PathLike, destination: _PathLike) -> None:
+    """Atomically publish one directory and fail if the destination exists."""
+    source_path = Path(os.path.abspath(os.path.expanduser(os.fspath(source))))
+    destination_path = Path(
+        os.path.abspath(os.path.expanduser(os.fspath(destination)))
+    )
+    if source_path.parent != destination_path.parent:
+        raise ValueError("directory publication requires one parent directory")
+    if not source_path.is_dir() or source_path.is_symlink():
+        raise ValueError("published source must be a real directory")
+    library = ctypes.CDLL(None, use_errno=True)
+    old = os.fsencode(source_path)
+    new = os.fsencode(destination_path)
+    if sys.platform == "darwin":
+        function = library.renamex_np
+        function.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        function.restype = ctypes.c_int
+        returncode = function(old, new, 0x00000004)
+    elif sys.platform.startswith("linux"):
+        function = library.renameat2
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        function.restype = ctypes.c_int
+        returncode = function(-100, old, -100, new, 1)
+    else:
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic no-replace directory publication is unsupported",
+        )
+    if returncode != 0:
+        code = ctypes.get_errno()
+        if code == errno.EEXIST:
+            raise FileExistsError(code, os.strerror(code), destination_path)
+        raise OSError(code, os.strerror(code), destination_path)
+    parent_fd = os.open(
+        source_path.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def sha256_file(path: _PathLike) -> str:
     """Return a stable SHA-256 digest without following path symlinks."""
     return hashlib.sha256(read_regular_bytes(path)).hexdigest()
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("artifact value is not finite JSON") from error
 
 
 def _open_parent_directory(
@@ -69,7 +140,12 @@ def _open_parent_directory(
 
 
 def _read_regular_leaf(
-    directory_fd: int, leaf: str, target: Path, *, missing_ok: bool
+    directory_fd: int,
+    leaf: str,
+    target: Path,
+    *,
+    missing_ok: bool,
+    maximum_bytes: Optional[int] = None,
 ) -> Optional[bytes]:
     """Read one no-follow regular leaf from an already stable parent dirfd."""
     fd = None
@@ -88,13 +164,29 @@ def _read_regular_leaf(
                     f"artifact file is missing, a symlink, or unsafe: {target}"
                 ) from error
             raise
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
             raise ValueError(f"artifact path is not a regular file: {target}")
+        if (
+            maximum_bytes is not None
+            and (
+                isinstance(maximum_bytes, bool)
+                or not isinstance(maximum_bytes, int)
+                or maximum_bytes < 0
+            )
+        ):
+            raise ValueError("maximum_bytes must be a non-negative integer")
+        if maximum_bytes is not None and metadata.st_size > maximum_bytes:
+            raise ValueError(f"artifact file exceeds byte limit: {target}")
         chunks = []
+        total = 0
         while True:
             chunk = os.read(fd, 1024 * 1024)
             if not chunk:
                 break
+            total += len(chunk)
+            if maximum_bytes is not None and total > maximum_bytes:
+                raise ValueError(f"artifact file exceeds byte limit: {target}")
             chunks.append(chunk)
         return b"".join(chunks)
     finally:
@@ -102,7 +194,11 @@ def _read_regular_leaf(
             os.close(fd)
 
 
-def read_regular_bytes(path: _PathLike) -> bytes:
+def read_regular_bytes(
+    path: _PathLike,
+    *,
+    maximum_bytes: Optional[int] = None,
+) -> bytes:
     """Read regular-file bytes through no-follow parent and leaf descriptors."""
     try:
         directory_fd, leaf, target = _open_parent_directory(path, create=False)
@@ -110,7 +206,11 @@ def read_regular_bytes(path: _PathLike) -> bytes:
         raise ValueError(f"artifact file does not exist: {path}") from error
     try:
         return _read_regular_leaf(
-            directory_fd, leaf, target, missing_ok=False
+            directory_fd,
+            leaf,
+            target,
+            missing_ok=False,
+            maximum_bytes=maximum_bytes,
         )
     finally:
         os.close(directory_fd)
@@ -148,8 +248,51 @@ def read_regular_with_optional_sibling(
         os.close(directory_fd)
 
 
+_BUNDLE_GENERATION = re.compile(r"[0-9a-f]{32}")
+
+
+def _open_bundle_generation(directory_fd: int, generation: str, directory_path: Path) -> int:
+    """Open one immutable bundle generation below an already-open bundle root."""
+    if _BUNDLE_GENERATION.fullmatch(generation) is None:
+        raise ValueError("artifact bundle current pointer has an invalid generation")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    generations_fd = None
+    try:
+        generations_fd = os.open("generations", flags, dir_fd=directory_fd)
+        return os.open(generation, flags, dir_fd=generations_fd)
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOENT, errno.ENOTDIR}:
+            raise ValueError(
+                f"artifact bundle generation is missing, a symlink, or unsafe: {directory_path}"
+            ) from error
+        raise
+    finally:
+        if generations_fd is not None:
+            os.close(generations_fd)
+
+
+def _read_bundle_pointer(
+    directory_fd: int, directory_path: Path, *, missing_ok: bool = False
+) -> Optional[tuple[str, str]]:
+    payload = _read_regular_leaf(
+        directory_fd, "current", directory_path / "current", missing_ok=missing_ok
+    )
+    if payload is None:
+        return None
+    try:
+        pointer = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("artifact bundle current pointer is invalid JSON") from error
+    if type(pointer) is not dict or set(pointer) != {"generation"}:
+        raise ValueError("artifact bundle current pointer fields are invalid")
+    generation = pointer["generation"]
+    if type(generation) is not str or _BUNDLE_GENERATION.fullmatch(generation) is None:
+        raise ValueError("artifact bundle current pointer has an invalid generation")
+    return generation, hashlib.sha256(payload).hexdigest()
+
+
 def read_regular_bundle(directory: _PathLike, names) -> dict[str, bytes]:
-    """Read named regular files through one stable, no-follow directory fd."""
+    """Read named files from the immutable generation named by current once."""
     if isinstance(names, (str, bytes, bytearray, Mapping)):
         raise ValueError("artifact bundle names must be a sequence")
     try:
@@ -166,17 +309,28 @@ def read_regular_bundle(directory: _PathLike, names) -> dict[str, bytes]:
         raise ValueError(
             f"artifact bundle directory is missing, a symlink, or unsafe: {directory_path}"
         ) from error
+    generation_fd = None
     try:
+        pointer = _read_bundle_pointer(
+            directory_fd, directory_path
+        )
+        assert pointer is not None
+        generation, _pointer_digest = pointer
+        generation_fd = _open_bundle_generation(
+            directory_fd, generation, directory_path
+        )
         return {
             name: _read_regular_leaf(
-                directory_fd,
+                generation_fd,
                 name,
-                directory_path / name,
+                directory_path / "generations" / generation / name,
                 missing_ok=False,
             )
             for name in clean_names
         }
     finally:
+        if generation_fd is not None:
+            os.close(generation_fd)
         os.close(directory_fd)
 
 
@@ -287,6 +441,748 @@ def atomic_write_bytes(path: _PathLike, payload: bytes) -> None:
         os.close(directory_fd)
 
 
+def append_regular_bytes(path: _PathLike, payload: bytes) -> None:
+    """Durably append bytes to one regular no-follow file."""
+    if not isinstance(payload, bytes):
+        raise TypeError("append payload must be bytes")
+    directory_fd, leaf, target = _open_parent_directory(path, create=True)
+    descriptor = None
+    try:
+        descriptor = os.open(
+            leaf,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_APPEND
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"artifact append path is not regular: {target}")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("artifact append made no progress")
+            offset += written
+        os.fsync(descriptor)
+        os.fsync(directory_fd)
+    finally:
+        if descriptor is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        os.close(directory_fd)
+
+
+def create_regular_directory(
+    path: _PathLike,
+    *,
+    mode: int = 0o700,
+    exist_ok: bool = False,
+) -> Path:
+    """Create one directory below a stable no-follow parent."""
+    directory_fd, leaf, target = _open_parent_directory(path, create=True)
+    try:
+        try:
+            os.mkdir(leaf, mode, dir_fd=directory_fd)
+        except FileExistsError:
+            if not exist_ok:
+                raise
+            metadata = os.stat(leaf, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError(
+                    f"artifact directory path is not a real directory: {target}"
+                )
+        os.fsync(directory_fd)
+        return target
+    finally:
+        os.close(directory_fd)
+
+
+def list_regular_directories(
+    path: _PathLike,
+    *,
+    prefix: str = "",
+) -> list[str]:
+    """List direct child directories without following the container or children."""
+    target = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    parent_fd, leaf, _ = _open_parent_directory(target, create=False)
+    directory_fd = None
+    try:
+        directory_fd = os.open(
+            leaf,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        names = []
+        for name in os.listdir(directory_fd):
+            if not name.startswith(prefix):
+                continue
+            metadata = os.stat(
+                name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError(
+                    f"artifact directory entry is not a real directory: {target / name}"
+                )
+            names.append(name)
+        return sorted(names)
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise ValueError(
+                f"artifact directory is missing, a symlink, or unsafe: {target}"
+            ) from error
+        raise
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        os.close(parent_fd)
+
+
+def _relative_artifact_path(value: _PathLike) -> Path:
+    try:
+        raw = os.fspath(value)
+    except TypeError as error:
+        raise ValueError("artifact relative path must be a non-empty string") from error
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("artifact relative path must be a non-empty string")
+    path = Path(raw)
+    windows_path = PureWindowsPath(raw)
+    if (
+        path.is_absolute()
+        or windows_path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or any(part in {"", ".", ".."} for part in windows_path.parts)
+    ):
+        raise ValueError("artifact relative path must stay inside its root")
+    return path
+
+
+@contextmanager
+def _locked_reference(artifact_root: Path, relative: Path):
+    """Serialize all reads and writes of one mutable root-relative reference."""
+    lock_key = hashlib.sha256(str(relative).encode("utf-8")).hexdigest()
+    lock_path = artifact_root / ".locks" / f"cas-{lock_key}.lock"
+    lock_directory_fd, lock_leaf, lock_target = _open_parent_directory(
+        lock_path, create=True
+    )
+    lock_fd = None
+    try:
+        try:
+            lock_fd = os.open(
+                lock_leaf,
+                os.O_RDWR
+                | os.O_CREAT
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=lock_directory_fd,
+            )
+        except OSError as error:
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise ValueError(
+                    f"artifact reference lock is a symlink or unsafe: {lock_target}"
+                ) from error
+            raise
+        if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+            raise ValueError(
+                f"artifact reference lock is not regular: {lock_target}"
+            )
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+        os.close(lock_directory_fd)
+
+
+def _reference_digest(artifact_root: Path, relative: Path) -> Optional[str]:
+    target = artifact_root / relative
+    target_directory_fd, target_leaf, target_path = _open_parent_directory(
+        target, create=True
+    )
+    try:
+        current = _read_regular_leaf(
+            target_directory_fd,
+            target_leaf,
+            target_path,
+            missing_ok=True,
+        )
+    finally:
+        os.close(target_directory_fd)
+    return None if current is None else hashlib.sha256(current).hexdigest()
+
+
+def compare_and_swap_ref(
+    artifact_root: _PathLike,
+    relative_path: _PathLike,
+    expected_digest: Optional[str],
+    replacement: Mapping[str, Any],
+) -> str:
+    """Atomically replace one root-relative JSON reference if its digest matches."""
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
+    relative = _relative_artifact_path(relative_path)
+    if (
+        expected_digest is not None
+        and (
+            not isinstance(expected_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
+        )
+    ):
+        raise ValueError("expected reference digest must be SHA-256 or null")
+    if not isinstance(replacement, Mapping):
+        raise ValueError("replacement reference must be an object")
+    try:
+        payload = (
+            json.dumps(
+                dict(replacement),
+                indent=2,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("replacement reference is not serializable") from error
+
+    with _locked_reference(root, relative):
+        target = root / relative
+        target_directory_fd, target_leaf, target_path = _open_parent_directory(
+            target, create=True
+        )
+        try:
+            current = _read_regular_leaf(
+                target_directory_fd,
+                target_leaf,
+                target_path,
+                missing_ok=True,
+            )
+            current_digest = (
+                None if current is None else hashlib.sha256(current).hexdigest()
+            )
+            if current_digest != expected_digest:
+                raise StaleReferenceError(
+                    "artifact reference changed before compare-and-swap"
+                )
+            _atomic_write_leaf(
+                target_directory_fd,
+                target_leaf,
+                target_path,
+                payload,
+            )
+            os.fsync(target_directory_fd)
+        finally:
+            os.close(target_directory_fd)
+        return hashlib.sha256(payload).hexdigest()
+
+
+def create_regular_json_if_ref_digest(
+    artifact_root: _PathLike,
+    reference_path: _PathLike,
+    expected_digest: Optional[str],
+    output_path: _PathLike,
+    payload: Any,
+) -> None:
+    """Create one immutable record only while a mutable reference is unchanged."""
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
+    reference = _relative_artifact_path(reference_path)
+    output = _relative_artifact_path(output_path)
+    if (
+        expected_digest is not None
+        and (
+            not isinstance(expected_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
+        )
+    ):
+        raise ValueError("expected reference digest must be SHA-256 or null")
+    with _locked_reference(root, reference):
+        if _reference_digest(root, reference) != expected_digest:
+            raise StaleReferenceError(
+                "artifact reference changed before immutable record publication"
+            )
+        create_regular_json(root / output, payload)
+
+
+def _scan_limits(value) -> tuple[int, int, float]:
+    if type(value) is not dict:
+        raise ValueError("scan_limits must be an object")
+    fields = {"max_files", "max_total_bytes", "max_wall_seconds"}
+    if set(value) != fields:
+        raise ValueError("scan_limits fields are incomplete or unknown")
+    max_files = value["max_files"]
+    max_total_bytes = value["max_total_bytes"]
+    max_wall_seconds = value["max_wall_seconds"]
+    if (
+        isinstance(max_files, bool)
+        or not isinstance(max_files, int)
+        or max_files < 1
+    ):
+        raise ValueError("scan_limits.max_files must be a positive integer")
+    if (
+        isinstance(max_total_bytes, bool)
+        or not isinstance(max_total_bytes, int)
+        or max_total_bytes < 1
+    ):
+        raise ValueError("scan_limits.max_total_bytes must be a positive integer")
+    if (
+        isinstance(max_wall_seconds, bool)
+        or not isinstance(max_wall_seconds, (int, float))
+        or max_wall_seconds <= 0
+    ):
+        raise ValueError("scan_limits.max_wall_seconds must be positive")
+    return max_files, max_total_bytes, float(max_wall_seconds)
+
+
+def _read_snapshot_file(
+    directory_fd: int,
+    name: str,
+    display_path: Path,
+    *,
+    deadline: float,
+) -> tuple[bytes, int]:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("artifact scan exceeded max_wall_seconds")
+    descriptor = None
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"snapshot input is not a regular file: {display_path}")
+        chunks = []
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("artifact scan exceeded max_wall_seconds")
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise ValueError(f"snapshot input changed while reading: {display_path}")
+        payload = b"".join(chunks)
+        if len(payload) != before.st_size:
+            raise ValueError(f"snapshot input size changed: {display_path}")
+        return payload, stat.S_IMODE(before.st_mode)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _scan_directory(
+    directory_fd: int,
+    relative: Path,
+    display_root: Path,
+    *,
+    deadline: float,
+    records: list[dict],
+    payloads: dict[str, bytes],
+    counters: dict[str, int],
+    max_files: int,
+    max_total_bytes: int,
+) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("artifact scan exceeded max_wall_seconds")
+    for name in sorted(os.listdir(directory_fd)):
+        if name in {".", ".."}:
+            continue
+        child_relative = relative / name
+        display_path = display_root / child_relative
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(f"snapshot input contains a symlink: {display_path}")
+        if stat.S_ISDIR(metadata.st_mode):
+            records.append(
+                {
+                    "path": child_relative.as_posix(),
+                    "kind": "directory",
+                    "mode": stat.S_IMODE(metadata.st_mode),
+                }
+            )
+            child_fd = os.open(
+                name,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            try:
+                _scan_directory(
+                    child_fd,
+                    child_relative,
+                    display_root,
+                    deadline=deadline,
+                    records=records,
+                    payloads=payloads,
+                    counters=counters,
+                    max_files=max_files,
+                    max_total_bytes=max_total_bytes,
+                )
+            finally:
+                os.close(child_fd)
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"snapshot input contains an unsupported entry: {display_path}")
+        payload, mode = _read_snapshot_file(
+            directory_fd,
+            name,
+            display_path,
+            deadline=deadline,
+        )
+        counters["files"] += 1
+        counters["bytes"] += len(payload)
+        if counters["files"] > max_files:
+            raise ValueError("artifact scan exceeded max_files")
+        if counters["bytes"] > max_total_bytes:
+            raise ValueError("artifact scan exceeded max_total_bytes")
+        key = child_relative.as_posix()
+        payloads[key] = payload
+        records.append(
+            {
+                "path": key,
+                "kind": "file",
+                "mode": mode,
+                "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+
+
+def _snapshot_source(source, scan_limits) -> tuple[dict, dict[str, bytes]]:
+    max_files, max_total_bytes, max_wall_seconds = _scan_limits(scan_limits)
+    deadline = time.monotonic() + max_wall_seconds
+    target = Path(os.path.abspath(os.path.expanduser(os.fspath(source))))
+    parent_fd, leaf, _target = _open_parent_directory(target, create=False)
+    records = []
+    payloads = {}
+    counters = {"files": 0, "bytes": 0}
+    try:
+        metadata = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(f"snapshot input is a symlink: {target}")
+        if stat.S_ISREG(metadata.st_mode):
+            payload, mode = _read_snapshot_file(
+                parent_fd,
+                leaf,
+                target,
+                deadline=deadline,
+            )
+            counters = {"files": 1, "bytes": len(payload)}
+            if counters["files"] > max_files or counters["bytes"] > max_total_bytes:
+                raise ValueError("artifact scan exceeded configured limits")
+            payloads[target.name] = payload
+            records.append(
+                {
+                    "path": target.name,
+                    "kind": "file",
+                    "mode": mode,
+                    "size_bytes": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            )
+            source_kind = "file"
+        elif stat.S_ISDIR(metadata.st_mode):
+            source_fd = os.open(
+                leaf,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            try:
+                _scan_directory(
+                    source_fd,
+                    Path(),
+                    target,
+                    deadline=deadline,
+                    records=records,
+                    payloads=payloads,
+                    counters=counters,
+                    max_files=max_files,
+                    max_total_bytes=max_total_bytes,
+                )
+            finally:
+                os.close(source_fd)
+            source_kind = "directory"
+        else:
+            raise ValueError(f"snapshot input has unsupported type: {target}")
+    finally:
+        os.close(parent_fd)
+    manifest = {
+        "format_version": "cuda-kernel-optimizer/object-manifest-v1",
+        "source_kind": source_kind,
+        "entries": records,
+        "file_count": counters["files"],
+        "total_bytes": counters["bytes"],
+    }
+    return manifest, payloads
+
+
+def _validated_snapshot(manifest, payloads) -> tuple[dict, dict[str, bytes]]:
+    """Validate one self-contained snapshot before it enters the object store."""
+    if type(manifest) is not dict or set(manifest) != {
+        "format_version", "source_kind", "entries", "file_count", "total_bytes"
+    }:
+        raise ValueError("snapshot manifest fields are incomplete or unknown")
+    if manifest["format_version"] != "cuda-kernel-optimizer/object-manifest-v1":
+        raise ValueError("snapshot manifest format_version is unsupported")
+    if manifest["source_kind"] not in {"file", "directory"}:
+        raise ValueError("snapshot manifest source_kind is unsupported")
+    if type(manifest["entries"]) is not list:
+        raise ValueError("snapshot manifest entries must be a list")
+    if not isinstance(payloads, Mapping):
+        raise ValueError("snapshot payloads must be a mapping")
+
+    files: dict[str, bytes] = {}
+    directories = set()
+    total_bytes = 0
+    for entry in manifest["entries"]:
+        if type(entry) is not dict:
+            raise ValueError("snapshot manifest entry must be an object")
+        kind = entry.get("kind")
+        path = _relative_artifact_path(entry.get("path"))
+        key = path.as_posix()
+        mode = entry.get("mode")
+        if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o777:
+            raise ValueError("snapshot manifest entry mode is invalid")
+        if kind == "directory":
+            if (
+                set(entry) != {"path", "kind", "mode"}
+                or key in directories
+                or key in files
+            ):
+                raise ValueError("snapshot directory entry fields are invalid")
+            directories.add(key)
+            continue
+        if kind != "file" or set(entry) != {
+            "path", "kind", "mode", "size_bytes", "sha256"
+        }:
+            raise ValueError("snapshot file entry fields are invalid")
+        size = entry["size_bytes"]
+        digest = entry["sha256"]
+        if (
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or key in files
+            or key in directories
+        ):
+            raise ValueError("snapshot file entry metadata is invalid")
+        try:
+            payload = payloads[key]
+        except KeyError as error:
+            raise ValueError(f"snapshot payload is missing: {key}") from error
+        if not isinstance(payload, bytes):
+            raise ValueError("snapshot payload must be bytes")
+        if len(payload) != size or hashlib.sha256(payload).hexdigest() != digest:
+            raise ValueError("snapshot payload does not match manifest")
+        files[key] = payload
+        total_bytes += size
+
+    if set(payloads) != set(files):
+        raise ValueError("snapshot payload paths do not match manifest")
+    if any(not isinstance(key, str) for key in payloads):
+        raise ValueError("snapshot payload paths must be strings")
+    if (
+        isinstance(manifest["file_count"], bool)
+        or not isinstance(manifest["file_count"], int)
+        or manifest["file_count"] != len(files)
+        or isinstance(manifest["total_bytes"], bool)
+        or not isinstance(manifest["total_bytes"], int)
+        or manifest["total_bytes"] != total_bytes
+    ):
+        raise ValueError("snapshot manifest summary does not match entries")
+    all_paths = set(files) | directories
+    for key in all_paths:
+        parent = Path(key).parent
+        while parent != Path("."):
+            parent_key = parent.as_posix()
+            if parent_key not in directories:
+                raise ValueError("snapshot manifest omits a parent directory")
+            parent = parent.parent
+    if any(
+        path in files and any(other.startswith(path + "/") for other in all_paths)
+        for path in files
+    ):
+        raise ValueError("snapshot file entry cannot contain child entries")
+    if manifest["source_kind"] == "file" and (len(files) != 1 or directories):
+        raise ValueError("snapshot file source must contain exactly one file")
+    return manifest, files
+
+
+def freeze_snapshot(artifact_root, manifest, payloads) -> dict:
+    """Publish one already-captured snapshot without reading its source again."""
+    manifest, payloads = _validated_snapshot(manifest, payloads)
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
+    digest = hashlib.sha256(_canonical_json_bytes(manifest)).hexdigest()
+    object_parent = root / "objects" / "sha256"
+    object_parent.mkdir(parents=True, exist_ok=True)
+    destination = object_parent / digest
+    if destination.exists():
+        existing = read_regular_bytes(destination / "manifest.json")
+        if existing != _canonical_json_bytes(manifest) + b"\n":
+            raise ValueError("content-addressed object manifest does not match")
+    else:
+        temporary = object_parent / f".{digest}.{secrets.token_hex(8)}.tmp"
+        try:
+            temporary.mkdir(mode=0o700)
+            payload_root = temporary / "payload"
+            payload_root.mkdir(mode=0o700)
+            for record in manifest["entries"]:
+                target = payload_root / record["path"]
+                if record["kind"] == "directory":
+                    target.mkdir(mode=record["mode"], parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                create_regular_bytes(target, payloads[record["path"]])
+                os.chmod(target, record["mode"], follow_symlinks=False)
+            create_regular_bytes(
+                temporary / "manifest.json",
+                _canonical_json_bytes(manifest) + b"\n",
+            )
+            try:
+                publish_directory_noreplace(temporary, destination)
+            except FileExistsError:
+                existing = read_regular_bytes(destination / "manifest.json")
+                if existing != _canonical_json_bytes(manifest) + b"\n":
+                    raise ValueError(
+                        "content-addressed object manifest does not match"
+                    )
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+    return {
+        "digest": digest,
+        "locator": str(Path("objects") / "sha256" / digest),
+        "source_kind": manifest["source_kind"],
+        "file_count": manifest["file_count"],
+        "total_bytes": manifest["total_bytes"],
+    }
+
+
+def freeze_path(artifact_root, source, scan_limits) -> dict:
+    """Capture a bounded source once, then publish that exact snapshot."""
+    manifest, payloads = _snapshot_source(source, scan_limits)
+    return freeze_snapshot(artifact_root, manifest, payloads)
+
+
+def materialize_object(artifact_root, object_ref, destination) -> Path:
+    """Verify and copy one frozen object into a new isolated path."""
+    if type(object_ref) is not dict:
+        raise ValueError("object_ref must be an object")
+    required = {"digest", "locator"}
+    optional = {"source_kind", "file_count", "total_bytes"}
+    if not required.issubset(object_ref) or set(object_ref) - required - optional:
+        raise ValueError("object_ref fields are incomplete or unknown")
+    digest = object_ref["digest"]
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("object_ref.digest must be a lowercase SHA-256")
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
+    locator = _relative_artifact_path(object_ref["locator"])
+    expected_locator = Path("objects") / "sha256" / digest
+    if locator != expected_locator:
+        raise ValueError("object_ref locator does not match its digest")
+    object_directory = root / locator
+    manifest_payload = read_regular_bytes(object_directory / "manifest.json")
+    try:
+        manifest = json.loads(manifest_payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("object manifest is invalid JSON") from error
+    if type(manifest) is not dict:
+        raise ValueError("object manifest must be an object")
+    if hashlib.sha256(_canonical_json_bytes(manifest)).hexdigest() != digest:
+        raise ValueError("object manifest digest does not match object_ref")
+
+    raw_entries = manifest.get("entries")
+    if type(raw_entries) is not list:
+        raise ValueError("object manifest entries must be a list")
+    payload_root = object_directory / "payload"
+    payloads = {}
+    for entry in raw_entries:
+        if type(entry) is not dict or entry.get("kind") != "file":
+            continue
+        path = _relative_artifact_path(entry.get("path"))
+        payloads[path.as_posix()] = read_regular_bytes(payload_root / path)
+    manifest, payloads = _validated_snapshot(manifest, payloads)
+    for field in optional.intersection(object_ref):
+        if (
+            type(manifest[field]) is not type(object_ref[field])
+            or manifest[field] != object_ref[field]
+        ):
+            raise ValueError("object_ref summary does not match manifest")
+    entries = manifest["entries"]
+
+    target = Path(os.path.abspath(os.path.expanduser(os.fspath(destination))))
+    if os.path.lexists(target):
+        raise FileExistsError(f"materialization destination exists: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.parent / f".{target.name}.{secrets.token_hex(8)}.tmp"
+    replacement = None
+    try:
+        temporary.mkdir(mode=0o700)
+        directories = [entry for entry in entries if entry["kind"] == "directory"]
+        for entry in sorted(directories, key=lambda item: item["path"]):
+            path = _relative_artifact_path(entry["path"])
+            materialized = temporary / path
+            materialized.mkdir(mode=entry["mode"], parents=True, exist_ok=True)
+            os.chmod(materialized, entry["mode"], follow_symlinks=False)
+        for entry in (entry for entry in entries if entry["kind"] == "file"):
+            path = _relative_artifact_path(entry["path"])
+            materialized = temporary / path
+            payload = payloads[path.as_posix()]
+            materialized.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            create_regular_bytes(materialized, payload)
+            os.chmod(materialized, entry["mode"], follow_symlinks=False)
+        if manifest["source_kind"] == "file":
+            file_entries = [entry for entry in entries if entry["kind"] == "file"]
+            source = temporary / file_entries[0]["path"]
+            replacement = target.parent / f".{target.name}.{secrets.token_hex(8)}.file"
+            os.rename(source, replacement)
+            shutil.rmtree(temporary)
+            os.rename(replacement, target)
+        elif manifest["source_kind"] == "directory":
+            os.rename(temporary, target)
+        else:
+            raise ValueError("object manifest source_kind is unsupported")
+        return target
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        if replacement is not None:
+            try:
+                os.unlink(replacement)
+            except FileNotFoundError:
+                pass
+        raise
+
+
 def create_regular_bytes(path: _PathLike, payload: bytes) -> None:
     """Create one durable regular file without following any path component."""
     if not isinstance(payload, bytes):
@@ -347,7 +1243,7 @@ def create_regular_json(path: _PathLike, payload: Any) -> None:
 
 
 def publish_regular_bundle(directory: _PathLike, writes, removals=()) -> dict:
-    """Publish regular-file writes/removals through one stable directory fd."""
+    """Publish one immutable bundle generation, then CAS the current pointer."""
     if not isinstance(writes, Mapping):
         raise ValueError("artifact bundle writes must be a mapping")
     if isinstance(removals, (str, bytes, bytearray, Mapping)):
@@ -382,50 +1278,108 @@ def publish_regular_bundle(directory: _PathLike, writes, removals=()) -> dict:
         raise ValueError(
             f"artifact publish directory is missing, a symlink, or unsafe: {directory_path}"
         ) from error
-    original = os.fstat(directory_fd)
-    if not stat.S_ISDIR(original.st_mode):
+    if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
         os.close(directory_fd)
         raise ValueError(f"artifact publish path is not a directory: {directory_path}")
+    lock_fd = None
+    generations_fd = None
+    generation_fd = None
+    temporary_leaf = None
     try:
-        for leaf, payload in clean_writes:
-            target = directory_path / leaf
-            _atomic_write_leaf(directory_fd, leaf, target, payload)
-            published = _read_regular_leaf(
-                directory_fd, leaf, target, missing_ok=False
-            )
-            if hashlib.sha256(published).hexdigest() != expected_hashes[leaf]:
-                raise ValueError(
-                    f"published artifact does not match captured payload: {target}"
-                )
-        for leaf in clean_removals:
-            _remove_regular_leaf(
-                directory_fd,
-                leaf,
-                directory_path / leaf,
-                missing_ok=True,
-            )
-        os.fsync(directory_fd)
+        lock_fd = os.open(
+            ".bundle-publish.lock",
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+            raise ValueError("artifact bundle publish lock is not regular")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
-        identity_fd = None
+        pointer = _read_bundle_pointer(directory_fd, directory_path, missing_ok=True)
+        if pointer is None:
+            previous_generation, expected_pointer_digest = None, None
+        else:
+            previous_generation, expected_pointer_digest = pointer
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+        lock_fd = None
+
+        contents = {}
+        if previous_generation is not None:
+            generation_fd = _open_bundle_generation(
+                directory_fd, previous_generation, directory_path
+            )
+            for leaf in os.listdir(generation_fd):
+                _validate_leaf_name(leaf)
+                contents[leaf] = _read_regular_leaf(
+                    generation_fd,
+                    leaf,
+                    directory_path / "generations" / previous_generation / leaf,
+                    missing_ok=False,
+                )
+            os.close(generation_fd)
+            generation_fd = None
+        for leaf in clean_removals:
+            contents.pop(leaf, None)
+        contents.update(clean_writes)
+
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            identity_fd, _leaf, _target = _open_parent_directory(
-                marker, create=False
+            os.mkdir("generations", 0o700, dir_fd=directory_fd)
+        except FileExistsError:
+            pass
+        try:
+            generations_fd = os.open("generations", flags, dir_fd=directory_fd)
+        except OSError as error:
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise ValueError("artifact bundle generations path is unsafe") from error
+            raise
+        generation = secrets.token_hex(16)
+        temporary_leaf = f".{generation}.tmp"
+        os.mkdir(temporary_leaf, 0o700, dir_fd=generations_fd)
+        generation_fd = os.open(temporary_leaf, flags, dir_fd=generations_fd)
+        for leaf, payload in sorted(contents.items()):
+            target = directory_path / "generations" / temporary_leaf / leaf
+            _atomic_write_leaf(generation_fd, leaf, target, payload)
+            published = _read_regular_leaf(
+                generation_fd, leaf, target, missing_ok=False
             )
-            current = os.fstat(identity_fd)
-        except (OSError, ValueError) as error:
-            raise ValueError(
-                "artifact publish directory was replaced, is a symlink, or unsafe: "
-                f"{directory_path}"
-            ) from error
-        finally:
-            if identity_fd is not None:
-                os.close(identity_fd)
-        if (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino):
-            raise ValueError(
-                f"artifact publish directory was replaced: {directory_path}"
-            )
+            if hashlib.sha256(published).hexdigest() != hashlib.sha256(payload).hexdigest():
+                raise ValueError(f"published artifact does not match captured payload: {target}")
+        os.fsync(generation_fd)
+        os.close(generation_fd)
+        generation_fd = None
+        os.rename(
+            temporary_leaf,
+            generation,
+            src_dir_fd=generations_fd,
+            dst_dir_fd=generations_fd,
+        )
+        temporary_leaf = None
+        os.fsync(generations_fd)
+        compare_and_swap_ref(
+            directory_path,
+            "current",
+            expected_pointer_digest,
+            {"generation": generation},
+        )
         return expected_hashes
     finally:
+        if generation_fd is not None:
+            os.close(generation_fd)
+        if temporary_leaf is not None and generations_fd is not None:
+            try:
+                shutil.rmtree(directory_path / "generations" / temporary_leaf)
+            except FileNotFoundError:
+                pass
+        if generations_fd is not None:
+            os.close(generations_fd)
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
         os.close(directory_fd)
 
 

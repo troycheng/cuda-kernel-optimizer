@@ -1,170 +1,103 @@
 ---
 name: cuda-kernel-optimizer
-description: "Use when optimizing, tuning, diagnosing, or profiling CUDA, CUTLASS, Triton, PyTorch, vLLM, TensorRT-LLM, or another GPU workload; when assessing an existing NCU report; or when the test workload, correctness checks, benchmark, profiler, or target environment is incomplete."
+description: "Use when optimizing, tuning, diagnosing, or profiling CUDA, CUTLASS, Triton, PyTorch, vLLM, TensorRT-LLM, or another GPU workload; when assessing an NCU, Nsys, or PyTorch Profiler report; or when the test workload, correctness checks, measurement path, or target environment is incomplete."
 ---
 
 # CUDA Kernel and Workload Optimizer
 
-Optimize a user-provided GPU workload using explicit correctness checks. A
-kernel result supports a kernel claim; an end-to-end claim requires a
-user-approved test workload that represents the real target. Never download,
-invent, or silently substitute a workload.
+ChatGPT is the sole optimization decision maker. It identifies the bottleneck,
+chooses the direction and candidate, judges ROI, and decides the next step.
+The bundled tools perform deterministic checks, measurements, parsing, and
+record keeping. Tools do not choose a direction, judge ROI, or propose the next
+step.
 
-Do not assume the bottleneck is inside a kernel. Check `kernel`, `framework`,
-`cpu_data`, `transfer`, `communication`, `io`, `environment`, and `mixed`
-causes. Let measured headroom choose the direction; do not apply a universal method ranking across layers.
+Optimize the user's complete objective, not an isolated kernel metric. A kernel
+measurement supports a kernel claim. A workload or serving claim requires the
+user's original test workload and correctness or precision validation before
+any benchmark, profiler run, or performance measurement. Never invent,
+download, or silently substitute a test workload.
 
-## Route before loading details
+## Route
 
-Read only the row that matches the task. Do not load the whole catalog.
+Load only the references needed for the current problem.
 
-| Situation | Route |
+| Need | Tool or reference |
 |---|---|
-| Missing correctness checks, stable kernel benchmark, test workload, or environment | Run `python3 <skill>/scripts/readiness.py --help`; read `references/environment_readiness.md` |
-| CUDA, CUTLASS, or Triton kernel | Read `references/performance_iteration.md` |
-| Bottleneck unknown in a full workload | Use `examples/workload-controller.md` |
-| Serving KPI or changing serving state | Read `references/serving_evidence_protocol.md` and `references/nonstationary_serving_evidence.md` |
-| Long or resumable run | Read `references/long_running_control.md` |
-| Existing `.ncu-rep` only | Read `references/ncu_metrics_guide.md`; keep analysis read-only |
-| Stack or architecture uncertainty | Read `references/version_stack_audit.md`, `references/compatibility.md`, and `references/offline_knowledge.md` |
-| Direction choice or plateau | Read `references/research_augmentation.md` |
+| Freeze the target and verify that the test workload, precision checks, driver, environment, and low-cost smoke test are usable | `scripts/readiness.py`; `references/environment_readiness.md` |
+| Create a candidate, run the cheapest falsifier, check correctness, compare performance, or audit the selected result | `scripts/workload_evaluate.py`; `references/performance_iteration.md` |
+| Parse or collect Nsight Compute facts | `scripts/profile_ncu.py`; `references/ncu_metrics_guide.md` |
+| Parse or collect Nsight Systems facts | `scripts/profile_nsys.py` |
+| Parse or collect PyTorch Profiler facts | `scripts/profile_pytorch.py` |
+| Inspect frozen compiler stages or explicit binary output | `scripts/compiler_evidence.py` and `scripts/sass_check.py` |
+| Query the bundled offline knowledge | `scripts/knowledge_query.py` |
+| Inspect, select, or restore the recorded best variant | `scripts/champion.py` |
+| Validate serving evidence | `references/serving_evidence_protocol.md` and `references/nonstationary_serving_evidence.md` |
+| Check current primary sources or request an external challenge | `references/research_augmentation.md` |
 
-## Before mutation
+Run each tool with `--help` before constructing its closed JSON request. Do not
+load source files merely to discover CLI arguments.
 
-Establish source access, correctness, representative cases, reproducible build,
-paired timing, objective, allowed paths, and host boundaries. If only source is
-available, return static hypotheses and an environment plan, not an optimization
-result. Run readiness yourself; required failures stop baseline and profiling.
-Host repair stays `recommend_only`.
+## Optimization workflow
 
-Run the original user-provided business baseline before profiling or replacing
-its measurement path. The complete-service objective remains authoritative;
-operator and kernel measurements only explain it. After the first global scan,
-read `active_diagnosis/performance_model.json` and
-`active_diagnosis/initial_investment_brief.json`. Report the supported benefit
-ceiling, uncertainty, next action, and whether further work is worth the
-expected cost. Do not invent a numeric duration without identity-matched timing
-history. A run grant is the boundary for the next action, not a target to
-consume: only completed controlled actions and reviewer aggregate waits count
-toward it, while wall time remains informational. If the next action's P90,
-scope, risk, or stage exceeds the grant, return `REVIEW_REQUIRED` without
-starting it; do not call that an evidence or performance rejection.
+1. Confirm the user's objective, minimum useful effect, allowed files, risk,
+   time, GPU use, and host-change boundary.
+2. Run readiness. An optimization target must freeze the original variant,
+   original test workload, correctness or precision rule, command driver,
+   objective, environment identity, and validity requirements. A diagnostic
+   target freezes existing reports and does not pretend that a workload is
+   available.
+3. Measure the original baseline before changing code. If correctness fails,
+   do not accept performance samples.
+4. Analyze source and existing observations. Consider kernel, launch,
+   framework, CPU/data, transfer, communication, I/O, serving, and environment
+   causes. ChatGPT keeps competing hypotheses and chooses the cheapest
+   observation that can disprove the leading one.
+5. Freeze one candidate as an Experiment before executing it. Run its declared
+   falsifier, then correctness, then a short paired screen. Start a profiler
+   only when it answers a specific unresolved question. Start formal paired
+   measurement only after the earlier evidence remains valid.
+6. Compare the measured effect and uncertainty with the user's minimum useful
+   effect and the expected cost of the next action. Stop early when further
+   work is not worthwhile. Continue a promising direction only within the
+   user's allowed scope.
+7. ChatGPT may explicitly select a candidate after a valid formal result. Run a
+   final audit against the original variant before making the strongest
+   workload or serving claim.
 
-Use `balanced` by default; respect `quick` or `thorough` when selected. Each
-budget has a soft target and a hard ceiling. The soft target guides effort. The
-hard ceiling is only a safety limit.
+Each long command has its own timeout and process-group cleanup. A timeout is a
+safety boundary, not a target duration. If the user allows unattended work,
+ChatGPT continues only while the evidence, expected benefit, cost, and allowed
+scope still justify the next action.
 
-## Candidate gate and recovery
+## Evidence rules
 
-Before execution, freeze one ChangeSet with `scope`, `risk`, `claim_layer`,
-`cheapest_falsifier`, per-stage `estimated_cost`, `minimum_effect`,
-`rejection_condition`, and `promotion_condition`. The frozen
-`rounds/round-1/change_set.json` is the only candidate-plan reader; the root
-mirror is input compatibility only. For workload claims, declare only the
-stages that can run and use `declared_upper_bound` for each P90.
+- Candidate and reference content must be immutable and explicitly bound to
+  every result.
+- Correctness failure blocks performance interpretation.
+- Compare variants with paired samples from the same frozen test workload and
+  environment identity.
+- A profiler returns facts or observations. It never returns an optimization
+  direction, ROI judgment, or next step.
+- Knowledge lookup returns advisory facts or empty results. It never chooses a
+  direction, judges ROI, or names the next step. Empty knowledge does not block
+  source analysis, profiling, or a model-proposed hypothesis.
+- Unknown profiler versions, fields, or units fail closed. Do not infer values
+  from a nearby tool version or GPU architecture.
+- `ERR_NVGPUCTRPERM` means NCU counters are unavailable under current host
+  permissions. Record the limitation and use another valid evidence source;
+  recommend host permission changes rather than applying them.
+- Keep raw reports, paired samples, environment identity, rejected candidates,
+  and the terminal reason needed to review the conclusion.
 
-The pure gate chooses only one current stage at a time, in this order:
+## External research
 
-1. static review or an independent small test;
-2. build and minimum correctness;
-3. short paired performance screen;
-4. profiler, only when it can resolve a live uncertainty;
-5. formal paired performance;
-6. full service test, only for a serving claim handled by its separate workflow.
+External search and external AI review are optional. Use them for primary-source
+verification, difficult direction selection, a plateau, or final review. Redact
+private material and preserve disagreement. Network failure does not stop local
+work. Local evidence remains authoritative; correctness and measurement decide
+whether a candidate is accepted.
 
-A failed stage blocks every later stage. Stop when the measured effect upper
-bound is below the contract threshold. Continue past the soft target when the
-uncertainty still overlaps the threshold and the direction has credible
-headroom. Do not continue merely to use the budget. Infrastructure repair uses
-`min(3 minutes, 10% of hard ceiling)` as a review point, not a kill timer.
-Finish environment readiness before starting controlled spend. A repair may
-continue to its readiness deadline; terminate the process group only when its
-command timeout or the readiness hard deadline is reached.
-
-For each candidate stage, the Controller commits intent, runs one stage, writes
-complete, consumes complete into state, then cleans up the marker. Resume must
-only consume a matching completion or clean an already consumed marker; an
-intent without completion requires manual recovery. A grant pause preserves the
-candidate and snapshot. A covering replacement grant resumes at the saved
-stage; only explicit `abandon` rolls the snapshot back.
-
-Freeze objective, constraints, environment, paths, and stability policy with
-`scripts/workload_contract.py`; calibrate with
-`scripts/stability_calibration.py`. During active diagnosis, consume only
-`active_diagnosis/knowledge_context.json`, which the Controller rebuilds from
-the current identity, performance model, and sealed semantic observations. Its
-at most three candidates are falsifiable directions with
-`promotion_authority="none"`; they are not permission to modify code. Exact
-prior rejections may close the same identity-bound mechanism, but historical
-speedup values never become current benefit facts.
-
-Use the query CLI only for inspection; runtime queries require a closed frozen
-input. The architecture-only mode remains a reference catalog:
-
-```bash
-python3 <skill>/scripts/capability_query.py --help
-python3 <skill>/scripts/knowledge_query.py --help
-python3 <skill>/scripts/knowledge_query.py --arch sm_120 --layer kernel --bottleneck gemm --limit 5
-```
-
-Exact SM capabilities are required; never inherit features by numeric ordering.
-The bundled snapshot must work offline. Read `references/optimizer_limits.md`
-when facts or workload evidence are missing.
-
-## Controller boundary
-
-For a resumable run, let the Controller own state, authorization and reviewer
-completion consumption. `scripts/evidence_controller.py` seals allowlisted
-evidence; `scripts/planner_boundary.py` admits candidates. Direction and final
-reviewer requests use allowlisted summaries and fixed intent → complete →
-state-consume boundaries; external answers remain advisory. The frozen
-`audit_every_candidates` value controls baseline audits. A changed workload,
-source, objective, or environment starts a new contract and ledger.
-
-Keep at most three competing mechanism hypotheses. The deterministic decision
-is one of `MEASURE`, `PURSUE`, `REVIEW_REQUIRED`, or `STOP`. Execute only the one
-action named by `decision.json`, then rebuild the performance model. Do not start
-a later or more expensive action after its prerequisite fails, when the benefit
-ceiling is below `minimum_effect`, or when the decision is `STOP`.
-
-Bundled knowledge, search, and external AI may only propose a locally
-falsifiable shadow direction. They cannot create benefit facts, execute work,
-or promote a candidate; local correctness and paired evidence remain decisive.
-A missing knowledge-card match does not block a model-proposed mechanism.
-Preserve unresolved execution-map scope, require a different falsifiable
-evidence request, and let the Controller decide whether it is admissible.
-
-Run help instead of loading command inventories:
-
-```bash
-python3 <skill>/scripts/orchestrate.py --help
-python3 <skill>/scripts/workload_controller.py --help
-```
-
-This skill does not provide an OS sandbox. Modify only declared paths and
-approved isolated environments. Treat driver, GPU counter permission, clocks,
-power, services, and container runtime as `recommend_only`. If NCU reports
-`ERR_NVGPUCTRPERM`, record it and continue only at a lower valid evidence layer.
-
-For formal evidence, read `references/evidence_automation.md` and
-`references/direction_admission.md`. Keep `performance_verdict` separate from
-`evidence_integrity`. A `comparable_paired_state` allows interpretation but is
-not a win; `inconclusive_nonstationary` requires new evidence. Missing or stale
-evidence must fail closed.
-
-External search and multi-model challenge are optional. Use them only for
-direction selection, a clear plateau, or final review; run independent checks in
-parallel with a 180-second total wait. Use primary sources, redact private material,
-preserve disagreement, and adjudicate locally. Network or provider failure falls
-back to the offline workflow. When configured, try providers in this order:
-Google AI Mode, GitHub Copilot, GLM, Kimi, DeepSeek, then Gemini. GitHub Copilot
-is for code and repository-specific review. Their answers are advisory;
-local evidence remains authoritative and external models are never promotion
-authorities.
-
-Preserve only useful durable output: readiness report and claim ceiling,
-manifest, checkpoint, candidate lineage, raw paired samples, constraints,
-`performance_model.json`, `investment_brief.json`, `decision.json`,
-evidence integrity, and `summary.md`. Report the verified
-result, strongest supported claim, rejected candidates, missing evidence, host
-recommendations, and next highest-value action.
+This skill does not provide an OS sandbox. Modify only the files and isolated
+environments authorized by the user. Host, driver, clocks, power, services,
+container runtime, and GPU permission changes remain recommendations unless the
+user explicitly authorizes them.

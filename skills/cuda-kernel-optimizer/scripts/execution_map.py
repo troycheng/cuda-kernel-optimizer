@@ -1,510 +1,218 @@
-#!/usr/bin/env python3
-"""Validate compact, epoch-bound V3.1 workload execution maps."""
+"""Pure coverage and overlap accounting for known profiler observations."""
 
 from __future__ import annotations
 
-import copy
-import hashlib
-import importlib.util
-import json
 import math
 import re
-from collections.abc import Mapping
-from pathlib import Path
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-MAP_SCHEMA = "cuda-optimizer/execution-map-v1"
-LAYERS = (
-    "cpu",
-    "gpu",
-    "framework",
-    "transfer",
-    "communication",
-    "io",
-    "synchronization",
-    "idle",
-)
-_RELATIONS = {
-    "calls",
-    "waits_for",
-    "transfers_to",
-    "synchronizes",
-    "precedes",
-    "unknown_dependency",
-    "overlaps",
+_OBSERVATION_FIELDS = {
+    "semantic_id",
+    "value",
+    "unit",
+    "interval",
+    "duration_us",
+    "category",
+    "name",
+    "scope",
+    "aggregation",
+    "source",
+    "tool",
 }
-_ATTRIBUTION = {"explained", "unexplained", "not_applicable"}
-_COVERAGE = {"observed", "not_observed", "unavailable"}
-_CONCLUSIONS = {"observed", "inconclusive"}
-_TIMING_STATUS = {"observed", "unavailable"}
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_MAX_OBSERVATIONS = 10_000
+_MAX_TEXT = 512
+_NCU_VERSION = re.compile(r"2026\.2(?:\.\d+)*\Z")
+_NCU_FIELDS = {"semantic_id", "value", "unit", "scope", "aggregation", "source_metric", "tool"}
+_NCU_METRICS = {
+    "kernel.tensor_pipe_pct": ("%", "sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active"),
+    "kernel.sm_active_pct": ("%", "sm__cycles_active.avg.pct_of_peak_sustained_elapsed"),
+    "kernel.dram_throughput_pct": ("%", "dram__throughput.avg.pct_of_peak_sustained_elapsed"),
+    "kernel.barrier_stall_pct": ("%", "smsp__average_warp_latency_issue_stalled_barrier_per_warp_active.pct"),
+    "kernel.long_scoreboard_pct": ("%", "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct"),
+    "kernel.dram_bytes": ("byte", "dram__bytes.sum"),
+    "kernel.occupancy_pct": ("%", "sm__warps_active.avg.pct_of_peak_sustained_active"),
+}
 
 
 class ValidationError(ValueError):
-    """Raised when an execution map can hide missing or stale evidence."""
+    """Raised when an observation cannot support deterministic accounting."""
 
 
-def _load_epoch_module():
-    path = Path(__file__).with_name("analysis_epoch.py")
-    name = "cuda_optimizer_analysis_epoch_execution_map"
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load epoch validator: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-_EPOCH = _load_epoch_module()
-
-
-def epoch_digest(value: Mapping[str, Any]) -> str:
-    return _EPOCH.epoch_digest(value)
-
-
-def _closed(value: Any, fields: set[str], label: str) -> dict:
-    if type(value) is not dict:
-        raise ValidationError(f"{label} must be an object")
-    missing = fields - set(value)
-    unknown = set(value) - fields
-    if missing:
-        raise ValidationError(f"{label} is missing fields: {sorted(missing)}")
-    if unknown:
-        raise ValidationError(f"{label} contains unknown fields: {sorted(unknown)}")
+def _text(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > _MAX_TEXT:
+        raise ValidationError(f"{label} must be a non-empty bounded string")
     return value
 
 
-def _text(value: Any, label: str, *, maximum: int = 512) -> str:
-    if type(value) is not str or not value.strip():
-        raise ValidationError(f"{label} must be a non-empty string")
-    if len(value) > maximum:
-        raise ValidationError(f"{label} exceeds {maximum} characters")
-    return value
-
-
-def _identifier(value: Any, label: str) -> str:
-    text = _text(value, label, maximum=128)
-    if _IDENTIFIER.fullmatch(text) is None:
-        raise ValidationError(f"{label} must be a safe identifier")
-    return text
-
-
-def _sha(value: Any, label: str) -> str:
-    if type(value) is not str or _SHA256.fullmatch(value) is None:
-        raise ValidationError(f"{label} must be lowercase SHA-256")
-    return value
-
-
-def _number(value: Any, label: str, *, positive: bool = False) -> float:
-    if type(value) not in {int, float} or not math.isfinite(float(value)):
+def _number(value: Any, label: str, *, non_negative: bool = False) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
         raise ValidationError(f"{label} must be finite")
     number = float(value)
-    if number < 0 or (positive and number <= 0):
-        qualifier = "positive" if positive else "non-negative"
-        raise ValidationError(f"{label} must be {qualifier}")
+    if non_negative and number < 0:
+        raise ValidationError(f"{label} must be non-negative")
     return number
 
 
-def _evidence_ids(value: Any, label: str, catalog: Mapping[str, dict], epoch_id: str) -> list[str]:
-    if type(value) is not list or not value:
-        raise ValidationError(f"{label} must be a non-empty array")
-    result = []
-    for index, raw in enumerate(value):
-        evidence_id = _identifier(raw, f"{label}[{index}]")
-        if evidence_id in result:
-            raise ValidationError(f"{label} must not contain duplicates")
-        if evidence_id not in catalog:
-            raise ValidationError(f"{label} cites unknown evidence {evidence_id}")
-        if catalog[evidence_id]["epoch_id"] != epoch_id:
-            raise ValidationError(f"{label} evidence is not from the current epoch")
-        result.append(evidence_id)
-    return result
+def _integer(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValidationError(f"{label} must be a non-negative integer")
+    return value
 
 
-def _catalog(value: Mapping[str, Any]) -> dict[str, dict]:
-    if not isinstance(value, Mapping):
-        raise ValidationError("evidence_catalog must be an object")
-    result = {}
-    for raw_id, raw in value.items():
-        evidence_id = _identifier(raw_id, "evidence_catalog id")
-        if type(raw) is not dict:
-            raise ValidationError(f"evidence_catalog.{evidence_id} must be an object")
-        raw = {
-            **raw,
-            "supports_hypothesis_ids": raw.get("supports_hypothesis_ids", []),
-            "opposes_hypothesis_ids": raw.get("opposes_hypothesis_ids", []),
-        }
-        item = _closed(
-            raw,
-            {
-                "epoch_id",
-                "kind",
-                "artifact_sha256",
-                "supports_hypothesis_ids",
-                "opposes_hypothesis_ids",
-            },
-            f"evidence_catalog.{evidence_id}",
-        )
-        effects = {}
-        for field in ("supports_hypothesis_ids", "opposes_hypothesis_ids"):
-            values = item.get(field, [])
-            if type(values) is not list:
-                raise ValidationError(f"evidence_catalog.{evidence_id}.{field} must be an array")
-            normalized = [
-                _identifier(value, f"evidence_catalog.{evidence_id}.{field}")
-                for value in values
-            ]
-            if len(normalized) != len(set(normalized)):
-                raise ValidationError(f"evidence_catalog.{evidence_id}.{field} has duplicates")
-            effects[field] = sorted(normalized)
-        if set(effects["supports_hypothesis_ids"]) & set(
-            effects["opposes_hypothesis_ids"]
-        ):
-            raise ValidationError("evidence outcome cannot support and oppose the same hypothesis")
-        result[evidence_id] = {
-            "epoch_id": _identifier(item["epoch_id"], "evidence epoch_id"),
-            "kind": _identifier(item["kind"], "evidence kind"),
-            "artifact_sha256": _sha(item["artifact_sha256"], "evidence artifact_sha256"),
-            **effects,
-        }
-    return result
-
-
-def validate_execution_map(
-    value: Mapping[str, Any], *, epoch: Mapping[str, Any], evidence_catalog: Mapping[str, Any]
-) -> dict:
-    """Return a detached map plus Controller-derived coverage flags."""
-    try:
-        normalized_epoch = _EPOCH.validate_epoch(epoch)
-    except ValueError as exc:
-        raise ValidationError(f"invalid Controller epoch: {exc}") from exc
-    epoch_id = normalized_epoch["epoch_id"]
-    catalog = _catalog(evidence_catalog)
-    result = _closed(
-        value,
-        {
-            "schema_version",
-            "map_id",
-            "epoch_id",
-            "epoch_sha256",
-            "identities",
-            "window",
-            "coverage",
-            "nodes",
-            "edges",
-            "hot_path",
-            "uncovered_intervals",
-            "conclusion_level",
-        },
-        "execution_map",
-    )
-    if result["schema_version"] != MAP_SCHEMA:
-        raise ValidationError(f"execution_map.schema_version must be {MAP_SCHEMA}")
-    _identifier(result["map_id"], "execution_map.map_id")
-    if result["epoch_id"] != epoch_id:
-        raise ValidationError("execution_map epoch_id does not match Controller")
-    if _sha(result["epoch_sha256"], "execution_map.epoch_sha256") != epoch_digest(normalized_epoch):
-        raise ValidationError("execution_map epoch digest does not match Controller")
-    identities = _closed(
-        result["identities"],
-        set(normalized_epoch["identities"]),
-        "execution_map.identities",
-    )
-    for field, expected in normalized_epoch["identities"].items():
-        if _sha(identities[field], f"execution_map.identities.{field}") != expected:
-            label = field.removesuffix("_sha256")
-            raise ValidationError(f"execution_map {label} identity does not match Controller")
-
-    window = _closed(
-        result["window"],
-        {"start_us", "end_us", "boundary_ambiguous"},
-        "execution_map.window",
-    )
-    start = _number(window["start_us"], "execution_map.window.start_us")
-    end = _number(window["end_us"], "execution_map.window.end_us")
-    if end <= start:
-        raise ValidationError("execution_map window end must be after start")
-    if type(window["boundary_ambiguous"]) is not bool:
-        raise ValidationError("execution_map window boundary_ambiguous must be boolean")
-    if window["boundary_ambiguous"] != normalized_epoch["boundary_ambiguous"]:
-        raise ValidationError("execution_map boundary does not match Controller epoch")
-
-    coverage = result["coverage"]
-    if type(coverage) is not list or len(coverage) != len(LAYERS):
-        raise ValidationError("execution_map coverage must contain all layers")
-    coverage_by_layer = {}
-    for index, raw in enumerate(coverage):
-        item = _closed(raw, {"layer", "status", "reason"}, f"coverage[{index}]")
-        layer = item["layer"]
-        if layer not in LAYERS or layer in coverage_by_layer:
-            raise ValidationError("execution_map coverage must contain all layers exactly once")
-        if item["status"] not in _COVERAGE:
-            raise ValidationError(f"coverage[{index}].status is unsupported")
-        if item["status"] == "observed":
-            if item["reason"] is not None:
-                raise ValidationError("observed coverage reason must be null")
-        else:
-            _text(item["reason"], f"coverage[{index}].reason")
-        coverage_by_layer[layer] = item["status"]
-    if set(coverage_by_layer) != set(LAYERS):
-        raise ValidationError("execution_map coverage must contain all layers")
-
-    nodes = result["nodes"]
-    if type(nodes) is not list or not nodes or len(nodes) > 256:
-        raise ValidationError("execution_map nodes must contain 1 to 256 entries")
-    node_ids = set()
-    node_timing = {}
-    node_layers = {layer: 0 for layer in LAYERS}
-    unexplained = False
-    for index, raw in enumerate(nodes):
-        node = _closed(
-            raw,
-            {
-                "node_id",
-                "layer",
-                "lane",
-                "kind",
-                "label",
-                "duration_us",
-                "occurrences",
-                "timing_status",
-                "first_start_us",
-                "last_end_us",
-                "attribution_status",
-                "evidence_ids",
-            },
-            f"nodes[{index}]",
-        )
-        node_id = _identifier(node["node_id"], f"nodes[{index}].node_id")
-        if node_id in node_ids:
-            raise ValidationError("execution_map node ids must be unique")
-        node_ids.add(node_id)
-        layer = node["layer"]
-        if layer not in LAYERS:
-            raise ValidationError(f"nodes[{index}].layer is unsupported")
-        if coverage_by_layer[layer] != "observed":
-            raise ValidationError(f"node uses {coverage_by_layer[layer]} layer {layer}")
-        node_layers[layer] += 1
-        _identifier(node["lane"], f"nodes[{index}].lane")
-        _identifier(node["kind"], f"nodes[{index}].kind")
-        _text(node["label"], f"nodes[{index}].label")
-        duration = _number(
-            node["duration_us"], f"nodes[{index}].duration_us", positive=True
-        )
-        if type(node["occurrences"]) is not int or node["occurrences"] < 1:
-            raise ValidationError(f"nodes[{index}].occurrences must be positive")
-        timing_status = node["timing_status"]
-        if timing_status not in _TIMING_STATUS:
-            raise ValidationError(f"nodes[{index}].timing_status is unsupported")
-        if timing_status == "observed":
-            first_start = _number(
-                node["first_start_us"], f"nodes[{index}].first_start_us"
-            )
-            last_end = _number(
-                node["last_end_us"], f"nodes[{index}].last_end_us"
-            )
-            if first_start < start or last_end > end or last_end <= first_start:
-                raise ValidationError("observed node timing must be inside the map window")
-            if duration > last_end - first_start:
-                raise ValidationError(
-                    "node duration_us cannot exceed its observed timing span"
-                )
-        else:
-            if node["first_start_us"] is not None or node["last_end_us"] is not None:
-                raise ValidationError("unavailable node timing bounds must be null")
-            first_start = None
-            last_end = None
-            unexplained = True
-        node_timing[node_id] = {
-            "lane": node["lane"],
-            "duration_us": duration,
-            "status": timing_status,
-            "first_start_us": first_start,
-            "last_end_us": last_end,
-        }
-        if node["attribution_status"] not in _ATTRIBUTION:
-            raise ValidationError(f"nodes[{index}].attribution_status is unsupported")
-        unexplained = unexplained or node["attribution_status"] == "unexplained"
-        _evidence_ids(node["evidence_ids"], f"nodes[{index}].evidence_ids", catalog, epoch_id)
-    for layer, status in coverage_by_layer.items():
-        if status == "observed" and node_layers[layer] == 0:
-            raise ValidationError(f"observed layer {layer} requires at least one node")
-
-    edges = result["edges"]
-    if type(edges) is not list or len(edges) > 1024:
-        raise ValidationError("execution_map edges must be an array of at most 1024 entries")
-    edge_keys = set()
-    for index, raw in enumerate(edges):
-        edge = _closed(
-            raw,
-            {"source", "target", "relation", "overlap_us", "evidence_ids"},
-            f"edges[{index}]",
-        )
-        source = _identifier(edge["source"], f"edges[{index}].source")
-        target = _identifier(edge["target"], f"edges[{index}].target")
-        if source not in node_ids or target not in node_ids:
-            raise ValidationError("execution_map edge references an unknown node")
-        if source == target:
-            raise ValidationError("execution_map edge must connect distinct nodes")
-        relation = edge["relation"]
-        if relation not in _RELATIONS:
-            raise ValidationError(f"edges[{index}].relation is unsupported")
-        if relation == "overlaps":
-            if source >= target:
-                raise ValidationError("overlap edge must use canonical node order")
-            source_timing = node_timing[source]
-            target_timing = node_timing[target]
-            if (
-                source_timing["status"] != "observed"
-                or target_timing["status"] != "observed"
-            ):
-                raise ValidationError("overlap edge requires observed timing")
-            if source_timing["lane"] == target_timing["lane"]:
-                raise ValidationError("overlap edge must connect distinct lanes")
-            overlap = _number(
-                edge["overlap_us"], f"edges[{index}].overlap_us", positive=True
-            )
-            span_overlap = min(
-                source_timing["last_end_us"], target_timing["last_end_us"]
-            ) - max(
-                source_timing["first_start_us"], target_timing["first_start_us"]
-            )
-            if span_overlap <= 0 or overlap > span_overlap:
-                raise ValidationError("overlap_us exceeds observed timing intersection")
-            if overlap > min(
-                source_timing["duration_us"], target_timing["duration_us"]
-            ):
-                raise ValidationError("overlap_us exceeds node active duration")
-        elif edge["overlap_us"] is not None:
-            raise ValidationError("non-overlap edge overlap_us must be null")
-        key = (source, target, relation)
-        if key in edge_keys:
-            raise ValidationError("execution_map edges must be unique")
-        edge_keys.add(key)
-        unexplained = unexplained or relation == "unknown_dependency"
-        _evidence_ids(edge["evidence_ids"], f"edges[{index}].evidence_ids", catalog, epoch_id)
-
-    hot_path = result["hot_path"]
-    if type(hot_path) is not list or not hot_path:
-        raise ValidationError("execution_map hot_path must be non-empty")
-    seen_hot = set()
-    for index, raw in enumerate(hot_path):
-        node_id = _identifier(raw, f"hot_path[{index}]")
-        if node_id not in node_ids:
-            raise ValidationError("execution_map hot_path references an unknown node")
-        if node_id in seen_hot:
-            raise ValidationError("execution_map hot_path must not contain duplicates")
-        seen_hot.add(node_id)
-
-    intervals = result["uncovered_intervals"]
-    if type(intervals) is not list or len(intervals) > 128:
-        raise ValidationError("uncovered_intervals must be an array of at most 128 entries")
-    for index, raw in enumerate(intervals):
-        interval = _closed(raw, {"start_us", "end_us", "reason"}, f"uncovered_intervals[{index}]")
-        interval_start = _number(interval["start_us"], f"uncovered_intervals[{index}].start_us")
-        interval_end = _number(interval["end_us"], f"uncovered_intervals[{index}].end_us")
-        if interval_start < start or interval_end > end or interval_end <= interval_start:
-            raise ValidationError("uncovered interval must be positive and inside the window")
-        _text(interval["reason"], f"uncovered_intervals[{index}].reason")
-    if result["conclusion_level"] not in _CONCLUSIONS:
-        raise ValidationError("execution_map conclusion_level is unsupported")
-    timing_unavailable = any(
-        item["status"] == "unavailable" for item in node_timing.values()
-    )
-    if timing_unavailable and result["conclusion_level"] != "inconclusive":
-        raise ValidationError("unavailable node timing requires an inconclusive map")
-
-    requires_unmodeled = (
-        unexplained
-        or bool(intervals)
-        or any(status == "unavailable" for status in coverage_by_layer.values())
-        or bool(window["boundary_ambiguous"])
-        or timing_unavailable
-    )
+def _complete_event(raw: Any, index: int) -> dict:
+    if type(raw) is not dict:
+        raise ValidationError(f"observations[{index}] must be an object")
+    missing = _OBSERVATION_FIELDS - set(raw)
+    unknown = set(raw) - _OBSERVATION_FIELDS
+    if missing or unknown:
+        raise ValidationError(f"observations[{index}] has missing={sorted(missing)} unknown={sorted(unknown)}")
+    if raw["semantic_id"] != "pytorch.trace.complete_event":
+        raise ValidationError("only known complete-event observations are supported")
+    if raw["unit"] != "us" or raw["aggregation"] != "single_complete_event":
+        raise ValidationError(f"observations[{index}] has unsupported unit or aggregation")
+    interval = raw["interval"]
+    if type(interval) is not dict or set(interval) != {"start_us", "end_us"}:
+        raise ValidationError(f"observations[{index}].interval is invalid")
+    start = _number(interval["start_us"], f"observations[{index}].interval.start_us", non_negative=True)
+    end = _number(interval["end_us"], f"observations[{index}].interval.end_us", non_negative=True)
+    if end < start:
+        raise ValidationError(f"observations[{index}].interval is inverted")
+    duration = _number(raw["duration_us"], f"observations[{index}].duration_us", non_negative=True)
+    value = _number(raw["value"], f"observations[{index}].value", non_negative=True)
+    span = end - start
+    if not math.isclose(duration, span, rel_tol=1e-9, abs_tol=1e-9) or not math.isclose(value, duration, rel_tol=1e-9, abs_tol=1e-9):
+        raise ValidationError(f"observations[{index}] duration does not match its interval")
+    source = raw["source"]
+    if type(source) is not dict or source != {"phase": "X", "timestamp_unit": "us"}:
+        raise ValidationError(f"observations[{index}].source is not a known complete-event source")
+    tool = raw["tool"]
+    if type(tool) is not dict or set(tool) != {"name", "version"} or tool["name"] != "pytorch_profiler":
+        raise ValidationError(f"observations[{index}].tool is unsupported")
+    version = _text(tool["version"], f"observations[{index}].tool.version")
+    scope = raw["scope"]
+    if type(scope) is not list or len(scope) != 4 or scope[0] != "process" or scope[2] != "thread":
+        raise ValidationError(f"observations[{index}].scope is invalid")
+    pid = _integer(scope[1], f"observations[{index}].scope.pid")
+    tid = _integer(scope[3], f"observations[{index}].scope.tid")
     return {
-        "execution_map": copy.deepcopy(dict(result)),
-        "window_duration_us": end - start,
-        "requires_unmodeled_hypothesis": requires_unmodeled,
+        "start_us": start,
+        "end_us": end,
+        "duration_us": duration,
+        "category": _text(raw["category"], f"observations[{index}].category"),
+        "name": _text(raw["name"], f"observations[{index}].name"),
+        "pid": pid,
+        "tid": tid,
+        "tool_version": version,
     }
 
 
-def execution_map_digest(
-    value: Mapping[str, Any], *, epoch: Mapping[str, Any], evidence_catalog: Mapping[str, Any]
-) -> str:
-    """Return a canonical digest after replaying epoch and evidence admission."""
-    normalized = validate_execution_map(
-        value, epoch=epoch, evidence_catalog=evidence_catalog
-    )["execution_map"]
-    payload = json.dumps(
-        normalized,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+def validate_observations(observations: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """Validate and detach the sole observation dialect supported by this module."""
+    if not isinstance(observations, Sequence) or isinstance(observations, (str, bytes, bytearray)):
+        raise ValidationError("observations must be a non-empty sequence")
+    if not observations:
+        raise ValidationError("observations must be non-empty")
+    if len(observations) > _MAX_OBSERVATIONS:
+        raise ValidationError("observations exceed limit")
+    return [_complete_event(item, index) for index, item in enumerate(observations)]
 
 
-def critical_path_accounting(value: Mapping[str, Any]) -> dict:
-    """Account for hot-path timing envelopes without counting overlap twice.
+def account_time(observations: Sequence[Mapping[str, Any]]) -> dict:
+    """Return exact interval coverage and explicitly labelled duration upper bounds."""
+    events = validate_observations(observations)
+    boundaries: dict[float, list[int]] = {}
+    grouped: dict[tuple[str, str], list[float]] = {}
+    for event in events:
+        start, end = event["start_us"], event["end_us"]
+        boundaries.setdefault(start, [0, 0])[0] += 1
+        boundaries.setdefault(end, [0, 0])[1] += 1
+        grouped.setdefault((event["category"], event["name"]), []).append(event["duration_us"])
 
-    The execution-map validator permits a node's active duration to be smaller
-    than its first-to-last timing span.  In that case this function deliberately
-    reports an envelope upper bound instead of pretending the exact active
-    intervals are known.
-    """
-    if not isinstance(value, Mapping):
-        raise ValidationError("execution_map must be an object")
-    window = value.get("window")
-    nodes = value.get("nodes")
-    hot_path = value.get("hot_path")
-    if not isinstance(window, Mapping) or type(nodes) is not list or type(hot_path) is not list:
-        raise ValidationError("execution_map is missing validated hot-path timing")
-    start = _number(window.get("start_us"), "window.start_us")
-    end = _number(window.get("end_us"), "window.end_us")
-    if end <= start:
-        raise ValidationError("execution_map window must be positive")
-    by_id = {item.get("node_id"): item for item in nodes if isinstance(item, Mapping)}
-    intervals = []
-    exact = True
-    for node_id in hot_path:
-        node = by_id.get(node_id)
-        if node is None or node.get("timing_status") != "observed":
-            raise ValidationError("hot path requires observed node timing")
-        node_start = _number(node.get("first_start_us"), f"{node_id}.first_start_us")
-        node_end = _number(node.get("last_end_us"), f"{node_id}.last_end_us")
-        duration = _number(node.get("duration_us"), f"{node_id}.duration_us", positive=True)
-        if node_start < start or node_end > end or node_end <= node_start:
-            raise ValidationError("hot-path timing must stay inside the map window")
-        exact = exact and math.isclose(
-            duration, node_end - node_start, rel_tol=1e-9, abs_tol=1e-9
-        )
-        intervals.append((node_id, node_start, node_end))
-
-    boundaries = sorted({point for _, left, right in intervals for point in (left, right)})
-    covered = 0.0
-    overlap = 0.0
-    exclusive = {node_id: 0.0 for node_id in hot_path}
-    for left, right in zip(boundaries, boundaries[1:]):
-        active = [
-            node_id
-            for node_id, node_start, node_end in intervals
-            if node_start <= left and node_end >= right
-        ]
-        width = right - left
-        if not active or width <= 0:
-            continue
-        covered += width
-        if len(active) == 1:
-            exclusive[active[0]] += width
-        else:
-            overlap += width
-    window_duration = end - start
+    covered, overlap_excess, active, maximum = 0.0, 0.0, 0, 0
+    points = sorted(boundaries)
+    for index, point in enumerate(points[:-1]):
+        starts, ends = boundaries[point]
+        active += starts - ends
+        maximum = max(maximum, active)
+        width = points[index + 1] - point
+        if active > 0:
+            covered += width
+        if active > 1:
+            overlap_excess += (active - 1) * width
+    if points:
+        maximum = max(maximum, boundaries[points[-1]][0] - boundaries[points[-1]][1])
+    bounds = [
+        {
+            "category": category,
+            "name": name,
+            "count": len(durations),
+            "duration_upper_bound_us": math.fsum(durations),
+        }
+        for (category, name), durations in sorted(grouped.items())
+    ]
     return {
-        "accounting_status": "exact_envelope" if exact else "envelope_upper_bound",
-        "covered_union_upper_bound_us": min(covered, window_duration),
-        "overlap_upper_bound_us": min(overlap, window_duration),
-        "exclusive_span_us": {key: exclusive[key] for key in sorted(exclusive)},
+        "observation_count": len(events),
+        "window": {"start_us": points[0], "end_us": points[-1]},
+        "covered_union_us": covered,
+        "overlap_excess_us": overlap_excess,
+        "maximum_concurrent_events": maximum,
+        "serial_duration_upper_bound_us": math.fsum(event["duration_us"] for event in events),
+        "event_duration_upper_bounds_us": bounds,
+    }
+
+
+def _ncu_observation(raw: Any, index: int) -> tuple[str, float]:
+    if type(raw) is not dict:
+        raise ValidationError(f"observations[{index}] must be an object")
+    missing, unknown = _NCU_FIELDS - set(raw), set(raw) - _NCU_FIELDS
+    if missing or unknown:
+        raise ValidationError(f"observations[{index}] has missing={sorted(missing)} unknown={sorted(unknown)}")
+    semantic_id = raw["semantic_id"]
+    if semantic_id not in _NCU_METRICS:
+        raise ValidationError("only known NCU observations are supported")
+    expected_unit, expected_source = _NCU_METRICS[semantic_id]
+    if raw["unit"] != expected_unit or raw["source_metric"] != expected_source:
+        raise ValidationError(f"observations[{index}] does not match its known NCU metric")
+    if raw["scope"] != ["kernel"] or raw["aggregation"] != "mean_across_matching_rows":
+        raise ValidationError(f"observations[{index}] has unsupported NCU scope or aggregation")
+    tool = raw["tool"]
+    if type(tool) is not dict or set(tool) != {"name", "version"} or tool["name"] != "ncu" or not isinstance(tool["version"], str) or _NCU_VERSION.fullmatch(tool["version"]) is None:
+        raise ValidationError(f"observations[{index}].tool is unsupported")
+    value = _number(raw["value"], f"observations[{index}].value", non_negative=True)
+    if expected_unit == "%" and value > 100:
+        raise ValidationError(f"observations[{index}] percentage must be at most 100")
+    return semantic_id, value
+
+
+def account_ncu_utilization(observations: Sequence[Mapping[str, Any]]) -> dict:
+    """Return observed NCU utilization and stall complements without any allocation policy."""
+    if not isinstance(observations, Sequence) or isinstance(observations, (str, bytes, bytearray)):
+        raise ValidationError("observations must be a non-empty sequence")
+    if not observations:
+        raise ValidationError("observations must be non-empty")
+    if len(observations) > _MAX_OBSERVATIONS:
+        raise ValidationError("observations exceed limit")
+    values = {}
+    for index, raw in enumerate(observations):
+        semantic_id, value = _ncu_observation(raw, index)
+        if semantic_id in values:
+            raise ValidationError("NCU observations must not repeat one semantic id")
+        values[semantic_id] = value
+    axes = []
+    compute = [values[key] for key in ("kernel.tensor_pipe_pct", "kernel.sm_active_pct") if key in values]
+    if compute:
+        utilization = max(compute)
+        axes.append({"axis": "compute", "utilization_percent": utilization, "unutilized_percent": 100.0 - utilization})
+    if "kernel.dram_throughput_pct" in values:
+        utilization = values["kernel.dram_throughput_pct"]
+        axes.append({"axis": "memory", "utilization_percent": utilization, "unutilized_percent": 100.0 - utilization})
+    stalls = [values[key] for key in ("kernel.barrier_stall_pct", "kernel.long_scoreboard_pct") if key in values]
+    if stalls:
+        stall = max(stalls)
+        axes.append({"axis": "latency", "stall_percent": stall, "non_stall_percent": 100.0 - stall})
+    return {
+        "observed_axes": sorted(axes, key=lambda item: item["axis"]),
+        "missing_axes": [axis for axis in ("compute", "latency", "memory") if axis not in {item["axis"] for item in axes}],
     }

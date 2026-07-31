@@ -4,6 +4,8 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -137,14 +139,95 @@ class ArtifactStoreTests(unittest.TestCase):
     def test_read_regular_bundle_uses_one_stable_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
-            (root / "a.json").write_bytes(b"a")
-            (root / "b.json").write_bytes(b"b")
+            self.artifacts.publish_regular_bundle(
+                root, {"a.json": b"a", "b.json": b"b"}
+            )
             self.assertEqual(
                 self.artifacts.read_regular_bundle(root, ["a.json", "b.json"]),
                 {"a.json": b"a", "b.json": b"b"},
             )
             with self.assertRaisesRegex(ValueError, "one relative component"):
                 self.artifacts.read_regular_bundle(root, ["../a.json"])
+
+    def test_bundle_publish_failure_keeps_prior_generation_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self.artifacts.publish_regular_bundle(
+                root, {"a.json": b"old-a", "b.json": b"old-b"}
+            )
+            previous_pointer = (root / "current").read_bytes()
+            real_fsync = self.artifacts.os.fsync
+            calls = 0
+
+            def fail_during_generation_write(fd):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated generation write failure")
+                return real_fsync(fd)
+
+            with mock.patch.object(
+                self.artifacts.os, "fsync", side_effect=fail_during_generation_write
+            ):
+                with self.assertRaisesRegex(OSError, "simulated generation"):
+                    self.artifacts.publish_regular_bundle(
+                        root, {"a.json": b"new-a", "b.json": b"new-b"}
+                    )
+
+            self.assertEqual((root / "current").read_bytes(), previous_pointer)
+            self.assertEqual(
+                self.artifacts.read_regular_bundle(root, ["a.json", "b.json"]),
+                {"a.json": b"old-a", "b.json": b"old-b"},
+            )
+
+    def test_freeze_snapshot_publishes_captured_payload_without_rereading_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = root / "source.txt"
+            source.write_bytes(b"captured")
+            manifest, payloads = self.artifacts._snapshot_source(
+                source,
+                {
+                    "max_files": 1,
+                    "max_total_bytes": 1024,
+                    "max_wall_seconds": 1.0,
+                },
+            )
+            source.write_bytes(b"changed-after-snapshot")
+
+            frozen = self.artifacts.freeze_snapshot(root / "artifacts", manifest, payloads)
+            target = root / "materialized.txt"
+            self.artifacts.materialize_object(root / "artifacts", frozen, target)
+
+            self.assertEqual(target.read_bytes(), b"captured")
+
+    def test_materialize_object_rejects_tampered_payload_and_cleans_temporary_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = root / "source.txt"
+            source.write_bytes(b"original")
+            frozen = self.artifacts.freeze_path(
+                root / "artifacts",
+                source,
+                {
+                    "max_files": 1,
+                    "max_total_bytes": 1024,
+                    "max_wall_seconds": 1.0,
+                },
+            )
+            object_root = root / "artifacts" / frozen["locator"]
+            (object_root / "payload" / "source.txt").write_bytes(b"tampered")
+            destination = root / "output.txt"
+
+            with self.assertRaisesRegex(ValueError, "payload does not match"):
+                self.artifacts.materialize_object(
+                    root / "artifacts", frozen, destination
+                )
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(
+                list(destination.parent.glob(f".{destination.name}.*.tmp")), []
+            )
 
     def test_atomic_json_fsyncs_parent_directory_after_replace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -505,6 +588,159 @@ class ArtifactStoreTests(unittest.TestCase):
 
             self.assertEqual(json.loads(path.read_text("utf-8")), {"value": "new"})
             self.assertEqual([item.name for item in path.parent.iterdir()], [path.name])
+
+    def test_compare_and_swap_allows_only_one_concurrent_reference_update(self) -> None:
+        self.assertTrue(
+            hasattr(self.artifacts, "compare_and_swap_ref"),
+            "V1.4 compare-and-swap reference primitive is not implemented",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve() / "artifacts"
+            (root / "champion").mkdir(parents=True)
+            initial_digest = self.artifacts.compare_and_swap_ref(
+                root,
+                "champion/current.json",
+                None,
+                {"selection_ref": "initial"},
+            )
+            invoke = root.parent / "cas.py"
+            invoke.write_text(
+                "\n".join(
+                    [
+                        "import importlib.util",
+                        "import json",
+                        "import sys",
+                        "import time",
+                        "from pathlib import Path",
+                        "module_path, root, expected, label, go, out = sys.argv[1:]",
+                        "spec = importlib.util.spec_from_file_location(",
+                        "    'cuda_optimizer_artifact_store_subprocess', module_path",
+                        ")",
+                        "store = importlib.util.module_from_spec(spec)",
+                        "spec.loader.exec_module(store)",
+                        "while not Path(go).exists():",
+                        "    time.sleep(0.005)",
+                        "try:",
+                        "    digest = store.compare_and_swap_ref(",
+                        "        Path(root),",
+                        "        'champion/current.json',",
+                        "        expected,",
+                        "        {'selection_ref': label},",
+                        "    )",
+                        "    result = {'status': 'success', 'digest': digest}",
+                        "except store.StaleReferenceError:",
+                        "    result = {'status': 'stale'}",
+                        "Path(out).write_text(json.dumps(result), encoding='utf-8')",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            go = root.parent / "go"
+            processes = []
+            for label in ("first", "second"):
+                output = root.parent / f"{label}.json"
+                processes.append(
+                    subprocess.Popen(
+                        [
+                            sys.executable,
+                            str(invoke),
+                            str(ARTIFACT_STORE_PATH),
+                            str(root),
+                            initial_digest,
+                            label,
+                            str(go),
+                            str(output),
+                        ]
+                    )
+                )
+            go.write_text("go\n", encoding="utf-8")
+            returncodes = [process.wait(timeout=5) for process in processes]
+            self.assertEqual(returncodes, [0, 0])
+
+            outcomes = [
+                json.loads((root.parent / f"{label}.json").read_text("utf-8"))
+                for label in ("first", "second")
+            ]
+            self.assertEqual(
+                sorted(outcome["status"] for outcome in outcomes),
+                ["stale", "success"],
+            )
+            current = json.loads(
+                (root / "champion" / "current.json").read_text("utf-8")
+            )
+            self.assertIn(current["selection_ref"], {"first", "second"})
+            successful = next(
+                outcome for outcome in outcomes if outcome["status"] == "success"
+            )
+            self.assertEqual(
+                successful["digest"],
+                self.artifacts.sha256_file(root / "champion" / "current.json"),
+            )
+
+    def test_immutable_result_publication_is_guarded_by_reference_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "artifacts"
+            (root / "champion").mkdir(parents=True)
+            digest = self.artifacts.compare_and_swap_ref(
+                root,
+                "champion/current.json",
+                None,
+                {"selection_ref": "first"},
+            )
+            self.artifacts.create_regular_json_if_ref_digest(
+                root,
+                "champion/current.json",
+                digest,
+                "invocations/inv-a/result.json",
+                {"status": "current"},
+            )
+            self.assertEqual(
+                json.loads(
+                    (root / "invocations" / "inv-a" / "result.json").read_text(
+                        "utf-8"
+                    )
+                ),
+                {"status": "current"},
+            )
+
+            self.artifacts.compare_and_swap_ref(
+                root,
+                "champion/current.json",
+                digest,
+                {"selection_ref": "second"},
+            )
+            with self.assertRaises(self.artifacts.StaleReferenceError):
+                self.artifacts.create_regular_json_if_ref_digest(
+                    root,
+                    "champion/current.json",
+                    digest,
+                    "invocations/inv-b/result.json",
+                    {"status": "incorrectly_current"},
+                )
+            self.assertFalse(
+                (root / "invocations" / "inv-b" / "result.json").exists()
+            )
+
+    def test_directory_publication_never_replaces_an_existing_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            source = parent / "temporary"
+            source.mkdir()
+            (source / "new.txt").write_text("new", encoding="utf-8")
+            destination = parent / "artifacts"
+            destination.mkdir()
+            (destination / "existing.txt").write_text("existing", encoding="utf-8")
+
+            with self.assertRaises(FileExistsError):
+                self.artifacts.publish_directory_noreplace(source, destination)
+
+            self.assertTrue(source.is_dir())
+            self.assertEqual(
+                (destination / "existing.txt").read_text(encoding="utf-8"),
+                "existing",
+            )
+            self.assertFalse((destination / "new.txt").exists())
 
 
 if __name__ == "__main__":
