@@ -1,74 +1,80 @@
 # GPU 工作负载优化
 
-本文统一项目中的核心术语，避免把诊断证据、候选测试和当前最佳实现混为一谈。
+本文统一项目中的核心术语，避免把诊断发现、候选测试和最终性能结论混为一谈。
 
 ## 术语
 
-**RunSpec**
+**优化目标（Optimization Target）**
 
-一次任务不可变的定义，包括目标、目标 claim layer、测试集、精度校验、测量规则、
-固定测量环境、最低有效收益和允许的 candidate 变化范围。
+一次优化任务中保持不变的业务目标，包括真实测试集、精度校验、原始版本、主指标、
+最低有效收益、约束和固定测量环境。
 
-避免使用：Workload Contract、control、manifest
+避免使用：Run、Workload Contract
 
-**Grant**
+**结论层级（Claim Layer）**
 
-绑定 RunSpec 的追加授权，记录用户当前允许投入的时间、GPU 资源、修改范围、
-风险和验证深度。
+结果能够支持的最高范围：diagnostic、kernel、workload 或 serving。低层结果可以解释
+高层现象，但不能替代高层测试。
 
-避免使用：budget、deadline
+避免使用：Optimization Level
 
-**Variant**
+**版本（Variant）**
 
-可按内容识别、可被测量的实现或部署包。original、champion 和 candidate
-是 Variant 在一次任务或 Experiment 中承担的角色。
+内容可以被准确识别和复现的源码、构建产物或部署包。original、candidate 和 champion
+是版本在一次优化任务中承担的角色。
 
-避免使用：branch、snapshot
+避免使用：用 branch、workspace 或 latest 表示版本身份
 
-**Evidence**
+**原始版本（Original）**
 
-为回答一个明确不确定性而采集的只读观测，必须绑定 RunSpec、被观察的 Variant
-和采集环境。Evidence 可以支持或否定假设，但不能改变 champion。
+优化开始时由用户提供、并写入优化目标的版本。原始基线和最终复测都以它作为完整收益的
+起点。
 
-避免使用：没有候选比较时笼统称为 measurement
+**候选版本（Candidate）**
 
-**Experiment**
+ChatGPT 为验证一个明确性能假设而创建的版本。候选必须通过精度校验，并直接与当前最佳版本
+比较后，才可能被采用。
 
-在同一 RunSpec 下，candidate Variant 与指定 reference champion 之间的受控比较。
-它按可选 precheck、正确性、可选初筛和目标 claim 验证依次推进。
+**当前最佳版本（Champion）**
 
-避免使用：iteration、round、candidate session
+当前被 ChatGPT 明确采用、并有正式目标比较支持的版本。任务开始时，当前最佳版本是原始版本。
 
-**ChampionSelection**
+避免使用：latest PASS、best branch、自动 winner
 
-显式、不可变的 champion 变更记录。它可以选择直接战胜当前 champion 的 candidate，
-也可以在当前 champion 失去有效性时，恢复到被同一份当前证据验证仍有效的旧 Variant。
+**比较基准（Reference）**
 
-避免使用：Promotion、latest PASS、automatic winner
+一次候选比较中与候选直接配对测试的当前最佳版本。开发候选时使用的源码起点可以不同于
+比较基准。
 
-**Champion**
+避免使用：用 parent 同时表示源码起点和比较基准
 
-没有 ChampionSelection 时，champion 是 RunSpec 中的 original Variant；此后是最新
-ChampionSelection 指向的 Variant。不能根据源码继承关系或单独的 kernel 结果推断。
+**原始基线（Baseline）**
 
-避免使用：best branch、latest successful candidate
+原始版本在固定测试集、精度校验和测量环境下取得的有效结果。它证明测试可以运行并建立后续
+比较的起点。
 
-**Source base**
+**候选实验（Experiment）**
 
-candidate 开发时基于的 Variant。它可以不同于 reference champion，但必须在
-ChampionSelection 前声明。
+围绕一个明确假设，对候选版本执行最低成本证伪、正确性、可选短版测试和正式目标比较。
+ChatGPT 决定是否创建实验以及何时继续投入；工具只执行已明确请求的阶段。
 
-避免使用：用 parent 表示比较基线
+避免使用：Iteration、Round、Candidate Session
 
-**Reference champion**
+**Profiler 事实（Profiler Facts）**
 
-Experiment 中作为直接比较基线的当前 champion。
+从 NCU、Nsight Systems、PyTorch Profiler、编译器或 SASS 中提取的可核验观测，包括来源、
+版本、单位和内容身份。Profiler 事实用于分析，不能单独证明候选收益。
 
-避免使用：parent、original baseline
+避免使用：把瓶颈判断或优化建议称为 Profiler 事实
 
-**Claim layer**
+**正式目标比较（Target Comparison）**
 
-结果能够支持的最高范围：diagnostic、kernel、workload 或 serving。diagnostic
-只允许提出方向；低层结果不能推导出高层性能结论。
+候选版本与当前最佳版本在优化目标层级上的直接、有效比较。只有正式目标比较能够支持采用
+候选版本。
 
-避免使用：optimization level
+避免使用：用 kernel benchmark 或短版 screen 代替正式目标比较
+
+**Handoff**
+
+ChatGPT 在暂停或结束时留下的简短任务说明，记录当前最佳版本、关键结果、已排除方向、
+未解决问题、停止原因和恢复条件。Handoff 供用户和后续 ChatGPT 阅读，不参与工具准入。
