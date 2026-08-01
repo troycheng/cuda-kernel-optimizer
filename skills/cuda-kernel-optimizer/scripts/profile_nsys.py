@@ -20,13 +20,21 @@ from urllib.parse import quote
 INPUT_VERSION = "cuda-kernel-optimizer/nsys-input-v1"
 RESULT_VERSION = "cuda-kernel-optimizer/profiler-result-v1"
 PARSER_VERSION = "nsys-sqlite-3.25-v1"
+TOOL_IDENTITY_VERSION = "cuda-kernel-optimizer/nsys-tool-v1"
 _VERSION = re.compile(r"2026\.2(?:\.\d+)*\Z")
-_INPUT = {
+_ANALYZE_INPUT = {
     "format_version", "operation", "artifact_root", "target_ref", "report_ref",
     "resources", "operation_timeout_seconds", "command_timeout_seconds",
     "resource_wait_timeout_seconds", "cleanup_timeout_seconds", "launch_deadline",
 }
-_OPTIONAL = {"absolute_deadline", "retry_of"}
+_INPUT_OPTIONAL = {"absolute_deadline", "retry_of"}
+_COLLECT_INPUT = {
+    "format_version", "operation", "artifact_root", "target_ref", "baseline_ref",
+    "role", "case_id", "resources", "operation_timeout_seconds",
+    "command_timeout_seconds", "resource_wait_timeout_seconds",
+    "cleanup_timeout_seconds", "launch_deadline",
+}
+_COLLECT_OPTIONAL = {"experiment_ref", "correctness_ref", "absolute_deadline", "retry_of"}
 _MATERIAL = {"id", "sha256", "kind", "tool", "tool_version", "dialect", "object_ref"}
 _KERNEL_TABLE = "CUPTI_ACTIVITY_KIND_KERNEL"
 _KERNEL_COLUMNS = {"start", "end", "demangledName"}
@@ -34,6 +42,19 @@ _DIALECT = "nsys-sqlite-3.25-v1"
 _MAX_SQLITE_BYTES = 8 * 1024 * 1024 * 1024
 _MAX_TABLES, _MAX_ROWS = 128, 10_000
 _MAX_UNMODELED = 128
+_DRIVER_OUTPUT_FREEZE_LIMITS = {
+    "max_files": 16,
+    "max_total_bytes": 16 * 1024 * 1024,
+    "max_wall_seconds": 5.0,
+}
+# Nsys reports are routinely much larger than NCU CSV or report artifacts.  The
+# single-case collection limit is aligned with the largest SQLite export we can
+# parse, while remaining bounded until artifact-store streaming support lands.
+_NSYS_ARTIFACT_FREEZE_LIMITS = {
+    "max_files": 1,
+    "max_total_bytes": _MAX_SQLITE_BYTES,
+    "max_wall_seconds": 120.0,
+}
 
 
 def _load_sibling(filename: str, name: str):
@@ -47,6 +68,7 @@ def _load_sibling(filename: str, name: str):
 
 STORE = _load_sibling("artifact_store.py", "cuda_optimizer_nsys_store")
 RUNTIME = _load_sibling("_invocation_runtime.py", "cuda_optimizer_nsys_runtime")
+ADAPTER = _load_sibling("workload_adapter.py", "cuda_optimizer_nsys_adapter")
 
 
 class NsysError(ValueError):
@@ -140,6 +162,72 @@ def _material(target: dict, reference) -> dict:
     return dict(material)
 
 
+def _resources(value) -> dict:
+    value = _closed(value, {"host_id", "gpu_uuids"}, label="resources")
+    host_id = _text(value["host_id"], "resources.host_id", maximum=256)
+    gpu_uuids = value["gpu_uuids"]
+    if type(gpu_uuids) is not list or any(
+        not isinstance(item, str) or not item for item in gpu_uuids
+    ):
+        raise NsysError("invalid_nsys_input", "resources.gpu_uuids must be a string list")
+    if len(gpu_uuids) != len(set(gpu_uuids)):
+        raise NsysError("invalid_nsys_input", "resources.gpu_uuids must not contain duplicates")
+    return {"host_id": host_id, "gpu_uuids": sorted(gpu_uuids)}
+
+
+def _nsys_tool(target: dict) -> dict:
+    """Read and verify the Target-frozen Nsys executable without PATH lookup."""
+    try:
+        value = target["environment"]["host"]["tools"]["nsys"]
+    except (KeyError, TypeError) as error:
+        raise NsysError("nsys_not_frozen", "Target has no frozen Nsys executable") from error
+    if type(value) is not dict or set(value) != {"path", "sha256"}:
+        raise NsysError("nsys_not_frozen", "Target Nsys identity is invalid")
+    path = Path(os.path.abspath(os.path.expanduser(os.fspath(value["path"]))))
+    if not path.is_file() or path.is_symlink():
+        raise NsysError("nsys_changed", "frozen Nsys executable is unavailable")
+    digest = _sha(value["sha256"], "Target Nsys SHA-256")
+    if STORE.sha256_file(path) != digest:
+        raise NsysError("nsys_changed", "frozen Nsys executable digest changed")
+    return {"path": str(path), "sha256": digest}
+
+
+def _collect_resources(target: dict, resources: dict) -> dict:
+    try:
+        host = target["environment"]["host"]
+        expected = {
+            "host_id": _text(host["host_id"], "Target host_id", maximum=256),
+            "gpu_uuids": sorted(host["gpu_uuids"]),
+        }
+    except (KeyError, TypeError) as error:
+        raise NsysError("target_invalid", "Target host resources are invalid") from error
+    if any(not isinstance(item, str) or not item for item in expected["gpu_uuids"]):
+        raise NsysError("target_invalid", "Target GPU identities are invalid")
+    if len(expected["gpu_uuids"]) != len(set(expected["gpu_uuids"])):
+        raise NsysError("target_invalid", "Target GPU identities are duplicated")
+    if resources != expected:
+        raise NsysError("resource_mismatch", "collect resources do not equal Target host and GPUs")
+    return expected
+
+
+def _resolve_collect(request: dict) -> dict:
+    try:
+        resolved = ADAPTER.resolve_profile_collection(
+            artifact_root=request["artifact_root"],
+            target_ref=request["target_ref"],
+            baseline_ref=request["baseline_ref"],
+            role=request["role"],
+            case_id=request["case_id"],
+            capability="nsys_wrap_v1",
+            experiment_ref=request.get("experiment_ref"),
+            correctness_ref=request.get("correctness_ref"),
+        )
+    except ValueError as error:
+        raise NsysError("collection_rejected", str(error)) from error
+    resources = _collect_resources(resolved["target"], request["resources"])
+    return {**resolved, "resources": resources, "nsys_tool": _nsys_tool(resolved["target"])}
+
+
 def parse_nsys_sqlite(path, tool_version: str) -> dict:
     """Extract kernel durations from exactly one Nsys SQLite 3.25 export dialect."""
     raw_path = Path(path).expanduser()
@@ -204,15 +292,22 @@ def parse_nsys_sqlite(path, tool_version: str) -> dict:
 
 def _tool_identity() -> dict:
     files = []
-    for name in ("profile_nsys.py", "_invocation_runtime.py", "artifact_store.py"):
+    for name in (
+        "profile_nsys.py", "_invocation_runtime.py", "artifact_store.py",
+        "workload_adapter.py",
+    ):
         files.append({"name": name, "sha256": STORE.sha256_file(Path(__file__).with_name(name))})
-    identity = {"version": "cuda-kernel-optimizer/nsys-tool-v1", "implementations": files}
+    identity = {
+        "version": TOOL_IDENTITY_VERSION,
+        "result_contract": RESULT_VERSION,
+        "implementations": files,
+    }
     identity["digest"] = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return identity
 
 
 def _validate_analyze(value) -> tuple[dict, Path, dict]:
-    request = _closed(value, _INPUT, _OPTIONAL, "analyze input")
+    request = _closed(value, _ANALYZE_INPUT, _INPUT_OPTIONAL, "analyze input")
     if request["format_version"] != INPUT_VERSION or request["operation"] != "analyze":
         raise NsysError("invalid_nsys_input", "analyze operation is unsupported")
     root = Path(os.path.abspath(os.path.expanduser(_text(request["artifact_root"], "artifact_root"))))
@@ -230,6 +325,28 @@ def _validate_analyze(value) -> tuple[dict, Path, dict]:
     return normalized, root, _material(_target(root, request["target_ref"]), request["report_ref"])
 
 
+def _validate_collect(value) -> tuple[dict, dict]:
+    request = _closed(value, _COLLECT_INPUT, _COLLECT_OPTIONAL, "collect input")
+    if request["format_version"] != INPUT_VERSION or request["operation"] != "collect":
+        raise NsysError("invalid_nsys_input", "collect operation is unsupported")
+    normalized = {
+        **request,
+        "artifact_root": str(Path(os.path.abspath(os.path.expanduser(os.fspath(request["artifact_root"]))))),
+        "resources": _resources(request["resources"]),
+        "role": _text(request["role"], "role", maximum=32),
+        "case_id": _text(request["case_id"], "case_id", maximum=128),
+    }
+    for field in (
+        "operation_timeout_seconds", "command_timeout_seconds",
+        "resource_wait_timeout_seconds", "cleanup_timeout_seconds",
+    ):
+        normalized[field] = _finite(request[field], field, True)
+    normalized["launch_deadline"] = _finite(request["launch_deadline"], "launch_deadline")
+    if "absolute_deadline" in request:
+        normalized["absolute_deadline"] = _finite(request["absolute_deadline"], "absolute_deadline")
+    return normalized, _resolve_collect(normalized)
+
+
 def analyze(value, *, wait_for_result: bool) -> dict:
     request, root, material = _validate_analyze(value)
     frozen = {**request, "report_material": material, "tool_identity": _tool_identity()}
@@ -237,24 +354,255 @@ def analyze(value, *, wait_for_result: bool) -> dict:
     return RUNTIME.submit(root, frozen, [sys.executable, str(Path(__file__).resolve()), "_worker"], wait_for_result)
 
 
+def _frozen_collect_request(request: dict, resolved: dict) -> dict:
+    frozen = {
+        "operation": "collect",
+        "target_ref": resolved["target_ref"],
+        "baseline_ref": resolved["baseline_ref"],
+        "role": resolved["role"],
+        "case_id": resolved["case_id"],
+        "variant": resolved["variant"],
+        "experiment_ref": resolved["experiment_ref"],
+        "correctness_ref": resolved["correctness_ref"],
+        "driver": resolved["driver"],
+        "nsys_tool": resolved["nsys_tool"],
+        "resources": resolved["resources"],
+        "tool_identity": _tool_identity(),
+        "operation_timeout_seconds": request["operation_timeout_seconds"],
+        "command_timeout_seconds": request["command_timeout_seconds"],
+        "resource_wait_timeout_seconds": request["resource_wait_timeout_seconds"],
+        "cleanup_timeout_seconds": request["cleanup_timeout_seconds"],
+        "launch_deadline": request["launch_deadline"],
+    }
+    for field in ("absolute_deadline", "retry_of"):
+        if field in request:
+            frozen[field] = request[field]
+    frozen["request_digest"] = RUNTIME.request_digest(frozen)
+    return frozen
+
+
+def collect(value, *, wait_for_result: bool) -> dict:
+    request, resolved = _validate_collect(value)
+    return RUNTIME.submit(
+        resolved["artifact_root"],
+        _frozen_collect_request(request, resolved),
+        [sys.executable, str(Path(__file__).resolve()), "_worker"],
+        wait_for_result,
+    )
+
+
+def _command_spec(argv: list[str], workspace: Path, gpu_uuids: list[str]) -> dict:
+    return {
+        "argv": argv,
+        "cwd": str(workspace),
+        "env": {},
+        "output_limit_bytes": 64 * 1024,
+        "required_gpu_uuids": gpu_uuids,
+    }
+
+
+def _record_child_failure(result: dict, child: dict, label: str) -> bool:
+    if child.get("status") == "completed":
+        return False
+    diagnostic = (child.get("stderr", "") + "\n" + child.get("stdout", ""))[:1024]
+    status = child.get("status")
+    result["execution_status"] = status if status in {"timed_out", "cancelled"} else "failed"
+    result["measurement_validity"] = "invalid"
+    result["stop_reason"] = child.get("stop_reason", status) if status in {"timed_out", "cancelled"} else "nsys_command_failed"
+    result["cleanup_status"] = child.get("cleanup_status", "unknown")
+    result["diagnostic"] = {"error": f"{label} failed: {diagnostic}"[:1024]}
+    return True
+
+
+def _nsys_version(stdout: str) -> str:
+    matches = re.findall(r"2026\.2(?:\.\d+)*", stdout)
+    if len(matches) != 1 or _VERSION.fullmatch(matches[0]) is None:
+        raise NsysError("unsupported_tool_version", "only Nsys 2026.2.x is supported")
+    return matches[0]
+
+
+def _revalidate_collect_worker(request: dict, artifact_root: Path) -> dict:
+    resolved = _resolve_collect({**request, "artifact_root": str(artifact_root)})
+    expected = {
+        key: request[key]
+        for key in (
+            "target_ref", "baseline_ref", "role", "case_id", "variant",
+            "experiment_ref", "correctness_ref", "driver", "nsys_tool", "resources",
+        )
+    }
+    if {key: resolved[key] for key in expected} != expected:
+        raise NsysError("collection_changed", "frozen collection bindings changed")
+    return resolved
+
+
+def _base_result(request: dict, started_epoch: float) -> dict:
+    result = {
+        "record_type": "profiler_result",
+        "format_version": RESULT_VERSION,
+        "operation": request["operation"],
+        "target_ref": request["target_ref"],
+        "started_at_epoch": started_epoch,
+        "finished_at_epoch": None,
+        "elapsed_seconds": None,
+        "execution_status": "invalid",
+        "measurement_validity": "invalid",
+        "stop_reason": None,
+        "cleanup_status": "not_required",
+        "observations": [],
+        "unmodeled": [],
+        "provenance": {},
+    }
+    if request["operation"] == "analyze":
+        result["report_ref"] = request["report_ref"]
+    else:
+        result.update(
+            {
+                "baseline_ref": request["baseline_ref"],
+                "role": request["role"],
+                "case_id": request["case_id"],
+                "experiment_ref": request["experiment_ref"],
+                "correctness_ref": request["correctness_ref"],
+            }
+        )
+    return result
+
+
+def _collect_worker(request: dict, artifact_root: Path, invocation: Path, result: dict) -> None:
+    acquired = RUNTIME.acquire_resources(request["resources"]["gpu_uuids"])
+    if acquired.get("status") != "acquired":
+        result["execution_status"] = acquired.get("status", "failed")
+        result["stop_reason"] = acquired.get("stop_reason", "resource_acquisition_failed")
+        result["cleanup_status"] = acquired.get("cleanup_status", "unknown")
+        return
+    resolved = _revalidate_collect_worker(request, artifact_root)
+    workspace = invocation / "workspace"
+    workspace.mkdir()
+    tool = _nsys_tool(resolved["target"])
+    if tool != request["nsys_tool"]:
+        raise NsysError("nsys_changed", "frozen Nsys executable changed before collection")
+    receipts = []
+    result["provenance"] = {
+        "tool": {"name": "nsys", "path": tool["path"], "sha256": tool["sha256"]},
+        "parser_version": PARSER_VERSION,
+        "tool_identity": request["tool_identity"],
+        "command_receipts": receipts,
+    }
+    version_argv = [tool["path"], "--version"]
+    version_result = RUNTIME.run_child(_command_spec(version_argv, workspace, []))
+    receipts.append({"argv": version_argv, "result": version_result})
+    if _record_child_failure(result, version_result, "Nsys version query"):
+        return
+    version = _nsys_version(version_result["stdout"])
+    result["provenance"]["tool"]["version"] = version
+    variant = ADAPTER.materialize_variant(artifact_root, workspace, resolved["variant"], "variant")
+    target_inputs = ADAPTER.materialize_target_inputs(artifact_root, workspace, resolved["target"])
+    driver_output = workspace / "driver-output"
+    driver_output.mkdir()
+    driver_request = ADAPTER.build_driver_request(
+        target_id=resolved["target"]["id"],
+        execution_id=os.environ["CKO_INVOCATION_ID"],
+        operation="profile_nsys_collect",
+        driver=resolved["driver"],
+        variant=variant,
+        test_suite=target_inputs["test_suite"],
+        correctness=target_inputs["correctness"],
+        objective=target_inputs["objective"],
+        role=resolved["role"],
+        mode="measure" if resolved["driver"]["execution_mode"] == "separate" else "combined",
+        case={"id": resolved["case_id"]},
+        sampling={"kind": "nsys_collect"},
+        output_path=driver_output / "result.json",
+    )
+    driver_request_path = workspace / "driver-request.json"
+    STORE.create_regular_bytes(
+        driver_request_path,
+        json.dumps(driver_request, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n",
+    )
+    driver_argv = ADAPTER.build_argv(resolved["driver"], driver_request_path)
+    prefix = workspace / "collection"
+    profile_argv = [
+        tool["path"], "profile", "--trace=cuda,nvtx,osrt", "--sample=none",
+        "--cpuctxsw=none", "--stats=false", "--wait=all", "--output", str(prefix),
+        *driver_argv,
+    ]
+    tool = _nsys_tool(resolved["target"])
+    if tool != request["nsys_tool"]:
+        raise NsysError("nsys_changed", "frozen Nsys executable changed before profile")
+    profile_result = RUNTIME.run_child(
+        _command_spec(profile_argv, workspace, request["resources"]["gpu_uuids"])
+    )
+    receipts.append({"argv": profile_argv, "result": profile_result})
+    if _record_child_failure(result, profile_result, "Nsys collection"):
+        return
+    reports = sorted(path for path in workspace.glob("collection*.nsys-rep") if path.is_file() and not path.is_symlink())
+    report_path = prefix.with_suffix(".nsys-rep")
+    if reports != [report_path]:
+        raise NsysError("invalid_report_count", "Nsys collection produced zero or multiple reports")
+    driver_object = STORE.freeze_path(artifact_root, driver_output, _DRIVER_OUTPUT_FREEZE_LIMITS)
+    result["provenance"]["driver_output"] = driver_object
+    frozen_driver_output = STORE.materialize_object(
+        artifact_root, driver_object, workspace / "frozen-driver-output"
+    )
+    try:
+        driver_result = ADAPTER.validate_driver_result(frozen_driver_output / "result.json", driver_request)
+    except ValueError as error:
+        raise NsysError("driver_result_invalid", str(error)) from error
+    if driver_result["environment"] != resolved["target"]["environment"]["runtime"]:
+        raise NsysError("environment_changed", "driver runtime identity changed during collection")
+    report_object = STORE.freeze_path(artifact_root, report_path, _NSYS_ARTIFACT_FREEZE_LIMITS)
+    result["provenance"]["report"] = report_object
+    frozen_report = STORE.materialize_object(
+        artifact_root, report_object, workspace / "frozen-report.nsys-rep"
+    )
+    sqlite_path = workspace / "collection.sqlite"
+    export_argv = [tool["path"], "export", "--type", "sqlite", "--output", str(sqlite_path), str(frozen_report)]
+    tool = _nsys_tool(resolved["target"])
+    if tool != request["nsys_tool"]:
+        raise NsysError("nsys_changed", "frozen Nsys executable changed before export")
+    export_result = RUNTIME.run_child(_command_spec(export_argv, workspace, []))
+    receipts.append({"argv": export_argv, "result": export_result})
+    if _record_child_failure(result, export_result, "Nsys SQLite export"):
+        return
+    sqlite_object = STORE.freeze_path(artifact_root, sqlite_path, _NSYS_ARTIFACT_FREEZE_LIMITS)
+    result["provenance"]["sqlite"] = sqlite_object
+    frozen_sqlite = STORE.materialize_object(artifact_root, sqlite_object, workspace / "frozen-sqlite.sqlite")
+    facts = parse_nsys_sqlite(frozen_sqlite, version)
+    result.update(
+        {
+            "execution_status": "succeeded",
+            "measurement_validity": "valid",
+            "stop_reason": "completed",
+            "cleanup_status": RUNTIME.current_cleanup_status(),
+            "observations": facts["observations"],
+            "unmodeled": facts["unmodeled"],
+        }
+    )
+
+
 def _worker_main() -> int:
     root, invocation = Path(os.environ["CKO_ARTIFACT_ROOT"]), Path(os.environ["CKO_INVOCATION_DIR"])
     request, started = _strict_json(invocation / "request.json"), time.monotonic()
-    result = {"record_type": "profiler_result", "format_version": RESULT_VERSION, "operation": "analyze", "target_ref": request["target_ref"], "report_ref": request["report_ref"], "execution_status": "invalid", "measurement_validity": "invalid", "stop_reason": None, "cleanup_status": "not_required", "observations": [], "unmodeled": [], "provenance": {}, "started_at_epoch": time.time()}
+    result = _base_result(request, time.time())
     try:
         if request.get("tool_identity") != _tool_identity():
             raise NsysError("tool_identity_changed", "implementation changed before analysis")
-        material = _material(_target(root, request["target_ref"]), request["report_ref"])
-        if material != request.get("report_material"):
-            raise NsysError("report_changed", "frozen report material changed")
-        report = STORE.materialize_object(root, material["object_ref"], invocation / "workspace" / "report.sqlite")
-        facts = parse_nsys_sqlite(report, material["tool_version"])
-        result.update({"execution_status": "succeeded", "measurement_validity": "valid", "stop_reason": "completed", "observations": facts["observations"], "unmodeled": facts["unmodeled"], "provenance": {"report_ref": request["report_ref"], "report_object_ref": material["object_ref"], "tool": {"name": "nsys", "version": material["tool_version"]}, "dialect": material["dialect"], "parser_version": PARSER_VERSION, "tool_identity": request["tool_identity"]}})
+        if request["operation"] == "collect":
+            _collect_worker(request, root, invocation, result)
+        else:
+            material = _material(_target(root, request["target_ref"]), request["report_ref"])
+            if material != request.get("report_material"):
+                raise NsysError("report_changed", "frozen report material changed")
+            report = STORE.materialize_object(root, material["object_ref"], invocation / "workspace" / "report.sqlite")
+            facts = parse_nsys_sqlite(report, material["tool_version"])
+            result.update({"execution_status": "succeeded", "measurement_validity": "valid", "stop_reason": "completed", "observations": facts["observations"], "unmodeled": facts["unmodeled"], "provenance": {"report_ref": request["report_ref"], "report_object_ref": material["object_ref"], "tool": {"name": "nsys", "version": material["tool_version"]}, "dialect": material["dialect"], "parser_version": PARSER_VERSION, "tool_identity": request["tool_identity"]}})
     except NsysError as error:
+        result["execution_status"] = "invalid"
+        result["measurement_validity"] = "invalid"
         result["stop_reason"] = error.code
+        result["cleanup_status"] = RUNTIME.current_cleanup_status()
         result["diagnostic"] = {"error": str(error)[:1024]}
     except BaseException as error:
-        result.update({"execution_status": "failed", "stop_reason": "worker_error", "diagnostic": {"error": str(error)[:1024]}})
+        result.update({"execution_status": "failed", "measurement_validity": "invalid", "stop_reason": "worker_error", "cleanup_status": RUNTIME.current_cleanup_status(), "diagnostic": {"error": str(error)[:1024]}})
     result["finished_at_epoch"], result["elapsed_seconds"] = time.time(), time.monotonic() - started
     STORE.create_regular_json(invocation / "result.json", result)
     return 0
@@ -271,8 +619,8 @@ def main(argv=None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments == ["_worker"]:
         return _worker_main()
-    parser = argparse.ArgumentParser(description="Analyze one frozen V1.4 Nsight Systems SQLite export.")
-    parser.add_argument("operation", choices=("analyze", "status", "cancel"))
+    parser = argparse.ArgumentParser(description="Analyze or collect frozen V1.4 Nsight Systems facts.")
+    parser.add_argument("operation", choices=("analyze", "collect", "status", "cancel"))
     parser.add_argument("--request", required=True)
     parser.add_argument("--wait", action="store_true")
     args = parser.parse_args(arguments)
@@ -280,9 +628,14 @@ def main(argv=None) -> int:
         request = _strict_json(args.request)
         if request.get("operation") != args.operation:
             raise NsysError("invalid_nsys_input", "CLI operation does not match request")
-        result = analyze(request, wait_for_result=args.wait) if args.operation == "analyze" else _status_or_cancel(request, args.operation)
-        if args.operation != "analyze" and args.wait:
-            raise NsysError("invalid_nsys_input", "--wait is only valid for analyze")
+        if args.operation == "analyze":
+            result = analyze(request, wait_for_result=args.wait)
+        elif args.operation == "collect":
+            result = collect(request, wait_for_result=args.wait)
+        else:
+            if args.wait:
+                raise NsysError("invalid_nsys_input", "--wait is only valid for analyze or collect")
+            result = _status_or_cancel(request, args.operation)
     except (NsysError, OSError, ValueError, TimeoutError) as error:
         print(json.dumps({"status": "rejected", "error_code": getattr(error, "code", "nsys_error"), "error": str(error)[:1024]}, sort_keys=True), file=sys.stderr)
         return 2
