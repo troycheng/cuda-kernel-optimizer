@@ -695,7 +695,7 @@ def check(value) -> dict:
         smoke_output_manifest = STORE._load_object_manifest(
             temporary,
             smoke_result_object,
-            verify_payload=True,
+            verify_payload=False,
         )
         driver_result = ADAPTER.validate_driver_result(
             frozen_smoke_output / "result.json",

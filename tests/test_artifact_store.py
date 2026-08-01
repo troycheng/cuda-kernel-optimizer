@@ -282,6 +282,97 @@ class ArtifactStoreTests(unittest.TestCase):
                 list(destination.parent.glob(f".{destination.name}.*.tmp")), []
             )
 
+    def test_materialize_rejects_symlink_parent_before_staging_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = root / "source.txt"
+            source.write_bytes(b"original")
+            frozen = self.artifacts.freeze_path(
+                root / "artifacts",
+                source,
+                {
+                    "max_files": 1,
+                    "max_total_bytes": 1024,
+                    "max_wall_seconds": 1.0,
+                },
+            )
+            outside = root / "outside"
+            outside.mkdir()
+            linked_parent = root / "linked-parent"
+            try:
+                linked_parent.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlinks are unavailable")
+
+            real_copy = self.artifacts._copy_frozen_member
+            with mock.patch.object(
+                self.artifacts,
+                "_copy_frozen_member",
+                wraps=real_copy,
+            ) as copy_member:
+                with self.assertRaisesRegex(ValueError, "parent.*symlink|unsafe"):
+                    self.artifacts.materialize_object(
+                        root / "artifacts", frozen, linked_parent / "all.txt"
+                    )
+                with self.assertRaisesRegex(ValueError, "parent.*symlink|unsafe"):
+                    self.artifacts.materialize_object_member(
+                        root / "artifacts",
+                        frozen,
+                        "source.txt",
+                        linked_parent / "member.txt",
+                    )
+
+            copy_member.assert_not_called()
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_materialize_nested_path_swap_cannot_escape_private_dirfd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = root / "source"
+            (source / "nested").mkdir(parents=True)
+            (source / "nested" / "payload.bin").write_bytes(b"frozen")
+            frozen = self.artifacts.freeze_path(
+                root / "artifacts",
+                source,
+                {
+                    "max_files": 2,
+                    "max_total_bytes": 1024,
+                    "max_wall_seconds": 1.0,
+                },
+            )
+            outside = root / "outside"
+            outside.mkdir()
+            destination = root / "materialized"
+            real_mkdir = Path.mkdir
+            swapped = False
+
+            def swap_path_after_mkdir(path, mode=0o777, parents=False, exist_ok=False):
+                nonlocal swapped
+                result = real_mkdir(
+                    path, mode=mode, parents=parents, exist_ok=exist_ok
+                )
+                materialized = Path(path)
+                if (
+                    not swapped
+                    and materialized.name == "nested"
+                    and materialized.parent.name.endswith(".tmp")
+                ):
+                    moved = materialized.with_name("nested-moved")
+                    materialized.rename(moved)
+                    materialized.symlink_to(outside, target_is_directory=True)
+                    swapped = True
+                return result
+
+            with mock.patch.object(Path, "mkdir", new=swap_path_after_mkdir):
+                self.artifacts.materialize_object(
+                    root / "artifacts", frozen, destination
+                )
+
+            self.assertEqual(
+                (destination / "nested" / "payload.bin").read_bytes(), b"frozen"
+            )
+            self.assertEqual(list(outside.iterdir()), [])
+
     def test_large_object_freeze_and_materialize_use_bounded_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

@@ -157,6 +157,14 @@ class VersionAuditTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(list(root.iterdir()), [source])
 
+    def test_rejects_input_larger_than_the_audit_boundary(self):
+        oversized = json.dumps(valid_payload()) + (" " * (4 * 1024 * 1024))
+        result, report = self.run_audit(raw=oversized)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(report)
+        self.assertIn("input exceeds byte limit", result.stderr)
+
     def test_timing_evidence_requires_timing_started(self):
         payload = valid_payload()
         payload["timing_started"] = False

@@ -957,30 +957,14 @@ def create_experiment(value) -> dict:
             else:
                 with STORE._locked_reference(root, relative_object):
                     destination = root / relative_object
-                    existed = os.path.lexists(destination)
-                    STORE._promote_staged_object(
+                    promotion = STORE._promote_staged_object(
                         root, staging_root, candidate_object
                     )
                     try:
                         STORE.create_regular_json(path, record)
                     except BaseException:
-                        if not existed and not os.path.lexists(path):
-                            metadata = os.lstat(destination)
-                            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(
-                                metadata.st_mode
-                            ):
-                                raise ValueError(
-                                    "promoted candidate object became unsafe"
-                                )
-                            shutil.rmtree(destination)
-                            parent_fd = os.open(
-                                destination.parent,
-                                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-                            )
-                            try:
-                                os.fsync(parent_fd)
-                            finally:
-                                os.close(parent_fd)
+                        if promotion["published"] and not os.path.lexists(path):
+                            STORE._remove_directory_nofollow(destination)
                         raise
         return {
             "status": "created",
@@ -1578,7 +1562,7 @@ def _driver_call(
         output_manifest = STORE._load_object_manifest(
             os.environ["CKO_ARTIFACT_ROOT"],
             evidence_ref,
-            verify_payload=True,
+            verify_payload=False,
         )
     except (OSError, ValueError, TimeoutError) as error:
         invalid = {

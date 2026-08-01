@@ -31,22 +31,34 @@ class StaleReferenceError(ValueError):
     """Raised when a compare-and-swap reference no longer matches."""
 
 
-def publish_directory_noreplace(source: _PathLike, destination: _PathLike) -> None:
-    """Atomically publish one directory and fail if the destination exists."""
-    source_path = Path(os.path.abspath(os.path.expanduser(os.fspath(source))))
-    destination_path = Path(
-        os.path.abspath(os.path.expanduser(os.fspath(destination)))
-    )
-    if not source_path.is_dir() or source_path.is_symlink():
-        raise ValueError("published source must be a real directory")
+def _publish_directory_fd_noreplace(
+    source_parent_fd: int,
+    source_leaf: str,
+    destination_parent_fd: int,
+    destination_leaf: str,
+    destination_path: Path,
+) -> None:
+    """Atomically publish a directory relative to already-open parents."""
     library = ctypes.CDLL(None, use_errno=True)
-    old = os.fsencode(source_path)
-    new = os.fsencode(destination_path)
+    old = os.fsencode(source_leaf)
+    new = os.fsencode(destination_leaf)
     if sys.platform == "darwin":
-        function = library.renamex_np
-        function.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        function = library.renameatx_np
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
         function.restype = ctypes.c_int
-        returncode = function(old, new, 0x00000004)
+        returncode = function(
+            source_parent_fd,
+            old,
+            destination_parent_fd,
+            new,
+            0x00000004,
+        )
     elif sys.platform.startswith("linux"):
         function = library.renameat2
         function.argtypes = [
@@ -57,7 +69,13 @@ def publish_directory_noreplace(source: _PathLike, destination: _PathLike) -> No
             ctypes.c_uint,
         ]
         function.restype = ctypes.c_int
-        returncode = function(-100, old, -100, new, 1)
+        returncode = function(
+            source_parent_fd,
+            old,
+            destination_parent_fd,
+            new,
+            1,
+        )
     else:
         raise OSError(
             errno.ENOTSUP,
@@ -68,15 +86,37 @@ def publish_directory_noreplace(source: _PathLike, destination: _PathLike) -> No
         if code == errno.EEXIST:
             raise FileExistsError(code, os.strerror(code), destination_path)
         raise OSError(code, os.strerror(code), destination_path)
-    for parent in {source_path.parent, destination_path.parent}:
-        parent_fd = os.open(
-            parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+
+
+def publish_directory_noreplace(source: _PathLike, destination: _PathLike) -> None:
+    """Atomically publish one directory and fail if the destination exists."""
+    source_parent_fd, source_leaf, source_path = _open_parent_directory(
+        source, create=False
+    )
+    destination_parent_fd = None
+    try:
+        source_metadata = os.stat(
+            source_leaf, dir_fd=source_parent_fd, follow_symlinks=False
         )
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
+        if not stat.S_ISDIR(source_metadata.st_mode):
+            raise ValueError("published source must be a real directory")
+        destination_parent_fd, destination_leaf, destination_path = (
+            _open_parent_directory(destination, create=True)
+        )
+        _publish_directory_fd_noreplace(
+            source_parent_fd,
+            source_leaf,
+            destination_parent_fd,
+            destination_leaf,
+            destination_path,
+        )
+        os.fsync(source_parent_fd)
+        if destination_parent_fd != source_parent_fd:
+            os.fsync(destination_parent_fd)
+    finally:
+        os.close(source_parent_fd)
+        if destination_parent_fd is not None:
+            os.close(destination_parent_fd)
 
 
 def sha256_file(path: _PathLike) -> str:
@@ -941,7 +981,6 @@ def _copy_source_file(
                 if written <= 0:
                     raise OSError("object staging write made no progress")
                 offset += written
-        os.fsync(destination_fd)
         after = os.fstat(source_fd)
         if (
             before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
@@ -1225,17 +1264,135 @@ def freeze_path(artifact_root, source, scan_limits) -> dict:
         shutil.rmtree(temporary, ignore_errors=True)
 
 
-def _copy_frozen_member(payload_root: Path, entry: dict, destination: Path) -> None:
+def _open_relative_directory(
+    root_fd: int, relative_path: _PathLike, *, create: bool
+) -> int:
+    """Open one relative directory chain without following any component."""
+    raw = os.fspath(relative_path)
+    if raw in {"", "."}:
+        return os.dup(root_fd)
+    relative = _relative_artifact_path(raw)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current_fd = os.dup(root_fd)
+    try:
+        for component in relative.parts:
+            try:
+                child_fd = os.open(component, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(component, 0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    pass
+                child_fd = os.open(component, flags, dir_fd=current_fd)
+            except OSError as error:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise ValueError(
+                        "materialization path contains a symlink or non-directory"
+                    ) from error
+                raise
+            os.close(current_fd)
+            current_fd = child_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _require_missing_leaf(parent_fd: int, leaf: str, target: Path) -> None:
+    try:
+        os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise FileExistsError(f"materialization destination exists: {target}")
+
+
+def _same_open_directory(parent_fd: int, leaf: str, directory_fd: int) -> bool:
+    try:
+        current = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    opened = os.fstat(directory_fd)
+    return (
+        stat.S_ISDIR(current.st_mode)
+        and (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
+    )
+
+
+def _clear_open_directory(directory_fd: int) -> None:
+    """Remove children through a stable directory descriptor without following links."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    for leaf in os.listdir(directory_fd):
+        metadata = os.stat(leaf, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(metadata.st_mode):
+            child_fd = os.open(leaf, flags, dir_fd=directory_fd)
+            try:
+                _clear_open_directory(child_fd)
+                if _same_open_directory(directory_fd, leaf, child_fd):
+                    os.rmdir(leaf, dir_fd=directory_fd)
+            finally:
+                os.close(child_fd)
+        else:
+            os.unlink(leaf, dir_fd=directory_fd)
+
+
+def _remove_open_directory(parent_fd: int, leaf: str, directory_fd: int) -> None:
+    _clear_open_directory(directory_fd)
+    if _same_open_directory(parent_fd, leaf, directory_fd):
+        os.rmdir(leaf, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+
+
+def _remove_directory_nofollow(path: _PathLike) -> None:
+    parent_fd, leaf, _target = _open_parent_directory(path, create=False)
+    directory_fd = None
+    try:
+        directory_fd = os.open(
+            leaf,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        _remove_open_directory(parent_fd, leaf, directory_fd)
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        os.close(parent_fd)
+
+
+def _copy_frozen_member(
+    payload_root: Path,
+    entry: dict,
+    destination_parent_fd: int,
+    destination_leaf: str,
+) -> None:
     source_path = payload_root / _relative_artifact_path(entry["path"])
     source_parent_fd, source_leaf, _ = _open_parent_directory(source_path, create=False)
-    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     source_fd = destination_fd = None
     try:
         source_fd = os.open(source_leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=source_parent_fd)
         before = os.fstat(source_fd)
         if not stat.S_ISREG(before.st_mode) or before.st_size != entry["size_bytes"]:
             raise ValueError("object payload does not match manifest")
-        destination_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        destination_fd = os.open(
+            destination_leaf,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=destination_parent_fd,
+        )
         digest = hashlib.sha256()
         total = 0
         while True:
@@ -1258,9 +1415,10 @@ def _copy_frozen_member(payload_root: Path, entry: dict, destination: Path) -> N
             after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
         ) or total != entry["size_bytes"] or digest.hexdigest() != entry["sha256"]:
             raise ValueError("object payload does not match manifest")
+        os.fchmod(destination_fd, entry["mode"])
+        os.fsync(destination_fd)
         os.close(destination_fd)
         destination_fd = None
-        os.chmod(destination, entry["mode"], follow_symlinks=False)
     finally:
         if source_fd is not None:
             os.close(source_fd)
@@ -1269,18 +1427,26 @@ def _copy_frozen_member(payload_root: Path, entry: dict, destination: Path) -> N
         os.close(source_parent_fd)
 
 
-def _publish_materialized_file(source: Path, target: Path) -> None:
-    target_parent_fd, target_leaf, target_path = _open_parent_directory(target, create=True)
-    source_parent_fd, source_leaf, _ = _open_parent_directory(source, create=False)
+def _publish_materialized_file_fd(
+    source_parent_fd: int,
+    source_leaf: str,
+    target_parent_fd: int,
+    target_leaf: str,
+    target_path: Path,
+) -> None:
     try:
-        try:
-            os.link(source_leaf, target_leaf, src_dir_fd=source_parent_fd, dst_dir_fd=target_parent_fd, follow_symlinks=False)
-        except FileExistsError as error:
-            raise FileExistsError(f"materialization destination exists: {target_path}") from error
-        os.fsync(target_parent_fd)
-    finally:
-        os.close(source_parent_fd)
-        os.close(target_parent_fd)
+        os.link(
+            source_leaf,
+            target_leaf,
+            src_dir_fd=source_parent_fd,
+            dst_dir_fd=target_parent_fd,
+            follow_symlinks=False,
+        )
+    except FileExistsError as error:
+        raise FileExistsError(
+            f"materialization destination exists: {target_path}"
+        ) from error
+    os.fsync(target_parent_fd)
 
 
 def materialize_object(artifact_root, object_ref, destination) -> Path:
@@ -1292,43 +1458,95 @@ def materialize_object(artifact_root, object_ref, destination) -> Path:
     entries = manifest["entries"]
     _verify_payload_root(payload_root, manifest, verify_hashes=False)
 
-    target = Path(os.path.abspath(os.path.expanduser(os.fspath(destination))))
-    if os.path.lexists(target):
-        raise FileExistsError(f"materialization destination exists: {target}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.parent / f".{target.name}.{secrets.token_hex(8)}.tmp"
+    target_parent_fd = temporary_fd = None
+    temporary_leaf = None
+    directory_published = False
     try:
-        temporary.mkdir(mode=0o700)
+        target_parent_fd, target_leaf, target = _open_parent_directory(
+            destination, create=True
+        )
+        _require_missing_leaf(target_parent_fd, target_leaf, target)
+        temporary_leaf = f".{target_leaf}.{secrets.token_hex(8)}.tmp"
+        os.mkdir(temporary_leaf, 0o700, dir_fd=target_parent_fd)
+        temporary_fd = os.open(
+            temporary_leaf,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=target_parent_fd,
+        )
         directories = [entry for entry in entries if entry["kind"] == "directory"]
         for entry in sorted(directories, key=lambda item: item["path"]):
-            path = _relative_artifact_path(entry["path"])
-            materialized = temporary / path
-            materialized.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directory_fd = _open_relative_directory(
+                temporary_fd, entry["path"], create=True
+            )
+            os.close(directory_fd)
         for entry in (entry for entry in entries if entry["kind"] == "file"):
             path = _relative_artifact_path(entry["path"])
-            materialized = temporary / path
-            materialized.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            _copy_frozen_member(payload_root, entry, materialized)
+            parent_fd = _open_relative_directory(
+                temporary_fd, path.parent, create=False
+            )
+            try:
+                _copy_frozen_member(payload_root, entry, parent_fd, path.name)
+            finally:
+                os.close(parent_fd)
         for entry in sorted(
             directories,
             key=lambda item: len(Path(item["path"]).parts),
             reverse=True,
         ):
-            os.chmod(temporary / entry["path"], entry["mode"], follow_symlinks=False)
-        _fsync_directory_tree(temporary)
+            directory_fd = _open_relative_directory(
+                temporary_fd, entry["path"], create=False
+            )
+            try:
+                os.fchmod(directory_fd, entry["mode"])
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        os.fsync(temporary_fd)
         if manifest["source_kind"] == "file":
             file_entries = [entry for entry in entries if entry["kind"] == "file"]
-            source = temporary / file_entries[0]["path"]
-            _publish_materialized_file(source, target)
-            shutil.rmtree(temporary)
+            path = _relative_artifact_path(file_entries[0]["path"])
+            source_parent_fd = _open_relative_directory(
+                temporary_fd, path.parent, create=False
+            )
+            try:
+                _publish_materialized_file_fd(
+                    source_parent_fd,
+                    path.name,
+                    target_parent_fd,
+                    target_leaf,
+                    target,
+                )
+            finally:
+                os.close(source_parent_fd)
         elif manifest["source_kind"] == "directory":
-            publish_directory_noreplace(temporary, target)
+            _publish_directory_fd_noreplace(
+                target_parent_fd,
+                temporary_leaf,
+                target_parent_fd,
+                target_leaf,
+                target,
+            )
+            directory_published = True
+            os.fsync(target_parent_fd)
         else:
             raise ValueError("object manifest source_kind is unsupported")
         return target
-    except BaseException:
-        shutil.rmtree(temporary, ignore_errors=True)
-        raise
+    finally:
+        try:
+            if temporary_fd is not None:
+                try:
+                    if not directory_published:
+                        _remove_open_directory(
+                            target_parent_fd, temporary_leaf, temporary_fd
+                        )
+                finally:
+                    os.close(temporary_fd)
+        finally:
+            if target_parent_fd is not None:
+                os.close(target_parent_fd)
 
 
 def materialize_object_member(artifact_root, object_ref, relative_path, destination) -> dict:
@@ -1339,23 +1557,50 @@ def materialize_object_member(artifact_root, object_ref, relative_path, destinat
     if len(matches) != 1:
         raise ValueError("object member is not one exact regular file")
     _digest, locator, _summaries = _object_reference(object_ref)
-    target = Path(os.path.abspath(os.path.expanduser(os.fspath(destination))))
-    if os.path.lexists(target):
-        raise FileExistsError(f"materialization destination exists: {target}")
-    temporary = target.parent / f".{target.name}.{secrets.token_hex(8)}.tmp"
+    target_parent_fd = temporary_fd = None
+    temporary_leaf = None
     try:
+        target_parent_fd, target_leaf, target = _open_parent_directory(
+            destination, create=True
+        )
+        _require_missing_leaf(target_parent_fd, target_leaf, target)
+        temporary_leaf = f".{target_leaf}.{secrets.token_hex(8)}.tmp"
+        os.mkdir(temporary_leaf, 0o700, dir_fd=target_parent_fd)
+        temporary_fd = os.open(
+            temporary_leaf,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=target_parent_fd,
+        )
         _copy_frozen_member(
             Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root)))) / locator / "payload",
             matches[0],
-            temporary,
+            temporary_fd,
+            "member",
         )
-        _publish_materialized_file(temporary, target)
+        os.fsync(temporary_fd)
+        _publish_materialized_file_fd(
+            temporary_fd,
+            "member",
+            target_parent_fd,
+            target_leaf,
+            target,
+        )
         return dict(matches[0])
     finally:
         try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+            if temporary_fd is not None:
+                try:
+                    _remove_open_directory(
+                        target_parent_fd, temporary_leaf, temporary_fd
+                    )
+                finally:
+                    os.close(temporary_fd)
+        finally:
+            if target_parent_fd is not None:
+                os.close(target_parent_fd)
 
 
 def _promote_staged_object(artifact_root, staging_root, object_ref) -> dict:
@@ -1371,11 +1616,13 @@ def _promote_staged_object(artifact_root, staging_root, object_ref) -> dict:
     _safe_directory(object_parent)
     source = staging / locator
     destination = root / locator
+    published = True
     try:
         publish_directory_noreplace(source, destination)
     except FileExistsError:
         _load_object_manifest(root, object_ref, verify_payload=True)
-    return dict(object_ref)
+        published = False
+    return {"object_ref": dict(object_ref), "published": published}
 
 
 def create_regular_bytes(path: _PathLike, payload: bytes) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -85,6 +86,51 @@ class EvaluatorPublicSurfaceTests(unittest.TestCase):
             self.assertEqual(
                 {path.name for path in object_root.iterdir()},
                 before,
+            )
+
+    def test_experiment_record_failure_preserves_concurrently_reused_candidate_object(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = V14Project(Path(directory))
+            project.check()
+            baseline_ref = project.baseline()["result_ref"]
+            evaluator = _load_evaluator()
+            real_promote = evaluator.STORE._promote_staged_object
+            real_create = evaluator.STORE.create_regular_json
+            promotions = []
+
+            def concurrent_reuse(artifact_root, staging_root, object_ref):
+                source = Path(staging_root) / object_ref["locator"]
+                destination = Path(artifact_root) / object_ref["locator"]
+                if not destination.exists():
+                    shutil.copytree(source, destination)
+                outcome = real_promote(artifact_root, staging_root, object_ref)
+                promotions.append(outcome)
+                return outcome
+
+            def fail_experiment(path, value):
+                if Path(path).parent.name == "experiments":
+                    raise OSError("simulated experiment publication failure")
+                return real_create(path, value)
+
+            with mock.patch.object(
+                evaluator.STORE,
+                "_promote_staged_object",
+                side_effect=concurrent_reuse,
+            ), mock.patch.object(
+                evaluator.STORE,
+                "create_regular_json",
+                side_effect=fail_experiment,
+            ):
+                with self.assertRaisesRegex(OSError, "simulated experiment"):
+                    evaluator.create_experiment(
+                        project.experiment_input(baseline_ref)
+                    )
+
+            self.assertEqual(len(promotions), 1)
+            self.assertFalse(promotions[0]["published"])
+            reused_ref = promotions[0]["object_ref"]
+            self.assertTrue(
+                (project.artifact_root / reused_ref["locator"] / "manifest.json").is_file()
             )
 
     def test_readiness_and_evaluator_use_only_driver_output_bundle_receipts(self) -> None:

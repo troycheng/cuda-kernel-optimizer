@@ -45,6 +45,7 @@ DERIVED_FIELDS = {"plugin_sha256", "engine_sha256", "timing_cache_sha256"}
 CORRECTNESS_FIELDS = {"passed", "evidence_id"}
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 EVIDENCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+MAX_INPUT_BYTES = 4 * 1024 * 1024
 
 
 class InputError(ValueError):
@@ -88,15 +89,34 @@ def load_json(path):
                 dir_fd=directory_fd,
             )
             try:
-                metadata = os.fstat(descriptor)
-                if not stat.S_ISREG(metadata.st_mode):
+                before = os.fstat(descriptor)
+                if not stat.S_ISREG(before.st_mode):
                     raise InputError("input is not a regular non-symlink file")
+                if before.st_size > MAX_INPUT_BYTES:
+                    raise InputError("input exceeds byte limit")
                 chunks = []
+                total = 0
                 while True:
                     chunk = os.read(descriptor, 1024 * 1024)
                     if not chunk:
                         break
+                    total += len(chunk)
+                    if total > MAX_INPUT_BYTES:
+                        raise InputError("input exceeds byte limit")
                     chunks.append(chunk)
+                after = os.fstat(descriptor)
+                if (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                ) != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                ) or total != before.st_size:
+                    raise InputError("input changed while reading")
                 raw = b"".join(chunks)
             finally:
                 os.close(descriptor)
