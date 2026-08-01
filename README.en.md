@@ -11,24 +11,38 @@
   English · <a href="README.md">简体中文</a>
 </p>
 
-## Overview
+## Project scope
 
-`cuda-kernel-optimizer` is a GPU performance optimization skill for ChatGPT coding environments. It helps ChatGPT start from the complete workload, check the optimization environment, establish the original business baseline, analyze bottlenecks, implement candidate changes, and decide whether to keep them using correctness and paired performance data.
+`cuda-kernel-optimizer` is a GPU performance optimization skill for ChatGPT coding environments. The user supplies a runnable test workload, correctness checks, a target GPU, and the allowed modification scope. ChatGPT then checks the environment, establishes the original baseline, analyzes bottlenecks, implements candidates, and runs paired validation. A formally validated variant becomes the current Champion only after ChatGPT explicitly selects it.
 
-The project covers CUDA, CUTLASS, Triton, PyTorch, vLLM, and TensorRT-LLM. It also considers framework scheduling, CPU and data processing, transfers, communication, I/O, allocation, and serving conditions. It does not assume the bottleneck is inside a kernel.
+The project optimizes the complete execution path, not only a kernel. It covers CUDA, CUTLASS, Triton, PyTorch, vLLM, and TensorRT-LLM, together with framework scheduling, CPU and data processing, transfers, communication, I/O, allocation, and serving conditions. The user's complete workload metric remains the objective. A faster kernel is not the same as a faster service.
 
-V1.4 separates optimization judgment from repetitive execution. ChatGPT is the only optimization decision maker. The installed tools each perform one explicit operation, such as freezing a target, measuring one candidate, parsing one profiler report, or recording the current best variant. They do not choose directions, schedule later stages, or create a second optimization workflow.
+The available evidence determines the strength of the result. A complete workload, correctness checks, and a stable benchmark can support an end-to-end claim. Source or local tests support only claims at those layers. The project does not promise a fixed speedup and does not create performance conclusions when the workload or correctness checks are missing.
 
-## What it does
+## Capabilities
 
-- Checks the real test workload, correctness checks, benchmark, driver, GPU, dependencies, and profiler availability before code changes.
-- Runs the original business baseline first, then examines kernel, launch, framework, CPU, transfer, communication, I/O, and serving time.
-- Uses source, existing profiles, bundled offline knowledge, and optional external research to form falsifiable candidates.
-- Optimizes kernels and surrounding execution paths through a lowest-cost falsifier, correctness, short paired screen, profiler only when needed, and formal paired measurement.
-- Stores the Target, Experiment, Invocation, raw samples, and current Champion so results can be reviewed, resumed, and handed off.
-- Analyzes exported NCU CSV, Nsys SQLite, and PyTorch Chrome traces. Unknown versions, fields, and units are rejected instead of guessed.
+| Task | What ChatGPT and the skill do | Result |
+|---|---|---|
+| Preparation | Check the test workload, correctness, benchmark, driver, GPU, dependencies, and profiler access | Available capabilities, blockers, and the lowest-cost next step |
+| Bottleneck analysis | Build a performance model from the original baseline, source, timelines, kernels, and environment facts | Main bottleneck, competing hypotheses, benefit headroom, and evidence gaps |
+| Candidate optimization | Change a kernel or surrounding execution path and expand validation only after cheaper checks | Reproducible candidate, correctness result, and paired performance data |
+| Report analysis | Parse exported NCU CSV, Nsys SQLite, PyTorch Chrome traces, compiler artifacts, and SASS | Observed facts bound to the current environment identity |
+| Long-running work | Retain experiments, samples, the current best variant, and handoff notes | Handoff-ready, reviewable optimization history and a durable terminal reason |
 
-Without a real workload, the skill can still analyze source, inspect the environment, and validate a local mechanism, but it cannot claim complete business speedup. Without correctness checks, no performance candidate can be accepted.
+Bundled knowledge provides offline leads. External search and third-party AI can suggest directions or challenge a judgment. They cannot replace correctness and performance data from the current project. Unknown profiler versions, fields, units, or identities are rejected rather than guessed.
+
+## Prerequisites
+
+| Input | Purpose |
+|---|---|
+| Test workload (dataset, representative requests, or replay) | Defines the real business target |
+| Correctness checks (expected outputs, tolerances, or accuracy criteria) | Detect output changes |
+| Stable benchmark or service metric | Shows whether target performance improves |
+| Target GPU and runtime environment | Binds build artifacts, tool capability, and measurements |
+| Allowed paths and boundaries | Limits code, dependency, GPU, and host changes |
+| Minimum useful effect | Rejects directions that are not worth pursuing |
+
+If these inputs are incomplete, ChatGPT reports the gaps and helps establish the minimum usable environment. It does not download or invent a workload. Without a real workload, it may inspect the environment, analyze source, and validate a local mechanism, but it cannot claim complete business speedup. Without correctness checks, no candidate can become the Champion.
 
 ## Quick start
 
@@ -40,19 +54,6 @@ ChatGPT's coding environment performs the installation. Users do not need to run
 
 Start a new session after installation so the skill instructions reload. The self-check verifies the package structure only; it does not prove that the target GPU, workload, or profiler is ready.
 
-### Prepare the inputs
-
-| Input | Purpose |
-|---|---|
-| Test workload (dataset, representative requests, or replay) | Defines the real business target |
-| Correctness checks (expected outputs, tolerances, or accuracy criteria) | Detect output changes |
-| Stable benchmark or service metric | Shows whether target performance improves |
-| Target GPU and runtime environment | Binds build artifacts, tool capability, and measurements |
-| Allowed paths and boundaries | Limits code, dependency, GPU, and host changes |
-| Minimum useful effect | Rejects directions that are not worth pursuing |
-
-If these conditions are incomplete, ChatGPT reports the gaps and helps establish the minimum usable environment. It does not download or invent a workload.
-
 ### Run a ten-minute fit check
 
 > Use cuda-kernel-optimizer to check whether this project is ready for optimization. Spend at most 10 minutes. Do not edit source, install dependencies, or change host settings. Confirm the test workload, correctness checks, benchmark, target GPU, and profiler access. Report blockers, currently possible analysis, and the lowest-cost next step. Do not claim a speedup.
@@ -63,9 +64,13 @@ If these conditions are incomplete, ChatGPT reports the gaps and helps establish
 
 The user may authorize unattended work or limit time, GPU use, and the furthest validation scope. Authorization is a boundary, not a budget to exhaust. Every external command still has its own timeout to stop stuck builds, tests, or profiler runs. Host changes such as drivers, GPU counter permissions, clocks, power, services, and container runtime remain recommendations by default.
 
-## How it works
+## Optimization model
 
-### Decision and execution boundary
+V1.4 has three parts:
+
+- **ChatGPT owns optimization judgment**: understand the objective, analyze bottlenecks, propose candidates, weigh benefit against investment, and choose the next operation.
+- **Deterministic tools own execution**: perform one explicit task such as checking the environment, running a measurement, parsing a report, or selecting the Champion.
+- **Evidence records connect the work**: Target, Experiment, Invocation, and Champion retain object identity, experiment claims, actual execution, and the current best variant.
 
 ```mermaid
 flowchart LR
@@ -76,7 +81,7 @@ flowchart LR
     ai --> outcome["Continue, reject, select Champion, or stop"]
 ```
 
-This is the core V1.4 boundary. ChatGPT may revise its judgment as evidence changes. Tools remain closed, repeatable, and testable, and they do not chain themselves into another top-level workflow.
+ChatGPT may change direction as the evidence changes. Tools do not choose candidates, schedule the next stage, or promote a variant automatically. Operations that need an Invocation retain their inputs, outputs, and terminal state; synchronous operations write only records within their own responsibility. `handoff.md` supports long-running work but is not tool state.
 
 ### Building the performance model
 
@@ -95,7 +100,7 @@ flowchart TD
     decision -->|"Low value or no new direction"| stop["Stop with a reason"]
 ```
 
-The removable-time ceiling means the maximum time a direction could affect if fully eliminated; it is not promised gain. ChatGPT also considers the probability that the mechanism is real, implementation time, GPU cost, validation difficulty, and user authorization. External search and third-party AI may challenge the judgment, but they cannot replace correctness and measurement on the current Target.
+The removable-time ceiling is the maximum time a cost could affect if eliminated completely; it is not promised gain. ChatGPT also considers whether the hypothesis is likely to hold, implementation time, GPU cost, validation difficulty, and user authorization before deciding whether another piece of evidence is worth obtaining.
 
 ### Candidate validation
 
@@ -109,6 +114,14 @@ The removable-time ceiling means the maximum time a direction could affect if fu
 | Final audit | Recheck original against the current Champion | Restore original or narrow the claim |
 
 A profiler is not a mandatory stage. Once correctness or the screen is enough to reject a candidate, later expensive operations do not start. A `conservative_bound` may reject when it proves the benefit ceiling is below the threshold. A low or undersampled `diagnostic_proxy` cannot by itself reject the complete workload; ChatGPT must reconsider investment using the claim the proxy actually tested.
+
+## Design evolution
+
+Earlier versions put direction admission, budgets, and stage progression into rules so that long optimization runs could advance automatically. In practice, fixed flows were useful for known steps but could not replace judgment about a specific workload. Once several flows addressed the same problem, ChatGPT had to understand the control system before it could focus on performance evidence.
+
+V1.4 keeps the parts that software handles well: process isolation, resource locks, timeout cleanup, immutable evidence, paired statistics, and profiler parsing. Optimization direction, ROI, and the next step remain ChatGPT decisions grounded in current evidence. For the goal of helping ChatGPT optimize a real workload, this division keeps the model's ability to handle unfamiliar problems while making repeated execution reliable.
+
+The consolidation removed more than ten thousand lines. Some capabilities became the current foundation. Some investment became rework, and the time, GPU capacity, and tokens already spent cannot be recovered. Keeping overlapping structures would only add future maintenance and context cost. The project now judges its design with three questions: can ChatGPT stay focused on performance, do tools perform only deterministic operations, and can real workload and correctness data support the final result?
 
 ## Results and acceptance
 

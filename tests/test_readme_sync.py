@@ -25,10 +25,12 @@ class ReadmeSyncTests(unittest.TestCase):
         self.assertEqual(
             re.findall(r"^## .+$", self.chinese, re.MULTILINE),
             [
-                "## 项目简介",
-                "## 能做什么",
+                "## 项目定位",
+                "## 能力范围",
+                "## 使用准备",
                 "## 快速开始",
-                "## 工作原理",
+                "## 优化模型",
+                "## 设计演进",
                 "## 结果与验收",
                 "## 版本说明",
                 "## 进一步阅读",
@@ -37,10 +39,12 @@ class ReadmeSyncTests(unittest.TestCase):
         self.assertEqual(
             re.findall(r"^## .+$", self.english, re.MULTILINE),
             [
-                "## Overview",
-                "## What it does",
+                "## Project scope",
+                "## Capabilities",
+                "## Prerequisites",
                 "## Quick start",
-                "## How it works",
+                "## Optimization model",
+                "## Design evolution",
                 "## Results and acceptance",
                 "## Release notes",
                 "## Further reading",
@@ -50,6 +54,52 @@ class ReadmeSyncTests(unittest.TestCase):
         self.assertIn('href="README.md"', self.english)
         self.assertLessEqual(len(self.chinese.splitlines()), 220)
         self.assertLessEqual(len(self.english.splitlines()), 220)
+
+    def test_front_door_explains_the_product_before_its_internal_model(self) -> None:
+        chinese = " ".join(self.chinese.split())
+        english = " ".join(self.english.split())
+        for marker in (
+            "用户提供可运行的测试 workload",
+            "完整执行路径",
+            "局部 kernel 提升不等于业务提速",
+            "不承诺固定收益",
+            "ChatGPT 显式选择",
+        ):
+            self.assertIn(marker, chinese)
+        for marker in (
+            "The user supplies a runnable test workload",
+            "complete execution path",
+            "A faster kernel is not the same as a faster service",
+            "does not promise a fixed speedup",
+            "only after ChatGPT explicitly selects it",
+        ):
+            self.assertIn(marker, english)
+
+    def test_design_is_explained_before_its_history_and_cost(self) -> None:
+        chinese = " ".join(self.chinese.split())
+        english = " ".join(self.english.split())
+        for marker in (
+            "ChatGPT 负责优化判断",
+            "确定性工具负责执行",
+            "证据记录负责衔接",
+            "早期版本",
+            "删除了上万行代码",
+            "一部分投入形成了返工",
+        ):
+            self.assertIn(marker, chinese)
+        for marker in (
+            "ChatGPT owns optimization judgment",
+            "Deterministic tools own execution",
+            "Evidence records connect the work",
+            "Earlier versions",
+            "more than ten thousand lines",
+            "Some investment became rework",
+        ):
+            self.assertIn(marker, english)
+        self.assertLess(self.chinese.index("## 优化模型"), self.chinese.index("## 设计演进"))
+        self.assertLess(self.english.index("## Optimization model"), self.english.index("## Design evolution"))
+        self.assertIn("可交接、可审查", self.chinese)
+        self.assertNotIn("可恢复", self.chinese)
 
     def test_opening_explains_product_use_and_result_boundary(self) -> None:
         chinese = " ".join(self.chinese.split())

@@ -144,6 +144,11 @@ class PublicDocsTests(unittest.TestCase):
         self.assertFalse((ROOT / "maintainers").exists())
         self.assertFalse((ROOT / "docs" / "superpowers").exists())
 
+    def test_docs_index_routes_to_the_installed_protocol_not_moving_main(self) -> None:
+        index = (ROOT / "docs" / "index.md").read_text(encoding="utf-8")
+        self.assertNotIn("blob/main", index)
+        self.assertIn("skills/cuda-kernel-optimizer/SKILL.md", index)
+
 
 if __name__ == "__main__":
     unittest.main()
