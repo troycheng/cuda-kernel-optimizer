@@ -38,6 +38,15 @@ _INPUT_REQUIRED = {
     "launch_deadline",
 }
 _INPUT_OPTIONAL = {"absolute_deadline", "retry_of"}
+_COLLECT_REQUIRED = {
+    "format_version", "operation", "artifact_root", "target_ref", "baseline_ref",
+    "role", "case_id", "kernel_name_hints", "resources",
+    "operation_timeout_seconds", "command_timeout_seconds",
+    "resource_wait_timeout_seconds", "cleanup_timeout_seconds", "launch_deadline",
+}
+_COLLECT_OPTIONAL = {
+    "experiment_ref", "correctness_ref", "absolute_deadline", "retry_of",
+}
 _TARGET_REF_FIELDS = {"id", "sha256"}
 _REPORT_REF_FIELDS = {"id", "sha256"}
 _RESOURCE_FIELDS = {"host_id", "gpu_uuids"}
@@ -60,6 +69,11 @@ _NUMBER = re.compile(
 _MAX_CSV_BYTES = 16 * 1024 * 1024
 _MAX_CSV_ROWS = 100_000
 _MAX_UNMODELED = 128
+_FREEZE_LIMITS = {
+    "max_files": 8,
+    "max_total_bytes": 16 * 1024 * 1024,
+    "max_wall_seconds": 5.0,
+}
 
 # The seven semantics with accepted, fixture-backed NCU 2026.2 long-form names.
 _METRICS = {
@@ -103,6 +117,7 @@ def _load_sibling(filename: str, name: str):
 
 STORE = _load_sibling("artifact_store.py", "cuda_optimizer_ncu_store")
 RUNTIME = _load_sibling("_invocation_runtime.py", "cuda_optimizer_ncu_runtime")
+ADAPTER = _load_sibling("workload_adapter.py", "cuda_optimizer_ncu_adapter")
 
 
 class NcuError(ValueError):
@@ -321,6 +336,82 @@ def _validate_analyze(value) -> tuple[dict, Path, dict]:
     return normalized, root, material
 
 
+def _ncu_tool(target: dict) -> dict:
+    """Read and verify the Target-frozen NCU executable without consulting PATH."""
+    try:
+        value = target["environment"]["host"]["tools"]["ncu"]
+    except (KeyError, TypeError) as error:
+        raise NcuError("ncu_not_frozen", "Target has no frozen NCU executable") from error
+    if type(value) is not dict or set(value) != {"path", "sha256"}:
+        raise NcuError("ncu_not_frozen", "Target NCU identity is invalid")
+    path = Path(os.path.abspath(os.path.expanduser(os.fspath(value["path"]))))
+    if not path.is_file() or path.is_symlink():
+        raise NcuError("ncu_changed", "frozen NCU executable is unavailable")
+    digest = _sha256(value["sha256"], "Target NCU SHA-256")
+    if STORE.sha256_file(path) != digest:
+        raise NcuError("ncu_changed", "frozen NCU executable digest changed")
+    return {"path": str(path), "sha256": digest}
+
+
+def _collect_resources(target: dict, resources: dict) -> dict:
+    try:
+        host = target["environment"]["host"]
+        expected = {
+            "host_id": _text(host["host_id"], "Target host_id", maximum=256),
+            "gpu_uuids": sorted(host["gpu_uuids"]),
+        }
+    except (KeyError, TypeError) as error:
+        raise NcuError("target_invalid", "Target host resources are invalid") from error
+    if any(not isinstance(item, str) or not item for item in expected["gpu_uuids"]):
+        raise NcuError("target_invalid", "Target GPU identities are invalid")
+    if len(expected["gpu_uuids"]) != len(set(expected["gpu_uuids"])):
+        raise NcuError("target_invalid", "Target GPU identities are duplicated")
+    if resources != expected:
+        raise NcuError("resource_mismatch", "collect resources do not equal Target host and GPUs")
+    return expected
+
+
+def _resolve_collect(request: dict) -> dict:
+    try:
+        resolved = ADAPTER.resolve_profile_collection(
+            artifact_root=request["artifact_root"],
+            target_ref=request["target_ref"],
+            baseline_ref=request["baseline_ref"],
+            role=request["role"],
+            case_id=request["case_id"],
+            capability="ncu_wrap_v1",
+            experiment_ref=request.get("experiment_ref"),
+            correctness_ref=request.get("correctness_ref"),
+        )
+    except ValueError as error:
+        raise NcuError("collection_rejected", str(error)) from error
+    resources = _collect_resources(resolved["target"], request["resources"])
+    return {**resolved, "resources": resources, "ncu_tool": _ncu_tool(resolved["target"])}
+
+
+def _validate_collect(value) -> tuple[dict, dict]:
+    request = _closed(value, _COLLECT_REQUIRED, _COLLECT_OPTIONAL, "collect input")
+    if request["format_version"] != INPUT_VERSION or request["operation"] != "collect":
+        raise NcuError("invalid_ncu_input", "collect input version or operation is unsupported")
+    normalized = {
+        **request,
+        "artifact_root": str(Path(os.path.abspath(os.path.expanduser(os.fspath(request["artifact_root"]))))),
+        "kernel_name_hints": _hints(request["kernel_name_hints"]),
+        "resources": _resources(request["resources"]),
+        "role": _text(request["role"], "role", maximum=32),
+        "case_id": _text(request["case_id"], "case_id", maximum=128),
+    }
+    for field in (
+        "operation_timeout_seconds", "command_timeout_seconds",
+        "resource_wait_timeout_seconds", "cleanup_timeout_seconds",
+    ):
+        normalized[field] = _finite(request[field], field, positive=True)
+    normalized["launch_deadline"] = _finite(request["launch_deadline"], "launch_deadline")
+    if "absolute_deadline" in request:
+        normalized["absolute_deadline"] = _finite(request["absolute_deadline"], "absolute_deadline")
+    return normalized, _resolve_collect(normalized)
+
+
 def _frozen_request(request: dict, material: dict) -> dict:
     frozen = {
         "operation": "analyze",
@@ -329,6 +420,34 @@ def _frozen_request(request: dict, material: dict) -> dict:
         "report_material": material,
         "kernel_name_hints": request["kernel_name_hints"],
         "resources": request["resources"],
+        "tool_identity": _tool_identity(),
+        "operation_timeout_seconds": request["operation_timeout_seconds"],
+        "command_timeout_seconds": request["command_timeout_seconds"],
+        "resource_wait_timeout_seconds": request["resource_wait_timeout_seconds"],
+        "cleanup_timeout_seconds": request["cleanup_timeout_seconds"],
+        "launch_deadline": request["launch_deadline"],
+    }
+    for field in ("absolute_deadline", "retry_of"):
+        if field in request:
+            frozen[field] = request[field]
+    frozen["request_digest"] = RUNTIME.request_digest(frozen)
+    return frozen
+
+
+def _frozen_collect_request(request: dict, resolved: dict) -> dict:
+    frozen = {
+        "operation": "collect",
+        "target_ref": resolved["target_ref"],
+        "baseline_ref": resolved["baseline_ref"],
+        "role": resolved["role"],
+        "case_id": resolved["case_id"],
+        "variant": resolved["variant"],
+        "experiment_ref": resolved["experiment_ref"],
+        "correctness_ref": resolved["correctness_ref"],
+        "driver": resolved["driver"],
+        "ncu_tool": resolved["ncu_tool"],
+        "kernel_name_hints": request["kernel_name_hints"],
+        "resources": resolved["resources"],
         "tool_identity": _tool_identity(),
         "operation_timeout_seconds": request["operation_timeout_seconds"],
         "command_timeout_seconds": request["command_timeout_seconds"],
@@ -430,13 +549,67 @@ def analyze(value, *, wait_for_result: bool) -> dict:
     )
 
 
-def _base_result(request: dict, started_epoch: float) -> dict:
+def collect(value, *, wait_for_result: bool) -> dict:
+    request, resolved = _validate_collect(value)
+    frozen = _frozen_collect_request(request, resolved)
+    return RUNTIME.submit(
+        resolved["artifact_root"],
+        frozen,
+        [sys.executable, str(Path(__file__).resolve()), "_worker"],
+        wait_for_result,
+    )
+
+
+def _command_spec(argv: list[str], workspace: Path, gpu_uuids: list[str]) -> dict:
     return {
+        "argv": argv,
+        "cwd": str(workspace),
+        "env": {},
+        "output_limit_bytes": 64 * 1024,
+        "required_gpu_uuids": gpu_uuids,
+    }
+
+
+def _completed_child(result: dict, label: str) -> None:
+    if result.get("status") == "completed":
+        return
+    diagnostic = (result.get("stderr", "") + "\n" + result.get("stdout", ""))[:1024]
+    if "ERR_NVGPUCTRPERM" in diagnostic:
+        raise NcuError(
+            "ncu_counter_access_denied",
+            "ERR_NVGPUCTRPERM: NVIDIA GPU performance counters are unavailable",
+        )
+    raise NcuError("ncu_command_failed", f"{label} failed: {diagnostic}")
+
+
+def _ncu_version(stdout: str) -> str:
+    matches = re.findall(r"2026\.2(?:\.\d+)*", stdout)
+    if len(matches) != 1 or _VERSION.fullmatch(matches[0]) is None:
+        raise NcuError("unsupported_tool_version", "only NCU 2026.2.x is supported")
+    return matches[0]
+
+
+def _revalidate_collect_worker(request: dict, artifact_root: Path) -> dict:
+    resolved = _resolve_collect({**request, "artifact_root": str(artifact_root)})
+    expected = {
+        key: request[key]
+        for key in (
+            "target_ref", "baseline_ref", "role", "case_id", "variant",
+            "experiment_ref", "correctness_ref", "driver", "ncu_tool", "resources",
+        )
+    }
+    actual = {key: resolved[key] for key in expected}
+    if actual != expected:
+        raise NcuError("collection_changed", "frozen collection bindings changed")
+    return resolved
+
+
+def _base_result(request: dict, started_epoch: float) -> dict:
+    result = {
         "record_type": "profiler_result",
         "format_version": RESULT_VERSION,
-        "operation": "analyze",
+        "operation": request["operation"],
         "target_ref": request["target_ref"],
-        "report_ref": request["report_ref"],
         "started_at_epoch": started_epoch,
         "finished_at_epoch": None,
         "elapsed_seconds": None,
@@ -448,12 +621,135 @@ def _base_result(request: dict, started_epoch: float) -> dict:
         "unmodeled": [],
         "provenance": {},
     }
+    if request["operation"] == "analyze":
+        result["report_ref"] = request["report_ref"]
+    else:
+        result.update(
+            {
+                "baseline_ref": request["baseline_ref"],
+                "role": request["role"],
+                "case_id": request["case_id"],
+                "experiment_ref": request["experiment_ref"],
+                "correctness_ref": request["correctness_ref"],
+            }
+        )
+    return result
 
 
 def _finish(result: dict, started_mono: float) -> dict:
     result["finished_at_epoch"] = time.time()
     result["elapsed_seconds"] = time.monotonic() - started_mono
     return result
+
+
+def _collect_worker(request: dict, artifact_root: Path, invocation_dir: Path, result: dict) -> None:
+    acquired = RUNTIME.acquire_resources(request["resources"]["gpu_uuids"])
+    if acquired.get("status") != "acquired":
+        result["execution_status"] = acquired.get("status", "failed")
+        result["stop_reason"] = acquired.get("stop_reason", "resource_acquisition_failed")
+        result["cleanup_status"] = acquired.get("cleanup_status", "unknown")
+        return
+    resolved = _revalidate_collect_worker(request, artifact_root)
+    workspace = invocation_dir / "workspace"
+    workspace.mkdir()
+    tool = _ncu_tool(resolved["target"])
+    if tool != request["ncu_tool"]:
+        raise NcuError("ncu_changed", "frozen NCU executable changed before collection")
+    receipts = []
+    result["provenance"] = {
+        "tool": {"name": "ncu", "path": tool["path"], "sha256": tool["sha256"]},
+        "metrics": list(_METRICS),
+        "parser_version": PARSER_VERSION,
+        "tool_identity": request["tool_identity"],
+        "command_receipts": receipts,
+    }
+    version_argv = [tool["path"], "--version"]
+    version_result = RUNTIME.run_child(
+        _command_spec(version_argv, workspace, [])
+    )
+    receipts.append({"argv": version_argv, "result": version_result})
+    _completed_child(version_result, "NCU version query")
+    version = _ncu_version(version_result["stdout"])
+    variant = ADAPTER.materialize_variant(
+        artifact_root, workspace, resolved["variant"], "variant"
+    )
+    target_inputs = ADAPTER.materialize_target_inputs(
+        artifact_root, workspace, resolved["target"]
+    )
+    driver_output = workspace / "driver-result.json"
+    driver_request = ADAPTER.build_driver_request(
+        target_id=resolved["target"]["id"],
+        execution_id=os.environ["CKO_INVOCATION_ID"],
+        operation="profile_ncu_collect",
+        driver=resolved["driver"],
+        variant=variant,
+        test_suite=target_inputs["test_suite"],
+        correctness=target_inputs["correctness"],
+        objective=target_inputs["objective"],
+        role=resolved["role"],
+        mode="measure" if resolved["driver"]["execution_mode"] == "separate" else "combined",
+        case={"id": resolved["case_id"]},
+        sampling={"kind": "ncu_collect"},
+        output_path=driver_output,
+    )
+    driver_request_path = workspace / "driver-request.json"
+    STORE.create_regular_bytes(
+        driver_request_path,
+        json.dumps(driver_request, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n",
+    )
+    driver_argv = ADAPTER.build_argv(resolved["driver"], driver_request_path)
+    report_path = workspace / "collection.ncu-rep"
+    collect_argv = [
+        tool["path"], "--config-file", "off", "--metrics", ",".join(_METRICS),
+        "--print-units", "base", "--print-metric-name", "name",
+        "--target-processes", "all", "--export", str(report_path), *driver_argv,
+    ]
+    tool = _ncu_tool(resolved["target"])
+    if tool != request["ncu_tool"]:
+        raise NcuError("ncu_changed", "frozen NCU executable changed before collection")
+    collect_result = RUNTIME.run_child(
+        _command_spec(collect_argv, workspace, request["resources"]["gpu_uuids"])
+    )
+    receipts.append({"argv": collect_argv, "result": collect_result})
+    _completed_child(collect_result, "NCU collection")
+    driver_result = ADAPTER.validate_driver_result(driver_output, driver_request)
+    if driver_result["environment"] != resolved["target"]["environment"]["runtime"]:
+        raise NcuError("environment_changed", "driver runtime identity changed during collection")
+    driver_object = STORE.freeze_path(artifact_root, driver_output, _FREEZE_LIMITS)
+    STORE.read_regular_bytes(report_path, maximum_bytes=_FREEZE_LIMITS["max_total_bytes"])
+    report_object = STORE.freeze_path(artifact_root, report_path, _FREEZE_LIMITS)
+    csv_path = workspace / "collection.csv"
+    import_argv = [
+        tool["path"], "--config-file", "off", "--import", str(report_path),
+        "--csv", "--page", "raw", "--log-file", str(csv_path),
+    ]
+    tool = _ncu_tool(resolved["target"])
+    if tool != request["ncu_tool"]:
+        raise NcuError("ncu_changed", "frozen NCU executable changed before import")
+    import_result = RUNTIME.run_child(_command_spec(import_argv, workspace, []))
+    receipts.append({"argv": import_argv, "result": import_result})
+    _completed_child(import_result, "NCU CSV import")
+    csv_bytes = STORE.read_regular_bytes(csv_path, maximum_bytes=_MAX_CSV_BYTES)
+    csv_object = STORE.freeze_path(artifact_root, csv_path, _FREEZE_LIMITS)
+    try:
+        csv_text = csv_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise NcuError("invalid_ncu_csv", "NCU CSV is not UTF-8") from error
+    facts = parse_ncu_csv(csv_text, version, request["kernel_name_hints"])
+    result["execution_status"] = "succeeded"
+    result["measurement_validity"] = "valid"
+    result["stop_reason"] = "completed"
+    result["cleanup_status"] = RUNTIME.current_cleanup_status()
+    result["observations"] = facts["observations"]
+    result["unmodeled"] = facts["unmodeled"]
+    result["provenance"].update(
+        {
+            "tool": {"name": "ncu", "version": version, "path": tool["path"], "sha256": tool["sha256"]},
+            "driver_result": driver_object,
+            "report": report_object,
+            "csv": csv_object,
+        }
+    )
 
 
 def _worker_main() -> int:
@@ -467,6 +763,8 @@ def _worker_main() -> int:
         if request.get("tool_identity") != _tool_identity():
             result["execution_status"] = "invalid"
             result["stop_reason"] = "tool_identity_changed"
+        elif request.get("operation") == "collect":
+            _collect_worker(request, artifact_root, invocation_dir, result)
         else:
             target = _target(artifact_root, request["target_ref"])
             material = _material(target, request["report_ref"])
@@ -500,6 +798,7 @@ def _worker_main() -> int:
         result["execution_status"] = "invalid"
         result["measurement_validity"] = "invalid"
         result["stop_reason"] = error.code
+        result["cleanup_status"] = RUNTIME.current_cleanup_status()
         result["diagnostic"] = {"error": str(error)[:1024]}
     except BaseException as error:
         result["execution_status"] = "failed"
@@ -532,8 +831,8 @@ def main(argv=None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments == ["_worker"]:
         return _worker_main()
-    parser = argparse.ArgumentParser(description="Analyze one frozen V1.4 NCU CSV report.")
-    parser.add_argument("operation", choices=("analyze", "status", "cancel"))
+    parser = argparse.ArgumentParser(description="Analyze or collect frozen V1.4 NCU facts.")
+    parser.add_argument("operation", choices=("analyze", "collect", "status", "cancel"))
     parser.add_argument("--request", required=True)
     parser.add_argument("--wait", action="store_true")
     args = parser.parse_args(arguments)
@@ -543,9 +842,11 @@ def main(argv=None) -> int:
             raise NcuError("invalid_ncu_input", "CLI operation does not match request")
         if args.operation == "analyze":
             result = analyze(request, wait_for_result=args.wait)
+        elif args.operation == "collect":
+            result = collect(request, wait_for_result=args.wait)
         else:
             if args.wait:
-                raise NcuError("invalid_ncu_input", "--wait is only valid for analyze")
+                raise NcuError("invalid_ncu_input", "--wait is only valid for analyze or collect")
             result = _status_or_cancel(request, args.operation)
     except (NcuError, OSError, ValueError, TimeoutError) as error:
         return _emit_error(error)
