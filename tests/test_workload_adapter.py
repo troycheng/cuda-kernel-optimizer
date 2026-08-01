@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.v14_support import V14Project, sha256_file, write_json
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts"
@@ -245,6 +247,137 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 2)
             self.assertIn("TODO: implement run_correctness", completed.stdout)
             self.assertFalse(output_path.exists())
+
+
+class ProfileCollectionBindingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.adapter = _load_adapter()
+
+    def _ready_project(self, root: Path) -> tuple[V14Project, dict]:
+        project = V14Project(root)
+        request = project.readiness_input()
+        request["driver"]["profiler_capabilities"] = [
+            "pytorch_chrome_trace_v1"
+        ]
+        checked = project.run_tool("readiness.py", "check", request)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        return project, project.baseline()
+
+    def test_original_collection_resolves_and_candidate_needs_correctness(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project, baseline = self._ready_project(Path(temporary))
+            events_before = project.driver_events()
+
+            resolved = self.adapter.resolve_profile_collection(
+                artifact_root=project.artifact_root,
+                target_ref=project.target_ref(),
+                baseline_ref=baseline["result_ref"],
+                role="original",
+                case_id="main",
+                capability="pytorch_chrome_trace_v1",
+            )
+
+            self.assertEqual(resolved["role"], "original")
+            self.assertEqual(resolved["variant"], resolved["target"]["original"])
+            with self.assertRaisesRegex(ValueError, "correctness_ref"):
+                self.adapter.resolve_profile_collection(
+                    artifact_root=project.artifact_root,
+                    target_ref=project.target_ref(),
+                    baseline_ref=baseline["result_ref"],
+                    role="candidate",
+                    case_id="main",
+                    capability="pytorch_chrome_trace_v1",
+                    experiment_ref={"id": "exp-missing", "sha256": "0" * 64},
+                )
+            self.assertEqual(project.driver_events(), events_before)
+
+    def test_candidate_collection_rejects_mismatched_or_unknown_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project, baseline = self._ready_project(Path(temporary))
+            created = project.run_tool(
+                "workload_evaluate.py",
+                "experiment",
+                project.experiment_input(baseline["result_ref"]),
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            experiment_ref = json.loads(created.stdout)["experiment_ref"]
+            screened = project.run_tool(
+                "workload_evaluate.py",
+                "screen",
+                project.screen_input(experiment_ref),
+                wait=True,
+            )
+            self.assertEqual(screened.returncode, 0, screened.stderr)
+            screen = json.loads(screened.stdout)
+            valid_correctness_ref = {
+                **screen["result_ref"],
+                "case_id": "main",
+            }
+            resolved = self.adapter.resolve_profile_collection(
+                artifact_root=project.artifact_root,
+                target_ref=project.target_ref(),
+                baseline_ref=baseline["result_ref"],
+                role="candidate",
+                case_id="main",
+                capability="pytorch_chrome_trace_v1",
+                experiment_ref=experiment_ref,
+                correctness_ref=valid_correctness_ref,
+            )
+            self.assertEqual(resolved["variant"]["role"], "candidate")
+            result_path = (
+                project.artifact_root
+                / "invocations"
+                / screen["invocation_id"]
+                / "result.json"
+            )
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["correctness_receipts"][0]["variant"] = json.loads(
+                (project.artifact_root / "target.json").read_text(encoding="utf-8")
+            )["original"]
+            write_json(result_path, result)
+            mismatched_ref = {
+                "invocation_id": screen["invocation_id"],
+                "sha256": sha256_file(result_path),
+                "case_id": "main",
+            }
+            events_before = project.driver_events()
+            with self.assertRaisesRegex(ValueError, "one passing candidate receipt"):
+                self.adapter.resolve_profile_collection(
+                    artifact_root=project.artifact_root,
+                    target_ref=project.target_ref(),
+                    baseline_ref=baseline["result_ref"],
+                    role="candidate",
+                    case_id="main",
+                    capability="pytorch_chrome_trace_v1",
+                    experiment_ref=experiment_ref,
+                    correctness_ref=mismatched_ref,
+                )
+            self.assertEqual(project.driver_events(), events_before)
+
+            result["correctness_receipts"][0]["variant"] = json.loads(
+                (project.artifact_root / "experiments" / f"{experiment_ref['id']}.json").read_text(
+                    encoding="utf-8"
+                )
+            )["candidate"]
+            result["correctness_receipts"][0]["unexpected"] = True
+            write_json(result_path, result)
+            correctness_ref = {
+                "invocation_id": screen["invocation_id"],
+                "sha256": sha256_file(result_path),
+                "case_id": "main",
+            }
+
+            with self.assertRaisesRegex(ValueError, "correctness receipt.*unknown"):
+                self.adapter.resolve_profile_collection(
+                    artifact_root=project.artifact_root,
+                    target_ref=project.target_ref(),
+                    baseline_ref=baseline["result_ref"],
+                    role="candidate",
+                    case_id="main",
+                    capability="pytorch_chrome_trace_v1",
+                    experiment_ref=experiment_ref,
+                    correctness_ref=correctness_ref,
+                )
 
     def test_template_never_publishes_when_cleanup_is_not_implemented(self) -> None:
         template = (TEMPLATE_DIR / "workload_driver.py").read_text("utf-8")

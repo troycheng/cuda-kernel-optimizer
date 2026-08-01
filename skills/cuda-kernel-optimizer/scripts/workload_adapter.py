@@ -85,6 +85,32 @@ _ENVIRONMENT_FIELDS = {
 _CONTAINER_FIELDS = {"kind", "identity"}
 _CONSTRAINT_MEASUREMENT_FIELDS = {"name", "unit", "samples"}
 _ARTIFACT_FIELDS = {"kind", "relative_path", "sha256"}
+_PROFILE_RECEIPT_FIELDS = {
+    "variant",
+    "case_id",
+    "status",
+    "passed",
+    "acceptance",
+    "metrics",
+    "gate",
+    "evidence_refs",
+}
+_PROFILE_GATE_FIELDS = {
+    "passed",
+    "driver_status",
+    "metric",
+    "operator",
+    "threshold",
+    "observed",
+    "status_consistent",
+}
+_PROFILE_EVIDENCE_REF_FIELDS = {
+    "digest",
+    "locator",
+    "source_kind",
+    "file_count",
+    "total_bytes",
+}
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _PROFILER_CAPABILITIES = {
     "ncu_wrap_v1",
@@ -638,7 +664,12 @@ def _profile_target(root: Path, reference) -> dict:
     return target
 
 
-def _profile_baseline(root: Path, reference, target_ref: dict) -> dict:
+def _profile_baseline(
+    root: Path,
+    reference,
+    target_ref: dict,
+    target: dict,
+) -> dict:
     normalized = _invocation_reference(
         reference, "baseline_ref", include_case=False
     )
@@ -657,6 +688,7 @@ def _profile_baseline(root: Path, reference, target_ref: dict) -> dict:
         or result.get("measurement_validity") != "valid"
         or result.get("verdict") != "passed"
         or result.get("cleanup_status") != "confirmed"
+        or result.get("variant_refs") != [target.get("original")]
     ):
         raise ValueError("baseline_ref is not a valid original baseline")
     return normalized
@@ -703,7 +735,82 @@ def _profile_experiment(
     candidate = experiment.get("candidate")
     if type(candidate) is not dict:
         raise ValueError("experiment_ref has no candidate Variant")
-    return normalized, experiment
+    return normalized, {
+        **experiment,
+        "candidate": _profile_variant(candidate, "experiment_ref.candidate"),
+    }
+
+
+def _profile_variant(value, label: str) -> dict:
+    frozen = _closed(value, _VARIANT_FIELDS | {"role"}, label)
+    if frozen["role"] not in {"original", "reference", "candidate"}:
+        raise ValueError(f"{label}.role is unsupported")
+    return {
+        **validate_variant({field: frozen[field] for field in _VARIANT_FIELDS}),
+        "role": frozen["role"],
+    }
+
+
+def _profile_evidence_ref(root: Path, value) -> dict:
+    evidence_ref = _closed(
+        value,
+        _PROFILE_EVIDENCE_REF_FIELDS,
+        "correctness receipt evidence_ref",
+    )
+    digest = _sha256(
+        evidence_ref["digest"], "correctness receipt evidence_ref.digest"
+    )
+    locator = _text(
+        evidence_ref["locator"], "correctness receipt evidence_ref.locator"
+    )
+    expected_locator = f"objects/sha256/{digest}"
+    if locator != expected_locator:
+        raise ValueError("correctness receipt evidence_ref locator is not content-bound")
+    if evidence_ref["source_kind"] != "file":
+        raise ValueError("correctness receipt evidence_ref must reference one file")
+    if (
+        type(evidence_ref["file_count"]) is not int
+        or evidence_ref["file_count"] != 1
+        or type(evidence_ref["total_bytes"]) is not int
+        or not 0 < evidence_ref["total_bytes"] <= _MAX_RESULT_BYTES
+    ):
+        raise ValueError("correctness receipt evidence_ref summary is invalid")
+    manifest = _read_profile_manifest(root / locator / "manifest.json")
+    if hashlib.sha256(_canonical_bytes(manifest)).hexdigest() != digest:
+        raise ValueError("correctness receipt evidence_ref digest changed")
+    if (
+        manifest.get("source_kind") != evidence_ref["source_kind"]
+        or manifest.get("file_count") != evidence_ref["file_count"]
+        or manifest.get("total_bytes") != evidence_ref["total_bytes"]
+    ):
+        raise ValueError("correctness receipt evidence_ref summary changed")
+    return dict(evidence_ref)
+
+
+def _read_profile_manifest(path: Path) -> dict:
+    raw = STORE.read_regular_bytes(path, maximum_bytes=_MAX_RESULT_BYTES)
+
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError("correctness receipt evidence_ref contains duplicate key")
+            value[key] = item
+        return value
+
+    try:
+        manifest = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ValueError(f"correctness receipt evidence_ref has non-finite number: {token}")
+            ),
+        )
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("correctness receipt evidence_ref manifest is invalid JSON") from error
+    if type(manifest) is not dict:
+        raise ValueError("correctness receipt evidence_ref manifest must be an object")
+    return manifest
 
 
 def _profile_correctness(
@@ -713,6 +820,7 @@ def _profile_correctness(
     target_ref: dict,
     experiment_ref: dict,
     candidate: dict,
+    target: dict,
     case_id: str,
 ) -> dict:
     normalized = _invocation_reference(
@@ -732,21 +840,57 @@ def _profile_correctness(
         result.get("operation") not in {"screen", "target"}
         or result.get("target_ref") != target_ref
         or result.get("experiment_ref") != experiment_ref
+        or result.get("execution_status") != "succeeded"
         or result.get("cleanup_status") != "confirmed"
     ):
         raise ValueError("correctness_ref is not bound to this candidate")
+    variants = result.get("variant_refs")
+    if type(variants) is not list or sum(item == candidate for item in variants) != 1:
+        raise ValueError("correctness_ref does not bind this candidate Variant")
     receipts = result.get("correctness_receipts")
     if type(receipts) is not list:
         raise ValueError("correctness_ref has no correctness receipts")
-    matches = [
-        receipt
-        for receipt in receipts
-        if type(receipt) is dict
-        and receipt.get("variant") == candidate
-        and receipt.get("case_id") == case_id
-        and receipt.get("status") == "valid"
-        and receipt.get("passed") is True
-    ]
+    matches = []
+    expected_acceptance = _closed(
+        target.get("correctness", {}).get("acceptance"),
+        {"metric", "operator", "value"},
+        "Target correctness acceptance",
+    )
+    for index, value in enumerate(receipts):
+        receipt = _closed(
+            value,
+            _PROFILE_RECEIPT_FIELDS,
+            f"correctness receipt[{index}]",
+        )
+        if receipt["variant"] != candidate or receipt["case_id"] != case_id:
+            continue
+        if receipt["status"] != "valid" or receipt["passed"] is not True:
+            continue
+        acceptance = _closed(
+            receipt["acceptance"],
+            {"metric", "operator", "value"},
+            f"correctness receipt[{index}].acceptance",
+        )
+        if acceptance != expected_acceptance:
+            raise ValueError("correctness receipt acceptance is not bound to Target")
+        gate = _closed(
+            receipt["gate"],
+            _PROFILE_GATE_FIELDS,
+            f"correctness receipt[{index}].gate",
+        )
+        computed = evaluate_correctness(
+            {
+                "status": gate["driver_status"],
+                "metrics": receipt["metrics"],
+            },
+            acceptance,
+        )
+        if gate != computed or not computed["passed"]:
+            raise ValueError("correctness receipt gate is not a passing result")
+        if type(receipt["evidence_refs"]) is not list or len(receipt["evidence_refs"]) != 1:
+            raise ValueError("correctness receipt must contain one content-bound evidence_ref")
+        _profile_evidence_ref(root, receipt["evidence_refs"][0])
+        matches.append(receipt)
     if len(matches) != 1:
         raise ValueError(
             "correctness_ref does not contain one passing candidate receipt"
@@ -794,7 +938,7 @@ def resolve_profile_collection(
     if case_id not in target["test_suite"]["case_ids"]:
         raise ValueError("case_id is outside the frozen test suite")
     normalized_baseline_ref = _profile_baseline(
-        root, baseline_ref, normalized_target_ref
+        root, baseline_ref, normalized_target_ref, target
     )
     if role == "original":
         if experiment_ref is not None or correctness_ref is not None:
@@ -804,6 +948,7 @@ def resolve_profile_collection(
         variant = target.get("original")
         if type(variant) is not dict:
             raise ValueError("Target has no original Variant")
+        variant = _profile_variant(variant, "Target original Variant")
         normalized_experiment_ref = None
         normalized_correctness_ref = None
     elif role == "candidate":
@@ -824,6 +969,7 @@ def resolve_profile_collection(
             target_ref=normalized_target_ref,
             experiment_ref=normalized_experiment_ref,
             candidate=variant,
+            target=target,
             case_id=case_id,
         )
     else:
