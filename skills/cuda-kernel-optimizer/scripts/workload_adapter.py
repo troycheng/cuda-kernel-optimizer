@@ -1,1419 +1,1697 @@
 #!/usr/bin/env python3
-"""Normalize and execute user-owned end-to-end workloads.
+"""Validate and materialize the V1.4 command-driver protocol.
 
-This module deliberately has no workload discovery or download behavior.  A
-full-mode run exists only when the user supplies a complete Python adapter,
-command, or manifest; otherwise callers remain in kernel-only mode.
+This module never starts a process.  Readiness, workload evaluation, and
+profiler tools use it to build one identical driver request and argv.
 """
 
 from __future__ import annotations
 
-import ast
-import copy
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
-import shlex
 import shutil
-import signal
 import stat
-import subprocess
-import sys
 import tempfile
-import threading
-import time
-from contextlib import contextmanager
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from pathlib import Path
-from types import ModuleType
+from pathlib import Path, PurePosixPath
 
 
-REQUIRED_ADAPTER_CALLS = (
-    "prepare",
-    "validate",
-    "benchmark",
-    "metrics",
+DRIVER_PROTOCOL = "cuda-kernel-optimizer/driver-v1"
+REQUEST_PROTOCOL = "cuda-kernel-optimizer/driver-request-v1"
+RESULT_PROTOCOL = "cuda-kernel-optimizer/driver-result-v1"
+
+_DRIVER_FIELDS = {
+    "command",
+    "request_argument",
+    "execution_mode",
+    "protocol_version",
+    "profiler_capabilities",
+    "side_effects",
+    "cleanup_contract",
+}
+_CLEANUP_CONTRACT_FIELDS = {"kind", "external_tasks"}
+_REQUEST_FIELDS = {
+    "protocol_version",
+    "request_digest",
+    "target_id",
+    "execution_id",
+    "operation",
+    "variant",
+    "test_suite",
+    "correctness",
+    "objective",
+    "role",
+    "mode",
+    "case",
+    "sampling",
+    "output_path",
+    "driver_identity",
+}
+_RESULT_BASE_FIELDS = {
+    "protocol_version",
+    "request_digest",
+    "target_id",
+    "execution_id",
+    "variant_digest",
+    "role",
+    "mode",
+    "case_id",
+    "artifacts",
     "cleanup",
-)
-
-_OBJECTIVE_FIELDS = {"primary_metric", "min_effect_pct", "constraints"}
-_PRIMARY_FIELDS = {"name", "direction"}
-_CONSTRAINT_FIELDS = {"name", "max_regression_pct"}
-_MANIFEST_FIELDS = {"kind", "source", "objective", "cases"}
-_DIAGNOSTIC_LIMIT = 4096
-_OUTPUT_LIMIT_BYTES = 1024 * 1024
-_PROCESS_GRACE_SECONDS = 0.5
-_SECRET_MARKERS = (
-    "TOKEN",
-    "SECRET",
-    "PASSWORD",
-    "KEY",
-    "COOKIE",
-    "CREDENTIAL",
-    "AUTH",
-)
-
-
-@dataclass(frozen=True)
-class _FileSnapshot:
-    path: Path
-    data: bytes
-    device: int
-    inode: int
-    size: int
-    mtime_ns: int
-    mode: int
-    sha256: str
-
-
-@dataclass(frozen=True)
-class _PythonBundle:
-    source: _FileSnapshot
-    dependencies: tuple[tuple[str, _FileSnapshot], ...]
-
-
-class _FrozenDict(dict):
-    """JSON-compatible immutable dict used inside a frozen WorkloadSpec."""
-
-    def _immutable(self, *args, **kwargs):
-        raise TypeError("WorkloadSpec values are immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-    __ior__ = _immutable
-
-    def __deepcopy__(self, memo):
-        return self
-
-
-class _FrozenList(list):
-    """JSON-compatible immutable list used inside a frozen WorkloadSpec."""
-
-    def _immutable(self, *args, **kwargs):
-        raise TypeError("WorkloadSpec values are immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    __iadd__ = _immutable
-    __imul__ = _immutable
-    append = _immutable
-    clear = _immutable
-    extend = _immutable
-    insert = _immutable
-    pop = _immutable
-    remove = _immutable
-    reverse = _immutable
-    sort = _immutable
-
-    def __deepcopy__(self, memo):
-        return self
+    "driver_identity",
+    "environment",
+}
+_VARIANT_FIELDS = {"kind", "digest", "locator"}
+_CLEANUP_RESULT_FIELDS = {"status", "live_tasks"}
+_CORRECTNESS_FIELDS = {"status", "metrics"}
+_MEASUREMENTS_FIELDS = {"primary", "constraints"}
+_PRIMARY_MEASUREMENT_FIELDS = {"name", "unit", "samples"}
+_TEST_SUITE_FIELDS = {"digest", "locator", "case_ids"}
+_CORRECTNESS_INPUT_FIELDS = {"reference", "method", "acceptance"}
+_REFERENCE_INPUT_FIELDS = {"digest", "locator"}
+_OBJECTIVE_INPUT_FIELDS = {"primary_metric", "constraints"}
+_ENVIRONMENT_FIELDS = {
+    "gpu_uuids",
+    "gpu_models",
+    "gpu_architectures",
+    "driver_version",
+    "cuda_runtime_version",
+    "frameworks",
+    "container",
+}
+_CONTAINER_FIELDS = {"kind", "identity"}
+_CONSTRAINT_MEASUREMENT_FIELDS = {"name", "unit", "samples"}
+_ARTIFACT_FIELDS = {"kind", "relative_path", "sha256"}
+_PROFILE_RECEIPT_FIELDS = {
+    "variant",
+    "case_id",
+    "status",
+    "passed",
+    "acceptance",
+    "metrics",
+    "gate",
+    "evidence_refs",
+}
+_PROFILE_GATE_FIELDS = {
+    "passed",
+    "driver_status",
+    "metric",
+    "operator",
+    "threshold",
+    "observed",
+    "status_consistent",
+}
+_PROFILE_EVIDENCE_REF_FIELDS = {
+    "digest",
+    "locator",
+    "source_kind",
+    "file_count",
+    "total_bytes",
+}
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_PROFILER_CAPABILITIES = {
+    "ncu_wrap_v1",
+    "nsys_wrap_v1",
+    "pytorch_chrome_trace_v1",
+}
+_MAX_RESULT_BYTES = 4 * 1024 * 1024
+_MAX_ARTIFACT_BYTES = 8 * 1024 * 1024 * 1024
+_MAX_ARTIFACTS = 128
+_MAX_METRICS = 256
+_MAX_SAMPLES = 100_000
+_MAX_CONSTRAINTS = 128
+_MAX_GPUS = 64
+_MAX_FRAMEWORKS = 128
 
 
-def _freeze_json(value):
-    if isinstance(value, dict):
-        return _FrozenDict({key: _freeze_json(item) for key, item in value.items()})
-    if isinstance(value, list):
-        return _FrozenList(_freeze_json(item) for item in value)
-    if isinstance(value, tuple):
-        return tuple(_freeze_json(item) for item in value)
-    return copy.deepcopy(value)
+def _load_artifact_store():
+    path = Path(__file__).with_name("artifact_store.py")
+    spec = importlib.util.spec_from_file_location(
+        "cuda_optimizer_workload_adapter_store", path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load artifact store: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-@dataclass(frozen=True)
-class WorkloadSpec:
-    kind: str
-    source: str | list[str]
-    objective: dict
-    cases: tuple[dict, ...]
-    source_hash: str
-
-    def __post_init__(self) -> None:
-        if isinstance(self.source, list) and not isinstance(self.source, _FrozenList):
-            object.__setattr__(self, "source", _freeze_json(self.source))
-        object.__setattr__(self, "objective", _freeze_json(self.objective))
-        object.__setattr__(
-            self,
-            "cases",
-            tuple(_freeze_json(case) for case in self.cases),
-        )
+STORE = _load_artifact_store()
 
 
-def _nonempty_string(value, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field} must be a non-empty string")
-    return value.strip()
+def _closed(value, fields: set[str], label: str) -> dict:
+    if type(value) is not dict:
+        raise ValueError(f"{label} must be an object")
+    missing = fields - set(value)
+    unknown = set(value) - fields
+    if missing:
+        raise ValueError(f"{label} is missing fields: {sorted(missing)}")
+    if unknown:
+        raise ValueError(f"{label} contains unknown fields: {sorted(unknown)}")
+    return value
 
 
-def _finite_nonnegative(value, field: str) -> float:
+def _text(value, label: str, *, maximum: int = 4096) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise ValueError(f"{label} must be a non-empty bounded string")
+    return value
+
+
+def _sha256(value, label: str) -> str:
+    text = _text(value, label, maximum=64)
+    if _SHA256.fullmatch(text) is None:
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return text
+
+
+def _finite(value, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{field} must be a finite non-negative number")
+        raise ValueError(f"{label} must be a finite number")
     number = float(value)
-    if not math.isfinite(number) or number < 0:
-        raise ValueError(f"{field} must be a finite non-negative number")
+    if not math.isfinite(number):
+        raise ValueError(f"{label} must be a finite number")
     return number
 
 
-def _unknown_fields(value: Mapping, allowed: set[str], field: str) -> None:
-    unknown = sorted(set(value) - allowed)
-    if unknown:
-        raise ValueError(f"{field} contains unknown fields: {', '.join(unknown)}")
-
-
-def validate_objective(value) -> dict:
-    """Return a strict, normalized deep copy of an objective JSON object."""
-    if not isinstance(value, dict):
-        raise ValueError("objective must be a JSON object")
-    _unknown_fields(value, _OBJECTIVE_FIELDS, "objective")
-    missing = sorted(_OBJECTIVE_FIELDS - set(value))
-    if missing:
-        raise ValueError(f"objective missing required fields: {', '.join(missing)}")
-
-    primary = value["primary_metric"]
-    if not isinstance(primary, dict):
-        raise ValueError("primary_metric must be an object")
-    _unknown_fields(primary, _PRIMARY_FIELDS, "primary_metric")
-    missing_primary = sorted(_PRIMARY_FIELDS - set(primary))
-    if missing_primary:
-        raise ValueError(
-            "primary_metric missing required fields: " + ", ".join(missing_primary)
-        )
-    primary_name = _nonempty_string(primary["name"], "primary_metric.name")
-    direction = primary["direction"]
-    if direction not in ("lower", "higher"):
-        raise ValueError("primary_metric.direction must be 'lower' or 'higher'")
-
-    constraints = value["constraints"]
-    if not isinstance(constraints, list):
-        raise ValueError("constraints must be a list")
-    normalized_constraints = []
-    seen = set()
-    for index, constraint in enumerate(constraints):
-        field = f"constraints[{index}]"
-        if not isinstance(constraint, dict):
-            raise ValueError(f"{field} must be an object")
-        _unknown_fields(constraint, _CONSTRAINT_FIELDS, field)
-        missing_constraint = sorted(_CONSTRAINT_FIELDS - set(constraint))
-        if missing_constraint:
-            raise ValueError(
-                f"{field} missing required fields: {', '.join(missing_constraint)}"
-            )
-        name = _nonempty_string(constraint["name"], f"{field}.name")
-        if name in seen:
-            raise ValueError(f"constraints contains duplicate name: {name}")
-        seen.add(name)
-        normalized_constraints.append(
-            {
-                "name": name,
-                "max_regression_pct": _finite_nonnegative(
-                    constraint["max_regression_pct"],
-                    f"{field}.max_regression_pct",
-                ),
-            }
-        )
-
-    return {
-        "primary_metric": {"name": primary_name, "direction": direction},
-        "min_effect_pct": _finite_nonnegative(
-            value["min_effect_pct"], "min_effect_pct"
-        ),
-        "constraints": normalized_constraints,
-    }
-
-
-def _strict_json_loads(text: str, field: str):
-    def object_pairs(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"{field} contains duplicate key: {key}")
-            result[key] = value
-        return result
-
-    def non_finite(token):
-        raise ValueError(f"{field} contains non-finite JSON constant: {token}")
-
+def _json_copy(value, label: str):
     try:
         return json.loads(
-            text,
-            object_pairs_hook=object_pairs,
-            parse_constant=non_finite,
+            json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
         )
-    except json.JSONDecodeError as error:
-        raise ValueError(f"{field} must contain valid strict JSON: {error}") from error
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{label} must be finite JSON") from error
 
 
-def _read_json_object(path, field: str) -> tuple[Path, dict]:
-    try:
-        resolved = Path(path).expanduser().resolve(strict=True)
-    except (OSError, RuntimeError, TypeError) as error:
-        raise ValueError(f"{field} file does not exist: {path}") from error
-    if not resolved.is_file():
-        raise ValueError(f"{field} must be a regular file: {resolved}")
-    try:
-        value = _strict_json_loads(resolved.read_text(encoding="utf-8"), field)
-    except (OSError, UnicodeError) as error:
-        raise ValueError(f"{field} must contain valid JSON: {error}") from error
-    if not isinstance(value, dict):
-        raise ValueError(f"{field} must be a JSON object")
-    return resolved, value
+def _canonical_bytes(value) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
 
 
-def load_objective(path) -> dict:
-    _, value = _read_json_object(path, "objective")
-    return validate_objective(value)
-
-
-def _stable_file_snapshot(path, field: str) -> _FileSnapshot:
-    """Read one non-symlink regular file through a stable descriptor."""
-    try:
-        absolute = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
-        before = os.lstat(absolute)
-    except (OSError, TypeError) as error:
-        raise ValueError(f"{field} file does not exist: {path}") from error
-    if stat.S_ISLNK(before.st_mode):
-        raise ValueError(f"{field} must not be a symlink: {absolute}")
-    if not stat.S_ISREG(before.st_mode):
-        raise ValueError(f"{field} must be a regular file: {absolute}")
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(absolute, flags)
-    except OSError as error:
-        raise ValueError(f"cannot open {field}: {absolute}: {error}") from error
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
-            raise ValueError(f"{field} must be a regular file: {absolute}")
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            raise ValueError(f"{field} changed while opening: {absolute}")
-        chunks = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        after = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        path_after = os.lstat(absolute)
-    except OSError as error:
-        raise ValueError(f"{field} changed while reading: {absolute}") from error
-    identity_before = (
-        opened.st_dev,
-        opened.st_ino,
-        opened.st_size,
-        getattr(opened, "st_mtime_ns", int(opened.st_mtime * 1e9)),
-    )
-    identity_after = (
+def _stable_regular_file(path, label: str) -> dict:
+    target = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    before = os.lstat(target)
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ValueError(f"{label} must be a regular non-symlink file")
+    digest = STORE.sha256_file(target)
+    after = os.lstat(target)
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ) != (
         after.st_dev,
         after.st_ino,
         after.st_size,
-        getattr(after, "st_mtime_ns", int(after.st_mtime * 1e9)),
-    )
-    path_identity = (
-        path_after.st_dev,
-        path_after.st_ino,
-        path_after.st_size,
-        getattr(path_after, "st_mtime_ns", int(path_after.st_mtime * 1e9)),
-    )
-    data = b"".join(chunks)
-    if identity_before != identity_after or identity_after != path_identity:
-        raise ValueError(f"{field} changed while reading: {absolute}")
-    if len(data) != after.st_size:
-        raise ValueError(f"{field} size changed while reading: {absolute}")
-    canonical = Path(os.path.realpath(absolute.parent)) / absolute.name
-    return _FileSnapshot(
-        path=canonical,
-        data=data,
-        device=after.st_dev,
-        inode=after.st_ino,
-        size=after.st_size,
-        mtime_ns=identity_after[3],
-        mode=stat.S_IMODE(after.st_mode),
-        sha256=hashlib.sha256(data).hexdigest(),
-    )
-
-
-def _declared_dependencies(source: _FileSnapshot) -> tuple[str, ...]:
-    try:
-        tree = compile(
-            source.data,
-            str(source.path),
-            "exec",
-            flags=ast.PyCF_ONLY_AST,
-            dont_inherit=True,
-        )
-    except (SyntaxError, ValueError) as error:
-        raise ValueError(f"invalid workload adapter source: {error}") from error
-    declarations = []
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "WORKLOAD_DEPENDENCIES"
-            for target in node.targets
-        ):
-            declarations.append(node.value)
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == "WORKLOAD_DEPENDENCIES"
-        ):
-            declarations.append(node.value)
-    if not declarations:
-        return ()
-    if len(declarations) != 1 or declarations[0] is None:
-        raise ValueError("WORKLOAD_DEPENDENCIES must have one literal declaration")
-    try:
-        value = ast.literal_eval(declarations[0])
-    except (ValueError, SyntaxError) as error:
-        raise ValueError(
-            "WORKLOAD_DEPENDENCIES must be a literal list or tuple"
-        ) from error
-    if not isinstance(value, (list, tuple)):
-        raise ValueError("WORKLOAD_DEPENDENCIES must be a literal list or tuple")
-    dependencies = []
-    for index, item in enumerate(value):
-        if not isinstance(item, str) or not item.strip():
-            raise ValueError(
-                f"WORKLOAD_DEPENDENCIES[{index}] must be a relative file string"
-            )
-        dependencies.append(item)
-    if len(set(dependencies)) != len(dependencies):
-        raise ValueError("WORKLOAD_DEPENDENCIES contains duplicate paths")
-    return tuple(dependencies)
-
-
-def _read_python_bundle(path) -> _PythonBundle:
-    source = _stable_file_snapshot(path, "workload adapter")
-    root = source.path.parent.resolve(strict=True)
-    dependencies = []
-    for relative in _declared_dependencies(source):
-        dependency_path = Path(relative)
-        if dependency_path.is_absolute():
-            raise ValueError("workload dependency must be relative")
-        if ".." in dependency_path.parts:
-            raise ValueError(
-                f"workload dependency escapes adapter directory: {relative}"
-            )
-        candidate = root
-        try:
-            for component in dependency_path.parts:
-                if component in ("", "."):
-                    continue
-                candidate = candidate / component
-                info = os.lstat(candidate)
-                if stat.S_ISLNK(info.st_mode):
-                    raise ValueError(
-                        f"workload dependency must not contain symlinks: {relative}"
-                    )
-            resolved = candidate.resolve(strict=True)
-        except ValueError:
-            raise
-        except (OSError, RuntimeError) as error:
-            raise ValueError(
-                f"workload dependency file does not exist: {relative}"
-            ) from error
-        try:
-            resolved.relative_to(root)
-        except ValueError as error:
-            raise ValueError(
-                f"workload dependency escapes adapter directory: {relative}"
-            ) from error
-        snapshot = _stable_file_snapshot(resolved, "workload dependency")
-        dependencies.append((relative, snapshot))
-    return _PythonBundle(source=source, dependencies=tuple(dependencies))
-
-
-def _dependency_module_name(relative: str) -> str | None:
-    path = Path(relative)
-    if path.suffix != ".py":
-        return None
-    parts = list(path.with_suffix("").parts)
-    if parts and parts[-1] == "__init__":
-        parts.pop()
-    if not parts or not all(part.isidentifier() for part in parts):
-        return None
-    return ".".join(parts)
-
-
-@contextmanager
-def _installed_modules(modules: Mapping[str, ModuleType]):
-    missing = object()
-    previous = {name: sys.modules.get(name, missing) for name in modules}
-    sys.modules.update(modules)
-    try:
-        yield
-    finally:
-        for name, old in previous.items():
-            if old is missing:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = old
-
-
-def _fresh_module(snapshot: _FileSnapshot, name: str) -> ModuleType:
-    module = ModuleType(name)
-    module.__file__ = str(snapshot.path)
-    module.__package__ = name.rpartition(".")[0]
-    code = compile(snapshot.data, str(snapshot.path), "exec", dont_inherit=True)
-    exec(code, module.__dict__)
-    return module
-
-
-def _load_python_bundle(bundle: _PythonBundle) -> ModuleType:
-    dependency_modules = {}
-    dependency_snapshots = {}
-    for relative, snapshot in bundle.dependencies:
-        name = _dependency_module_name(relative)
-        if name is None:
-            continue
-        if name in dependency_modules:
-            raise ValueError(f"declared dependency module name collision: {name}")
-        dependency_snapshots[name] = snapshot
-        dependency_modules[name] = ModuleType(name)
-        dependency_modules[name].__file__ = str(snapshot.path)
-        dependency_modules[name].__package__ = name.rpartition(".")[0]
-    try:
-        with _installed_modules(dependency_modules):
-            for name, module in dependency_modules.items():
-                code = compile(
-                    dependency_snapshots[name].data,
-                    str(dependency_snapshots[name].path),
-                    "exec",
-                    dont_inherit=True,
-                )
-                exec(code, module.__dict__)
-            module_name = "_cuda_optimizer_user_workload_" + bundle.source.sha256
-            module = _fresh_module(bundle.source, module_name)
-    except KeyboardInterrupt:
-        raise
-    except BaseException as error:
-        raise ValueError(
-            f"failed to import workload adapter {bundle.source.path}: "
-            f"{type(error).__name__}: {error}"
-        ) from error
-    runtime_dependencies = getattr(module, "WORKLOAD_DEPENDENCIES", ())
-    declared = tuple(relative for relative, _ in bundle.dependencies)
-    if tuple(runtime_dependencies) != declared:
-        raise ValueError("WORKLOAD_DEPENDENCIES must remain the declared literal value")
-    module.__cuda_optimizer_bundle__ = bundle
-    module.__cuda_optimizer_dependency_modules__ = dependency_modules
-    missing_calls = [
-        name
-        for name in REQUIRED_ADAPTER_CALLS
-        if not callable(getattr(module, name, None))
-    ]
-    if missing_calls:
-        raise ValueError(
-            "workload adapter missing required callables: "
-            + ", ".join(missing_calls)
-        )
-    return module
-
-
-def load_python_adapter(path) -> ModuleType:
-    """Load exactly the bytes read from a stable user-owned source bundle."""
-    return _load_python_bundle(_read_python_bundle(path))
-
-
-def _command_argv(command) -> list[str]:
-    if isinstance(command, str):
-        try:
-            argv = shlex.split(command)
-        except ValueError as error:
-            raise ValueError(f"workload command has invalid quoting: {error}") from error
-    elif isinstance(command, Sequence) and not isinstance(
-        command, (str, bytes, bytearray)
+        after.st_mtime_ns,
     ):
-        argv = list(command)
-    else:
-        raise ValueError("workload command must be a string or sequence of strings")
-    if not argv:
-        raise ValueError("workload command must not be empty")
-    for index, argument in enumerate(argv):
-        if not isinstance(argument, str) or not argument.strip():
-            raise ValueError(
-                f"workload command argument {index} must be a non-empty string"
-            )
-    return argv
+        raise ValueError(f"{label} changed while being inspected")
+    return {
+        "path": str(target),
+        "sha256": digest,
+        "size_bytes": before.st_size,
+        "mode": stat.S_IMODE(before.st_mode),
+    }
 
 
-def _normalize_command_source(
-    command, *, base_dir: Path | None = None
-) -> tuple[list[str], tuple[_FileSnapshot, ...]]:
-    argv = _command_argv(command)
-    executable_name = argv[0]
-    executable_path = Path(executable_name).expanduser()
-    if base_dir is not None and not executable_path.is_absolute() and (
-        executable_path.parent != Path(".") or executable_name.startswith(".")
+def _command(value) -> tuple[list[str], list[dict]]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(
+        value, Sequence
     ):
-        executable_name = str(base_dir / executable_path)
-    search = shutil.which(executable_name)
-    if search is None:
-        raise ValueError(f"workload command executable not found: {argv[0]}")
-    executable = _stable_file_snapshot(search, "workload command executable")
-    if not executable.mode & 0o111:
-        raise ValueError(
-            f"workload command executable is not executable: {executable.path}"
-        )
+        raise ValueError("driver.command must be a non-empty string list")
+    argv = list(value)
+    if not argv or any(not isinstance(item, str) or not item for item in argv):
+        raise ValueError("driver.command must be a non-empty string list")
+    executable = shutil.which(argv[0])
+    if executable is None:
+        raise ValueError(f"driver executable is unavailable: {argv[0]}")
     normalized = list(argv)
-    normalized[0] = str(executable.path)
-    snapshots = [executable]
-    root = Path.cwd() if base_dir is None else base_dir
+    normalized[0] = str(Path(executable).resolve())
+    sources = [_stable_regular_file(normalized[0], "driver executable")]
+    cwd = Path.cwd()
     for index, argument in enumerate(normalized[1:], start=1):
         if argument.startswith("-"):
             continue
         candidate = Path(argument).expanduser()
         if not candidate.is_absolute():
-            candidate = root / candidate
+            candidate = cwd / candidate
         try:
-            info = os.lstat(candidate)
-        except OSError:
+            metadata = os.lstat(candidate)
+        except FileNotFoundError:
             continue
-        if stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-            snapshot = _stable_file_snapshot(candidate, "workload command script")
-            normalized[index] = str(snapshot.path)
-            snapshots.append(snapshot)
-    return normalized, tuple(snapshots)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError("driver command contains a symlink input")
+        if stat.S_ISREG(metadata.st_mode):
+            source = _stable_regular_file(candidate, "driver command input")
+            normalized[index] = source["path"]
+            sources.append(source)
+    unique = {item["path"]: item for item in sources}
+    return normalized, [unique[path] for path in sorted(unique)]
 
 
-def _canonical_json(value) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"workload content must be JSON-compatible: {error}") from error
-
-
-def _file_fingerprints(snapshots: Sequence[_FileSnapshot]) -> list[dict]:
-    fingerprints = []
-    seen = set()
-    for snapshot in snapshots:
-        if snapshot.path in seen:
-            continue
-        seen.add(snapshot.path)
-        fingerprints.append(
-            {
-                "path": str(snapshot.path),
-                "sha256": snapshot.sha256,
-                "mode": snapshot.mode,
-            }
-        )
-    return sorted(fingerprints, key=lambda item: item["path"])
-
-
-def _source_hash(payload: dict, snapshots: Sequence[_FileSnapshot]) -> str:
-    frozen = copy.deepcopy(payload)
-    frozen["source_files"] = _file_fingerprints(snapshots)
-    return hashlib.sha256(_canonical_json(frozen)).hexdigest()
-
-
-def _normalized_source_hash(
-    kind: str,
-    source: str | Sequence[str],
-    objective: Mapping,
-    cases: Sequence[Mapping],
-    *,
-    snapshots: Sequence[_FileSnapshot] | None = None,
-) -> str:
-    """Hash the executable contract and the current referenced source bytes."""
-    if kind not in ("python", "command"):
-        raise ValueError(f"unknown workload kind: {kind}")
-    if snapshots is None:
-        if kind == "python":
-            if not isinstance(source, str):
-                raise ValueError("Python workload source must be a file path")
-            bundle = _read_python_bundle(source)
-            snapshots = (bundle.source,) + tuple(
-                snapshot for _, snapshot in bundle.dependencies
-            )
-        else:
-            if isinstance(source, str):
-                raise ValueError("command workload source must be an argv list")
-            normalized, snapshots = _normalize_command_source(source)
-            if list(normalized) != list(source):
-                raise ValueError("command workload source normalization changed")
-    payload = {
-        "executor_kind": kind,
-        "source": source,
-        "objective": objective,
-        "cases": cases,
-    }
-    return _source_hash(payload, snapshots)
-
-
-def _adapter_objective(adapter: ModuleType, path: Path) -> dict:
-    try:
-        with _adapter_runtime_scope(adapter):
-            value = adapter.metrics()
-    except KeyboardInterrupt:
-        raise
-    except BaseException as error:
-        raise ValueError(
-            f"workload adapter metrics() failed for {path}: "
-            f"{type(error).__name__}: {error}"
-        ) from error
-    return validate_objective(value)
-
-
-def _normalize_cases(value) -> tuple[dict, ...]:
-    if not isinstance(value, list):
-        raise ValueError("manifest cases must be a list of objects")
-    normalized = []
-    for index, case in enumerate(value):
-        if not isinstance(case, dict):
-            raise ValueError(f"manifest cases[{index}] must be an object")
-        normalized.append(copy.deepcopy(case))
-    _canonical_json(normalized)
-    return tuple(normalized)
-
-
-def _normalize_manifest(manifest_path, objective_path) -> WorkloadSpec:
-    resolved_manifest, manifest = _read_json_object(manifest_path, "workload manifest")
-    _unknown_fields(manifest, _MANIFEST_FIELDS, "workload manifest")
-    missing = sorted({"kind", "source", "cases"} - set(manifest))
-    if missing:
-        raise ValueError(
-            "workload manifest missing required fields: " + ", ".join(missing)
-        )
-    kind = manifest["kind"]
-    if kind not in ("python", "command"):
-        raise ValueError("workload manifest kind must be 'python' or 'command'")
-    cases = _normalize_cases(manifest["cases"])
-
-    embedded = manifest.get("objective")
-    if embedded is not None and objective_path is not None:
-        raise ValueError("conflicting objective: manifest and --objective both provided")
-    if embedded is None and objective_path is None:
-        raise ValueError("workload manifest requires an objective")
-    objective = (
-        validate_objective(embedded)
-        if embedded is not None
-        else load_objective(objective_path)
+def validate_driver(value) -> dict:
+    """Return one closed, content-bound command driver."""
+    driver = _closed(value, _DRIVER_FIELDS, "driver")
+    if driver["protocol_version"] != DRIVER_PROTOCOL:
+        raise ValueError("driver protocol_version is unsupported")
+    command, sources = _command(driver["command"])
+    request_argument = _text(
+        driver["request_argument"], "driver.request_argument", maximum=64
     )
-
-    base_dir = resolved_manifest.parent
-    # The normalized payload below covers every allowed manifest field.  Do
-    # not hash raw JSON bytes: insignificant key order and whitespace must not
-    # change the frozen workload identity.
-    if kind == "python":
-        raw_source = _nonempty_string(manifest["source"], "manifest source")
-        source_path = Path(raw_source).expanduser()
-        if not source_path.is_absolute():
-            source_path = base_dir / source_path
-        bundle = _read_python_bundle(source_path)
-        source_path = bundle.source.path
-        adapter = _load_python_bundle(bundle)
-        adapter_objective = _adapter_objective(adapter, source_path)
-        if adapter_objective != objective:
-            raise ValueError(
-                "conflicting objective: manifest objective does not match "
-                "Python adapter metrics()"
-            )
-        objective = adapter_objective
-        source: str | list[str] = str(source_path)
-        snapshots = (bundle.source,) + tuple(
-            snapshot for _, snapshot in bundle.dependencies
+    if not request_argument.startswith("-"):
+        raise ValueError("driver.request_argument must be an option")
+    if driver["execution_mode"] not in {"separate", "combined"}:
+        raise ValueError("driver.execution_mode must be separate or combined")
+    profiler_capabilities = driver["profiler_capabilities"]
+    if (
+        type(profiler_capabilities) is not list
+        or any(
+            not isinstance(item, str) or item not in _PROFILER_CAPABILITIES
+            for item in profiler_capabilities
         )
-    else:
-        source, snapshots = _normalize_command_source(
-            manifest["source"], base_dir=base_dir
-        )
-
-    return WorkloadSpec(
-        kind=kind,
-        source=source,
-        objective=objective,
-        cases=cases,
-        source_hash=_normalized_source_hash(
-            kind, source, objective, cases, snapshots=snapshots
-        ),
-    )
-
-
-def normalize_workload(
-    *,
-    workload=None,
-    workload_cmd=None,
-    workload_manifest=None,
-    objective=None,
-) -> WorkloadSpec | None:
-    """Normalize exactly one user-provided workload form, or return None."""
-    selected = [
-        name
-        for name, value in (
-            ("--workload", workload),
-            ("--workload-cmd", workload_cmd),
-            ("--workload-manifest", workload_manifest),
-        )
-        if value is not None
-    ]
-    if len(selected) > 1:
-        raise ValueError(
-            "exactly one workload form may be provided: " + ", ".join(selected)
-        )
-    if not selected:
-        if objective is not None:
-            raise ValueError("--objective cannot be used without a workload")
-        return None
-
-    if workload is not None:
-        if objective is not None:
-            raise ValueError(
-                "conflicting objective: Python workload objective comes from metrics()"
-            )
-        bundle = _read_python_bundle(workload)
-        source_path = bundle.source.path
-        adapter = _load_python_bundle(bundle)
-        normalized_objective = _adapter_objective(adapter, source_path)
-        cases: tuple[dict, ...] = ()
-        return WorkloadSpec(
-            kind="python",
-            source=str(source_path),
-            objective=normalized_objective,
-            cases=cases,
-            source_hash=_normalized_source_hash(
-                "python",
-                str(source_path),
-                normalized_objective,
-                cases,
-                snapshots=(bundle.source,)
-                + tuple(snapshot for _, snapshot in bundle.dependencies),
-            ),
-        )
-
-    if workload_cmd is not None:
-        if objective is None:
-            raise ValueError("command workload requires external --objective")
-        argv, snapshots = _normalize_command_source(workload_cmd)
-        normalized_objective = load_objective(objective)
-        cases = ()
-        return WorkloadSpec(
-            kind="command",
-            source=argv,
-            objective=normalized_objective,
-            cases=cases,
-            source_hash=_normalized_source_hash(
-                "command",
-                argv,
-                normalized_objective,
-                cases,
-                snapshots=snapshots,
-            ),
-        )
-
-    return _normalize_manifest(workload_manifest, objective)
-
-
-def _validation_failed(result) -> bool:
-    if result is False:
-        return True
-    if isinstance(result, Mapping) and result.get("valid") is False:
-        return True
-    return False
-
-
-def _json_value_copy(value, field: str):
-    """Return a detached JSON value, rejecting ambiguous Python-only data."""
-    if value is None or isinstance(value, (bool, str)):
-        return value
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError(f"{field} numbers must be finite")
-        return value
-    if isinstance(value, Mapping):
-        normalized = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ValueError(f"{field} object must use string keys")
-            normalized[key] = _json_value_copy(item, f"{field}.{key}")
-        return normalized
-    if isinstance(value, list):
-        return [
-            _json_value_copy(item, f"{field}[{index}]")
-            for index, item in enumerate(value)
-        ]
-    raise ValueError(
-        f"{field} must contain only JSON-compatible values, got "
-        f"{type(value).__name__}"
-    )
-
-
-def _validate_validation_result(validation) -> bool | dict:
-    if isinstance(validation, bool):
-        return validation
-    elif isinstance(validation, Mapping):
-        normalized_validation = _json_value_copy(validation, "validation")
-        if not isinstance(normalized_validation.get("valid"), bool):
-            raise ValueError("validation object requires literal boolean valid")
-        return normalized_validation
-    raise ValueError(
-        "validation must be a literal boolean or object with literal boolean valid"
-    )
-
-
-def _validate_benchmark_result(benchmark) -> dict:
-    if not isinstance(benchmark, Mapping):
-        raise ValueError("benchmark must be a JSON object")
-    return _json_value_copy(benchmark, "benchmark")
-
-
-def _validate_observation(validation, benchmark) -> tuple[bool | dict, dict]:
-    """Normalize the lifecycle evidence shared by Python and command paths."""
-    return (
-        _validate_validation_result(validation),
-        _validate_benchmark_result(benchmark),
-    )
-
-
-def _normalize_case(case) -> dict:
-    if case is None:
-        return {}
-    if not isinstance(case, Mapping):
-        raise ValueError("case must be a JSON object")
-    return _json_value_copy(case, "case")
-
-
-@contextmanager
-def _adapter_runtime_scope(adapter, *, role: str | None = None, case=None):
-    modules = getattr(adapter, "__cuda_optimizer_dependency_modules__", {})
-    had_context = hasattr(adapter, "CUDA_OPTIMIZER_CONTEXT")
-    previous_context = getattr(adapter, "CUDA_OPTIMIZER_CONTEXT", None)
-    if role is not None:
-        adapter.CUDA_OPTIMIZER_CONTEXT = {
-            "role": role,
-            "case": _normalize_case(case),
-        }
-    try:
-        with _installed_modules(modules):
-            yield
-    finally:
-        if role is not None:
-            if had_context:
-                adapter.CUDA_OPTIMIZER_CONTEXT = previous_context
-            else:
-                try:
-                    delattr(adapter, "CUDA_OPTIMIZER_CONTEXT")
-                except AttributeError:
-                    pass
-
-
-def _record_cleanup_failure(primary: BaseException, cleanup: BaseException) -> None:
-    note = f"workload cleanup failed: {type(cleanup).__name__}: {cleanup}"
-    add_note = getattr(primary, "add_note", None)
-    if callable(add_note):
-        add_note(note)
-    else:
-        notes = list(getattr(primary, "__notes__", []))
-        notes.append(note)
-        try:
-            primary.__notes__ = notes
-        except Exception:
-            pass
-
-
-def run_once(adapter, *, candidate, role: str, case: dict) -> dict:
-    """Run one Python-adapter observation and always clean up exactly once."""
-    normalized_role = _nonempty_string(role, "role")
-    normalized_case = _normalize_case(case)
-    lifecycle_candidate = copy.deepcopy(candidate)
-    primary = None
-    with _adapter_runtime_scope(
-        adapter, role=normalized_role, case=normalized_case
+        or len(profiler_capabilities) != len(set(profiler_capabilities))
     ):
-        try:
-            adapter.prepare(lifecycle_candidate)
-            raw_validation = adapter.validate(lifecycle_candidate)
-            validation = _validate_validation_result(raw_validation)
-            if _validation_failed(validation):
-                raise ValueError("workload validation failed")
-            raw_benchmark = adapter.benchmark(lifecycle_candidate)
-            benchmark = _validate_benchmark_result(raw_benchmark)
-        except BaseException as error:
-            primary = error
-            raise
-        finally:
-            try:
-                adapter.cleanup()
-            except BaseException as cleanup_error:
-                if primary is None:
-                    raise
-                _record_cleanup_failure(primary, cleanup_error)
-    with _adapter_runtime_scope(adapter):
-        objective = validate_objective(adapter.metrics())
+        raise ValueError(
+            "driver.profiler_capabilities must be a unique supported string list"
+        )
+    side_effects = driver["side_effects"]
+    if isinstance(side_effects, (str, bytes, bytearray)) or not isinstance(
+        side_effects, Sequence
+    ):
+        raise ValueError("driver.side_effects must be a string list")
+    normalized_side_effects = list(side_effects)
+    if any(not isinstance(item, str) or not item for item in normalized_side_effects):
+        raise ValueError("driver.side_effects must be a string list")
+    if len(normalized_side_effects) != len(set(normalized_side_effects)):
+        raise ValueError("driver.side_effects must not contain duplicates")
+    cleanup = _closed(
+        driver["cleanup_contract"],
+        _CLEANUP_CONTRACT_FIELDS,
+        "driver.cleanup_contract",
+    )
+    if type(cleanup["external_tasks"]) is not bool:
+        raise ValueError("driver.cleanup_contract.external_tasks must be boolean")
+    if cleanup != {"kind": "process_group_only", "external_tasks": False}:
+        raise ValueError(
+            "driver external tasks are unsupported; commands must remain in the "
+            "invocation process group"
+        )
+    normalized = {
+        "command": command,
+        "request_argument": request_argument,
+        "execution_mode": driver["execution_mode"],
+        "protocol_version": DRIVER_PROTOCOL,
+        "profiler_capabilities": sorted(profiler_capabilities),
+        "side_effects": normalized_side_effects,
+        "cleanup_contract": dict(cleanup),
+        "source_files": sources,
+    }
+    normalized["identity"] = hashlib.sha256(
+        _canonical_bytes(normalized)
+    ).hexdigest()
+    return normalized
+
+
+def verify_driver(value) -> dict:
+    """Recheck every content-bound command source before use."""
+    if type(value) is not dict:
+        raise ValueError("frozen driver must be an object")
+    expected_fields = _DRIVER_FIELDS | {"source_files", "identity"}
+    frozen = _closed(value, expected_fields, "frozen driver")
+    rebuilt = validate_driver(
+        {field: frozen[field] for field in _DRIVER_FIELDS}
+    )
+    if rebuilt != frozen:
+        raise ValueError("driver identity changed after readiness")
+    return rebuilt
+
+
+def validate_variant(value) -> dict:
+    variant = _closed(value, _VARIANT_FIELDS, "variant")
+    if variant["kind"] not in {"source_snapshot", "artifact", "deployment"}:
+        raise ValueError("variant.kind is unsupported")
     return {
-        "role": normalized_role,
-        "case": copy.deepcopy(normalized_case),
-        "validation": validation,
-        "benchmark": benchmark,
-        "objective": objective,
+        "kind": variant["kind"],
+        "digest": _sha256(variant["digest"], "variant.digest"),
+        "locator": _text(variant["locator"], "variant.locator"),
     }
 
 
-def _is_secret_name(name: str) -> bool:
-    upper = name.upper()
-    return any(marker in upper for marker in _SECRET_MARKERS)
-
-
-def _redact_diagnostic(text: str, secret_values: Sequence[str]) -> str:
-    for value in sorted(
-        {value for value in secret_values if value}, key=len, reverse=True
-    ):
-        text = text.replace(value, "[REDACTED]")
-    marker_pattern = "|".join(_SECRET_MARKERS)
-    return re.sub(
-        rf"(?i)([A-Z0-9_]*(?:{marker_pattern})[A-Z0-9_]*)\s*[:=]\s*([^\s,;]+)",
-        lambda match: f"{match.group(1)}=[REDACTED]",
-        text,
-    )
-
-
-def _clip_diagnostic(value, *, secret_values: Sequence[str] = ()) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", errors="replace")
-    text = _redact_diagnostic(str(value), secret_values)
-    if len(text) <= _DIAGNOSTIC_LIMIT:
-        return text
-    return text[:_DIAGNOSTIC_LIMIT] + "...[truncated]"
-
-
-def _diagnostics(stdout, stderr, *, secret_values: Sequence[str] = ()) -> str:
-    return (
-        f"; stdout={_clip_diagnostic(stdout, secret_values=secret_values)!r}"
-        f"; stderr={_clip_diagnostic(stderr, secret_values=secret_values)!r}"
-    )
-
-
-class _BoundedCapture:
-    def __init__(self, limit: int = _DIAGNOSTIC_LIMIT) -> None:
-        self.limit = limit
-        self.data = bytearray()
-        self.truncated = False
-
-    def append(self, chunk: bytes) -> None:
-        self.data.extend(chunk)
-        if len(self.data) > self.limit:
-            del self.data[: len(self.data) - self.limit]
-            self.truncated = True
-
-    def text(self) -> str:
-        value = bytes(self.data).decode("utf-8", errors="replace")
-        return ("...[truncated]" if self.truncated else "") + value
-
-
-def _drain_pipe(stream, capture: _BoundedCapture) -> None:
-    try:
-        while True:
-            chunk = stream.read(8192)
-            if not chunk:
-                break
-            capture.append(chunk)
-    finally:
-        try:
-            stream.close()
-        except Exception:
-            pass
-
-
-def _signal_process_group(process_group: int, signal_number: int) -> None:
-    try:
-        os.killpg(process_group, signal_number)
-    except (ProcessLookupError, PermissionError):
-        pass
-
-
-def _process_group_exists(process_group: int) -> bool:
-    try:
-        os.killpg(process_group, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def _stop_process_group(process, process_group: int) -> None:
-    _signal_process_group(process_group, signal.SIGTERM)
-    deadline = time.monotonic() + _PROCESS_GRACE_SECONDS
-    while time.monotonic() < deadline:
-        process.poll()
-        if not _process_group_exists(process_group):
-            break
-        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
-    if _process_group_exists(process_group):
-        _signal_process_group(process_group, signal.SIGKILL)
-    try:
-        process.wait(timeout=_PROCESS_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        _signal_process_group(process_group, signal.SIGKILL)
-
-
-def _finish_readers(threads, streams) -> None:
-    deadline = time.monotonic() + _PROCESS_GRACE_SECONDS
-    for thread in threads:
-        thread.join(timeout=max(0.0, deadline - time.monotonic()))
-    readers_alive = any(thread.is_alive() for thread in threads)
-    for stream in streams:
-        if stream is not None and not stream.closed:
-            try:
-                if readers_alive:
-                    os.close(stream.fileno())
-                else:
-                    stream.close()
-            except Exception:
-                pass
-    for thread in threads:
-        thread.join(timeout=max(0.0, deadline - time.monotonic()))
-
-
-def _command_environment(overrides: Mapping[str, str]) -> tuple[dict, tuple[str, ...]]:
-    inherited = dict(os.environ)
-    allow = {
-        name.strip()
-        for name in inherited.get("CUDA_OPTIMIZER_PASS_ENV", "").split(",")
-        if name.strip()
-    }
-    secret_values = tuple(
-        value
-        for name, value in inherited.items()
-        if _is_secret_name(name) and value
-    )
-    environment = {
-        name: value
-        for name, value in inherited.items()
-        if not _is_secret_name(name) or name in allow
-    }
-    environment.update(overrides)
-    return environment, secret_values
-
-
-def _read_command_output(path: Path) -> dict:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(str(path), flags)
-    except FileNotFoundError as error:
-        raise RuntimeError("workload command did not create its output file") from error
-    except OSError as error:
-        raise RuntimeError(f"cannot open workload command output: {error}") from error
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise RuntimeError("workload command output must be a regular file")
-        if info.st_size > _OUTPUT_LIMIT_BYTES:
-            raise RuntimeError(
-                f"workload command output exceeds {_OUTPUT_LIMIT_BYTES} bytes"
-            )
-        chunks = []
-        remaining = _OUTPUT_LIMIT_BYTES + 1
-        while remaining:
-            chunk = os.read(descriptor, min(65536, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-    finally:
-        os.close(descriptor)
-    raw = b"".join(chunks)
-    if len(raw) > _OUTPUT_LIMIT_BYTES:
-        raise RuntimeError(
-            f"workload command output exceeds {_OUTPUT_LIMIT_BYTES} bytes"
-        )
-    try:
-        value = _strict_json_loads(
-            raw.decode("utf-8"), "workload command output"
-        )
-    except (UnicodeError, ValueError) as error:
-        raise RuntimeError(
-            f"workload command output must be valid strict JSON: {error}"
-        ) from error
-    if not isinstance(value, dict):
-        raise RuntimeError("workload command output must be a single JSON object")
-    required = {"validation", "benchmark"}
-    missing = sorted(required - set(value))
-    if missing:
-        raise RuntimeError(
-            "workload command output missing required fields: "
-            + ", ".join(missing)
-        )
-    unknown = sorted(set(value) - {"validation", "benchmark", "diagnostics"})
+def materialize_variant(
+    artifact_root,
+    workspace,
+    frozen_variant: Mapping,
+    name: str,
+) -> dict:
+    """Materialize one frozen Variant for the sole command-driver path."""
+    frozen = dict(frozen_variant)
+    unknown = set(frozen) - _VARIANT_FIELDS - {"role"}
     if unknown:
-        shown = ", ".join(unknown[:8])
-        suffix = " ..." if len(unknown) > 8 else ""
-        raise RuntimeError(
-            f"workload command output contains unknown fields: {shown}{suffix}"
+        raise ValueError(
+            f"frozen variant contains unknown fields: {sorted(unknown)}"
         )
+    if "role" in frozen and frozen["role"] not in {
+        "original",
+        "reference",
+        "candidate",
+    }:
+        raise ValueError("frozen variant role is unsupported")
+    variant = validate_variant(
+        {field: frozen[field] for field in _VARIANT_FIELDS}
+    )
+    materialized = STORE.materialize_object(
+        artifact_root,
+        {"digest": variant["digest"], "locator": variant["locator"]},
+        Path(workspace) / _text(name, "variant materialization name", maximum=128),
+    )
+    return {**variant, "locator": str(materialized)}
+
+
+def materialize_target_inputs(
+    artifact_root,
+    workspace,
+    target: Mapping,
+) -> dict:
+    """Materialize the Target inputs shared by evaluator and profilers."""
+    if not isinstance(target, Mapping):
+        raise ValueError("target must be an object")
+    test_suite = target.get("test_suite")
+    correctness = target.get("correctness")
+    if not isinstance(test_suite, Mapping) or not isinstance(correctness, Mapping):
+        raise ValueError("target driver inputs are unavailable")
+    test_object = test_suite.get("object_ref")
+    correctness_object = correctness.get("reference")
+    if not isinstance(test_object, Mapping) or not isinstance(
+        correctness_object, Mapping
+    ):
+        raise ValueError("target driver object references are unavailable")
+    root = Path(workspace)
+    materialized_test_suite = STORE.materialize_object(
+        artifact_root,
+        dict(test_object),
+        root / "test-suite",
+    )
+    materialized_correctness = STORE.materialize_object(
+        artifact_root,
+        dict(correctness_object),
+        root / "correctness-reference",
+    )
+    return {
+        "test_suite": {
+            "digest": _sha256(
+                test_object.get("digest"),
+                "target.test_suite.object_ref.digest",
+            ),
+            "locator": str(materialized_test_suite),
+            "case_ids": _json_copy(
+                test_suite.get("case_ids"),
+                "target.test_suite.case_ids",
+            ),
+        },
+        "correctness": {
+            "reference": {
+                "digest": _sha256(
+                    correctness_object.get("digest"),
+                    "target.correctness.reference.digest",
+                ),
+                "locator": str(materialized_correctness),
+            },
+            "method": _text(
+                correctness.get("method"),
+                "target.correctness.method",
+                maximum=64,
+            ),
+            "acceptance": _json_copy(
+                correctness.get("acceptance"),
+                "target.correctness.acceptance",
+            ),
+        },
+        "objective": {
+            "primary_metric": _json_copy(
+                target.get("primary_metric"),
+                "target.primary_metric",
+            ),
+            "constraints": _json_copy(
+                target.get("constraints"),
+                "target.constraints",
+            ),
+        },
+    }
+
+
+def build_driver_request(
+    *,
+    target_id: str,
+    execution_id: str,
+    operation: str,
+    driver: Mapping,
+    variant: Mapping,
+    test_suite: Mapping,
+    correctness: Mapping,
+    objective: Mapping,
+    role: str,
+    mode: str,
+    case: Mapping,
+    sampling: Mapping,
+    output_path,
+) -> dict:
+    frozen_driver = verify_driver(driver)
+    normalized_variant = validate_variant(variant)
+    test_suite = _closed(dict(test_suite), _TEST_SUITE_FIELDS, "test_suite")
+    test_suite = {
+        "digest": _sha256(test_suite["digest"], "test_suite.digest"),
+        "locator": _text(test_suite["locator"], "test_suite.locator"),
+        "case_ids": _json_copy(test_suite["case_ids"], "test_suite.case_ids"),
+    }
+    if (
+        type(test_suite["case_ids"]) is not list
+        or not test_suite["case_ids"]
+        or any(
+            not isinstance(case_id, str) or not case_id
+            for case_id in test_suite["case_ids"]
+        )
+        or len(test_suite["case_ids"]) != len(set(test_suite["case_ids"]))
+    ):
+        raise ValueError("test_suite.case_ids must be a non-empty unique string list")
+    correctness = _closed(
+        dict(correctness),
+        _CORRECTNESS_INPUT_FIELDS,
+        "correctness input",
+    )
+    reference = _closed(
+        dict(correctness["reference"]),
+        _REFERENCE_INPUT_FIELDS,
+        "correctness reference",
+    )
+    correctness = {
+        "reference": {
+            "digest": _sha256(reference["digest"], "correctness.reference.digest"),
+            "locator": _text(
+                reference["locator"], "correctness.reference.locator"
+            ),
+        },
+        "method": _text(correctness["method"], "correctness.method", maximum=64),
+        "acceptance": _json_copy(
+            correctness["acceptance"], "correctness.acceptance"
+        ),
+    }
+    objective = _closed(
+        dict(objective), _OBJECTIVE_INPUT_FIELDS, "objective input"
+    )
+    objective = {
+        "primary_metric": _json_copy(
+            objective["primary_metric"], "objective.primary_metric"
+        ),
+        "constraints": _json_copy(
+            objective["constraints"], "objective.constraints"
+        ),
+    }
+    if role not in {"original", "reference", "candidate"}:
+        raise ValueError("driver role is unsupported")
+    if mode not in {"correctness", "measure", "combined"}:
+        raise ValueError("driver mode is unsupported")
+    if frozen_driver["execution_mode"] == "separate" and mode == "combined":
+        raise ValueError("separate driver cannot run combined mode")
+    if frozen_driver["execution_mode"] == "combined" and mode != "combined":
+        raise ValueError("combined driver requires combined mode")
+    target = Path(os.path.abspath(os.path.expanduser(os.fspath(output_path))))
+    core = {
+        "protocol_version": REQUEST_PROTOCOL,
+        "target_id": _text(target_id, "target_id", maximum=128),
+        "execution_id": _text(execution_id, "execution_id", maximum=128),
+        "operation": _text(operation, "operation", maximum=64),
+        "variant": normalized_variant,
+        "test_suite": test_suite,
+        "correctness": correctness,
+        "objective": objective,
+        "role": role,
+        "mode": mode,
+        "case": _json_copy(case, "case"),
+        "sampling": _json_copy(sampling, "sampling"),
+        "output_path": str(target),
+        "driver_identity": frozen_driver["identity"],
+    }
+    request_digest = hashlib.sha256(_canonical_bytes(core)).hexdigest()
+    return {
+        "protocol_version": REQUEST_PROTOCOL,
+        "request_digest": request_digest,
+        **{key: value for key, value in core.items() if key != "protocol_version"},
+    }
+
+
+def build_argv(driver: Mapping, request_path) -> list[str]:
+    frozen = verify_driver(driver)
+    path = Path(os.path.abspath(os.path.expanduser(os.fspath(request_path))))
+    return frozen["command"] + [frozen["request_argument"], str(path)]
+
+
+def _strict_json(path) -> dict:
+    raw = STORE.read_regular_bytes(path, maximum_bytes=_MAX_RESULT_BYTES)
+
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError(f"driver result contains duplicate key: {key}")
+            value[key] = item
+        return value
+
     try:
-        validation, benchmark = _validate_observation(
-            value["validation"], value["benchmark"]
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ValueError(f"driver result contains non-finite number: {token}")
+            ),
         )
-    except ValueError as error:
-        raise RuntimeError(f"workload command {error}") from error
-    value["validation"] = validation
-    value["benchmark"] = benchmark
-    if "diagnostics" in value:
-        if not isinstance(value["diagnostics"], Mapping):
-            raise RuntimeError("workload command diagnostics must be a JSON object")
-        try:
-            value["diagnostics"] = _json_value_copy(
-                value["diagnostics"], "diagnostics"
-            )
-        except ValueError as error:
-            raise RuntimeError(f"workload command {error}") from error
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("driver result is invalid JSON") from error
+    if type(value) is not dict:
+        raise ValueError("driver result root must be an object")
     return value
 
 
-def run_command_once(
-    spec: WorkloadSpec,
-    *,
-    candidate,
-    role: str,
-    case: dict,
-    timeout: float | None = None,
-) -> dict:
-    """Execute one command observation using only the output-file protocol."""
-    if not isinstance(spec, WorkloadSpec) or not isinstance(spec.source, list):
-        raise ValueError("command workload spec must contain an argv source")
-    _verify_command_source(spec)
-    normalized_role = _nonempty_string(role, "role")
-    normalized_case = _normalize_case(case)
-    case_json = _canonical_json(normalized_case).decode("utf-8")
-    if timeout is not None:
-        if (
-            isinstance(timeout, bool)
-            or not isinstance(timeout, (int, float))
-            or not math.isfinite(float(timeout))
-            or float(timeout) <= 0
-        ):
-            raise ValueError("timeout must be a positive finite number")
-        timeout = float(timeout)
+def _read_bound_json(path, expected_digest: str, label: str) -> dict:
+    raw = STORE.read_regular_bytes(path, maximum_bytes=_MAX_RESULT_BYTES)
+    if hashlib.sha256(raw).hexdigest() != _sha256(
+        expected_digest, f"{label}.sha256"
+    ):
+        raise ValueError(f"{label} digest changed")
 
-    with tempfile.TemporaryDirectory(prefix="cuda-optimizer-workload-") as tmp:
-        output_path = Path(tmp) / "observation.json"
-        environment, secret_values = _command_environment(
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError(f"{label} contains duplicate key: {key}")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ValueError(f"{label} contains non-finite number: {token}")
+            ),
+        )
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is invalid JSON") from error
+    if type(value) is not dict:
+        raise ValueError(f"{label} must be an object")
+    return value
+
+
+def _invocation_reference(value, label: str, *, include_case: bool) -> dict:
+    fields = {"invocation_id", "sha256"}
+    if include_case:
+        fields.add("case_id")
+    reference = _closed(value, fields, label)
+    invocation_id = _text(
+        reference["invocation_id"],
+        f"{label}.invocation_id",
+        maximum=128,
+    )
+    if (
+        not invocation_id.startswith("inv-")
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-"
+            for character in invocation_id
+        )
+    ):
+        raise ValueError(f"{label}.invocation_id is invalid")
+    normalized = {
+        "invocation_id": invocation_id,
+        "sha256": _sha256(reference["sha256"], f"{label}.sha256"),
+    }
+    if include_case:
+        normalized["case_id"] = _text(
+            reference["case_id"],
+            f"{label}.case_id",
+            maximum=128,
+        )
+    return normalized
+
+
+def _profile_target(root: Path, reference) -> dict:
+    reference = _closed(reference, {"id", "sha256"}, "target_ref")
+    expected_id = _text(reference["id"], "target_ref.id", maximum=128)
+    target = _read_bound_json(
+        root / "target.json",
+        reference["sha256"],
+        "target_ref",
+    )
+    if (
+        target.get("record_type") != "target"
+        or target.get("format_version")
+        != "cuda-kernel-optimizer/target-v1"
+        or target.get("id") != expected_id
+        or target.get("target_mode") != "optimization"
+    ):
+        raise ValueError("target_ref is not a frozen optimization Target")
+    return target
+
+
+def _profile_baseline(
+    root: Path,
+    reference,
+    target_ref: dict,
+    target: dict,
+) -> dict:
+    normalized = _invocation_reference(
+        reference, "baseline_ref", include_case=False
+    )
+    result = _read_bound_json(
+        root
+        / "invocations"
+        / normalized["invocation_id"]
+        / "result.json",
+        normalized["sha256"],
+        "baseline_ref",
+    )
+    if (
+        result.get("operation") != "baseline"
+        or result.get("target_ref") != target_ref
+        or result.get("execution_status") != "succeeded"
+        or result.get("measurement_validity") != "valid"
+        or result.get("verdict") != "passed"
+        or result.get("cleanup_status") != "confirmed"
+        or result.get("variant_refs") != [target.get("original")]
+    ):
+        raise ValueError("baseline_ref is not a valid original baseline")
+    return normalized
+
+
+def _profile_experiment(
+    root: Path,
+    reference,
+    target_ref: dict,
+    baseline_ref: dict,
+) -> tuple[dict, dict]:
+    reference = _closed(reference, {"id", "sha256"}, "experiment_ref")
+    experiment_id = _text(
+        reference["id"], "experiment_ref.id", maximum=128
+    )
+    if (
+        not experiment_id.startswith("exp-")
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-"
+            for character in experiment_id
+        )
+    ):
+        raise ValueError("experiment_ref.id is invalid")
+    normalized = {
+        "id": experiment_id,
+        "sha256": _sha256(
+            reference["sha256"], "experiment_ref.sha256"
+        ),
+    }
+    experiment = _read_bound_json(
+        root / "experiments" / f"{experiment_id}.json",
+        normalized["sha256"],
+        "experiment_ref",
+    )
+    if (
+        experiment.get("record_type") != "experiment"
+        or experiment.get("format_version")
+        != "cuda-kernel-optimizer/experiment-v1"
+        or experiment.get("id") != experiment_id
+        or experiment.get("target_ref") != target_ref
+        or experiment.get("baseline_ref") != baseline_ref
+    ):
+        raise ValueError("experiment_ref is not bound to this Target and baseline")
+    candidate = experiment.get("candidate")
+    if type(candidate) is not dict:
+        raise ValueError("experiment_ref has no candidate Variant")
+    return normalized, {
+        **experiment,
+        "candidate": _profile_variant(
+            candidate,
+            "experiment_ref.candidate",
+            expected_role="candidate",
+        ),
+    }
+
+
+def _profile_variant(value, label: str, *, expected_role: str | None = None) -> dict:
+    frozen = _closed(value, _VARIANT_FIELDS | {"role"}, label)
+    if frozen["role"] not in {"original", "reference", "candidate"}:
+        raise ValueError(f"{label}.role is unsupported")
+    if expected_role is not None and frozen["role"] != expected_role:
+        raise ValueError(f"{label}.role must be {expected_role}")
+    return {
+        **validate_variant({field: frozen[field] for field in _VARIANT_FIELDS}),
+        "role": frozen["role"],
+    }
+
+
+def _profile_evidence_ref(root: Path, value, command_receipts) -> dict:
+    evidence_ref = _closed(
+        value,
+        _PROFILE_EVIDENCE_REF_FIELDS,
+        "correctness receipt evidence_ref",
+    )
+    digest = _sha256(
+        evidence_ref["digest"], "correctness receipt evidence_ref.digest"
+    )
+    locator = _text(
+        evidence_ref["locator"], "correctness receipt evidence_ref.locator"
+    )
+    expected_locator = f"objects/sha256/{digest}"
+    if locator != expected_locator:
+        raise ValueError("correctness receipt evidence_ref locator is not content-bound")
+    if evidence_ref["source_kind"] != "directory":
+        raise ValueError("correctness receipt evidence_ref must reference one driver bundle")
+    if (
+        type(evidence_ref["file_count"]) is not int
+        or not 1 <= evidence_ref["file_count"] <= _MAX_ARTIFACTS + 1
+        or type(evidence_ref["total_bytes"]) is not int
+        or not 0 < evidence_ref["total_bytes"] <= _MAX_ARTIFACT_BYTES + _MAX_RESULT_BYTES
+    ):
+        raise ValueError("correctness receipt evidence_ref summary is invalid")
+    if type(command_receipts) is not list:
+        raise ValueError("correctness result command_receipts must be a list")
+    matches = [
+        receipt
+        for receipt in command_receipts
+        if type(receipt) is dict
+        and receipt.get("driver_output_ref") == evidence_ref
+    ]
+    if len(matches) != 1 or set(matches[0]) != {
+        "request", "command_result", "driver_output_ref", "driver_artifacts"
+    }:
+        raise ValueError("correctness evidence is not bound to one driver receipt")
+    receipt = matches[0]
+    if (
+        type(receipt["command_result"]) is not dict
+        or receipt["command_result"].get("status") != "completed"
+    ):
+        raise ValueError("correctness driver receipt did not complete")
+    with tempfile.TemporaryDirectory(prefix="cko-profile-evidence-") as temporary:
+        manifest = STORE._load_object_manifest(
+            root,
+            evidence_ref,
+            verify_payload=True,
+        )
+        materialized = Path(temporary) / "result.json"
+        STORE.materialize_object_member(
+            root,
+            evidence_ref,
+            "result.json",
+            materialized,
+        )
+        driver_result = validate_driver_result(
+            materialized,
+            receipt["request"],
+            bundle_manifest=manifest,
+        )
+    if driver_result["artifacts"] != receipt["driver_artifacts"]:
+        raise ValueError("correctness driver artifact receipt changed")
+    return dict(evidence_ref)
+
+
+def _profile_correctness(
+    root: Path,
+    reference,
+    *,
+    target_ref: dict,
+    experiment_ref: dict,
+    candidate: dict,
+    target: dict,
+    case_id: str,
+) -> dict:
+    normalized = _invocation_reference(
+        reference, "correctness_ref", include_case=True
+    )
+    if normalized["case_id"] != case_id:
+        raise ValueError("correctness_ref is for a different workload case")
+    result = _read_bound_json(
+        root
+        / "invocations"
+        / normalized["invocation_id"]
+        / "result.json",
+        normalized["sha256"],
+        "correctness_ref",
+    )
+    if (
+        result.get("operation") not in {"screen", "target"}
+        or result.get("target_ref") != target_ref
+        or result.get("experiment_ref") != experiment_ref
+        or result.get("execution_status") != "succeeded"
+        or result.get("cleanup_status") != "confirmed"
+    ):
+        raise ValueError("correctness_ref is not bound to this candidate")
+    variants = result.get("variant_refs")
+    if type(variants) is not list or sum(item == candidate for item in variants) != 1:
+        raise ValueError("correctness_ref does not bind this candidate Variant")
+    receipts = result.get("correctness_receipts")
+    if type(receipts) is not list:
+        raise ValueError("correctness_ref has no correctness receipts")
+    matches = []
+    expected_acceptance = _closed(
+        target.get("correctness", {}).get("acceptance"),
+        {"metric", "operator", "value"},
+        "Target correctness acceptance",
+    )
+    for index, value in enumerate(receipts):
+        receipt = _closed(
+            value,
+            _PROFILE_RECEIPT_FIELDS,
+            f"correctness receipt[{index}]",
+        )
+        if receipt["variant"] != candidate or receipt["case_id"] != case_id:
+            continue
+        if receipt["status"] != "valid" or receipt["passed"] is not True:
+            continue
+        acceptance = _closed(
+            receipt["acceptance"],
+            {"metric", "operator", "value"},
+            f"correctness receipt[{index}].acceptance",
+        )
+        if acceptance != expected_acceptance:
+            raise ValueError("correctness receipt acceptance is not bound to Target")
+        gate = _closed(
+            receipt["gate"],
+            _PROFILE_GATE_FIELDS,
+            f"correctness receipt[{index}].gate",
+        )
+        computed = evaluate_correctness(
             {
-                "CUDA_OPTIMIZER_CANDIDATE": str(candidate),
-                "CUDA_OPTIMIZER_ROLE": normalized_role,
-                "CUDA_OPTIMIZER_OUTPUT": str(output_path),
-                "CUDA_OPTIMIZER_CASE": case_json,
+                "status": gate["driver_status"],
+                "metrics": receipt["metrics"],
+            },
+            acceptance,
+        )
+        if gate != computed or not computed["passed"]:
+            raise ValueError("correctness receipt gate is not a passing result")
+        if type(receipt["evidence_refs"]) is not list or len(receipt["evidence_refs"]) != 1:
+            raise ValueError("correctness receipt must contain one content-bound evidence_ref")
+        _profile_evidence_ref(
+            root,
+            receipt["evidence_refs"][0],
+            result.get("command_receipts"),
+        )
+        matches.append(receipt)
+    if len(matches) != 1:
+        raise ValueError(
+            "correctness_ref does not contain one passing candidate receipt"
+        )
+    return normalized
+
+
+def resolve_profile_collection(
+    *,
+    artifact_root,
+    target_ref,
+    baseline_ref,
+    role: str,
+    case_id: str,
+    capability: str,
+    experiment_ref=None,
+    correctness_ref=None,
+) -> dict:
+    """Resolve immutable records needed before any profiler command can start."""
+    root = Path(
+        os.path.abspath(os.path.expanduser(os.fspath(artifact_root)))
+    )
+    if not root.is_dir():
+        raise ValueError("artifact_root is unavailable")
+    normalized_target_ref = _closed(
+        target_ref, {"id", "sha256"}, "target_ref"
+    )
+    normalized_target_ref = {
+        "id": _text(
+            normalized_target_ref["id"], "target_ref.id", maximum=128
+        ),
+        "sha256": _sha256(
+            normalized_target_ref["sha256"], "target_ref.sha256"
+        ),
+    }
+    target = _profile_target(root, normalized_target_ref)
+    driver = verify_driver(target.get("driver"))
+    if capability not in _PROFILER_CAPABILITIES:
+        raise ValueError("profiler capability is unsupported")
+    if capability not in driver["profiler_capabilities"]:
+        raise ValueError(
+            f"driver does not declare profiler capability: {capability}"
+        )
+    case_id = _text(case_id, "case_id", maximum=128)
+    if case_id not in target["test_suite"]["case_ids"]:
+        raise ValueError("case_id is outside the frozen test suite")
+    normalized_baseline_ref = _profile_baseline(
+        root, baseline_ref, normalized_target_ref, target
+    )
+    if role == "original":
+        if experiment_ref is not None or correctness_ref is not None:
+            raise ValueError(
+                "original collection must not include candidate references"
+            )
+        variant = target.get("original")
+        if type(variant) is not dict:
+            raise ValueError("Target has no original Variant")
+        variant = _profile_variant(
+            variant,
+            "Target original Variant",
+            expected_role="original",
+        )
+        normalized_experiment_ref = None
+        normalized_correctness_ref = None
+    elif role == "candidate":
+        if experiment_ref is None or correctness_ref is None:
+            raise ValueError(
+                "candidate collection requires experiment_ref and correctness_ref"
+            )
+        normalized_experiment_ref, experiment = _profile_experiment(
+            root,
+            experiment_ref,
+            normalized_target_ref,
+            normalized_baseline_ref,
+        )
+        variant = experiment["candidate"]
+        normalized_correctness_ref = _profile_correctness(
+            root,
+            correctness_ref,
+            target_ref=normalized_target_ref,
+            experiment_ref=normalized_experiment_ref,
+            candidate=variant,
+            target=target,
+            case_id=case_id,
+        )
+    else:
+        raise ValueError("profile collection role is unsupported")
+    return {
+        "artifact_root": str(root),
+        "target_ref": normalized_target_ref,
+        "target": target,
+        "baseline_ref": normalized_baseline_ref,
+        "role": role,
+        "case_id": case_id,
+        "variant": dict(variant),
+        "experiment_ref": normalized_experiment_ref,
+        "correctness_ref": normalized_correctness_ref,
+        "driver": driver,
+    }
+
+
+def _analysis_target(root: Path, reference) -> tuple[dict, dict]:
+    normalized = _closed(reference, {"id", "sha256"}, "target_ref")
+    normalized = {
+        "id": _text(normalized["id"], "target_ref.id", maximum=128),
+        "sha256": _sha256(normalized["sha256"], "target_ref.sha256"),
+    }
+    target = _read_bound_json(
+        root / "target.json",
+        normalized["sha256"],
+        "target_ref",
+    )
+    if (
+        target.get("record_type") != "target"
+        or target.get("format_version") != "cuda-kernel-optimizer/target-v1"
+        or target.get("id") != normalized["id"]
+        or target.get("target_mode") not in {"optimization", "diagnostic"}
+    ):
+        raise ValueError("target_ref is not one frozen Target")
+    return normalized, target
+
+
+def _analysis_artifact_ref(value) -> dict:
+    if type(value) is not dict:
+        raise ValueError("artifact_ref must be an object")
+    source = value.get("source")
+    optional = {"stage"}
+    if source == "target_material":
+        required = {"source", "material_ref"}
+    elif source == "invocation_driver_artifact":
+        required = {
+            "source", "invocation_ref", "receipt_index", "relative_path"
+        }
+    else:
+        raise ValueError("artifact_ref.source is unsupported")
+    if not required.issubset(value) or set(value) - required - optional:
+        raise ValueError("artifact_ref fields are incomplete or unknown")
+    normalized = {field: value[field] for field in required}
+    if "stage" in value:
+        normalized["stage"] = _text(value["stage"], "artifact_ref.stage", maximum=64)
+    return normalized
+
+
+def resolve_analysis_artifact(*, artifact_root, target_ref, artifact_ref) -> dict:
+    """Resolve one immutable compiler/SASS input without starting a process."""
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
+    if not root.is_dir():
+        raise ValueError("artifact_root is unavailable")
+    normalized_target_ref, target = _analysis_target(root, target_ref)
+    selected = _analysis_artifact_ref(artifact_ref)
+    response = {
+        "artifact_root": str(root),
+        "target_ref": normalized_target_ref,
+        "target": target,
+        "environment": _json_copy(target.get("environment"), "Target environment"),
+    }
+    if "stage" in selected:
+        response["requested_stage"] = selected["stage"]
+
+    if selected["source"] == "target_material":
+        if target.get("target_mode") != "diagnostic":
+            raise ValueError("target_material requires a diagnostic Target")
+        material_ref = _closed(
+            selected["material_ref"], {"id", "sha256"}, "material_ref"
+        )
+        material_ref = {
+            "id": _text(material_ref["id"], "material_ref.id", maximum=128),
+            "sha256": _sha256(material_ref["sha256"], "material_ref.sha256"),
+        }
+        matches = [
+            material
+            for material in target.get("diagnostic_materials", [])
+            if type(material) is dict and material.get("id") == material_ref["id"]
+        ]
+        if (
+            len(matches) != 1
+            or matches[0].get("sha256") != material_ref["sha256"]
+            or type(matches[0].get("object_ref")) is not dict
+            or matches[0]["object_ref"].get("digest") != material_ref["sha256"]
+        ):
+            raise ValueError("material_ref is not bound to this Target")
+        material = matches[0]
+        manifest = STORE._load_object_manifest(
+            root, material["object_ref"], verify_payload=True
+        )
+        files = [entry for entry in manifest["entries"] if entry["kind"] == "file"]
+        if manifest["source_kind"] != "file" or len(files) != 1:
+            raise ValueError("target material is not one frozen file")
+        return {
+            **response,
+            "source": "target_material",
+            "material_ref": material_ref,
+            "material": _json_copy(material, "diagnostic material"),
+            "object_ref": dict(material["object_ref"]),
+            "artifact": {
+                "kind": material.get("kind"),
+                "dialect": material.get("dialect"),
+                **dict(files[0]),
+            },
+        }
+
+    invocation_ref = _invocation_reference(
+        selected["invocation_ref"], "invocation_ref", include_case=False
+    )
+    result = _read_bound_json(
+        root / "invocations" / invocation_ref["invocation_id"] / "result.json",
+        invocation_ref["sha256"],
+        "invocation_ref",
+    )
+    if (
+        result.get("record_type") != "invocation_result"
+        or result.get("format_version")
+        != "cuda-kernel-optimizer/evaluator-result-v1"
+        or result.get("operation")
+        not in {"baseline", "screen", "target", "final_audit"}
+        or result.get("target_ref") != normalized_target_ref
+        or result.get("execution_status") != "succeeded"
+        or result.get("cleanup_status") != "confirmed"
+    ):
+        raise ValueError("invocation_ref is not an accepted evaluator result")
+    receipts = result.get("command_receipts")
+    index = selected["receipt_index"]
+    if (
+        type(receipts) is not list
+        or isinstance(index, bool)
+        or not isinstance(index, int)
+        or index < 0
+        or index >= len(receipts)
+    ):
+        raise ValueError("artifact_ref.receipt_index is invalid")
+    receipt = receipts[index]
+    if type(receipt) is not dict or set(receipt) != {
+        "request", "command_result", "driver_output_ref", "driver_artifacts"
+    }:
+        raise ValueError("selected command receipt is not a closed driver receipt")
+    if (
+        type(receipt["command_result"]) is not dict
+        or receipt["command_result"].get("status") != "completed"
+    ):
+        raise ValueError("selected driver command did not complete")
+    driver_request = receipt["request"]
+    if (
+        type(driver_request) is not dict
+        or driver_request.get("execution_id") != invocation_ref["invocation_id"]
+        or driver_request.get("target_id") != normalized_target_ref["id"]
+        or driver_request.get("operation") != result["operation"]
+        or driver_request.get("role") not in {"original", "reference", "candidate"}
+    ):
+        raise ValueError("selected driver receipt is not invocation-bound")
+    relative_path = "/".join(
+        _artifact_relative_path(
+            selected["relative_path"], "artifact_ref.relative_path"
+        )
+    )
+    if relative_path == "result.json":
+        raise ValueError("artifact_ref.relative_path is reserved")
+    output_ref = _closed(
+        receipt["driver_output_ref"],
+        _PROFILE_EVIDENCE_REF_FIELDS,
+        "driver_output_ref",
+    )
+    manifest = STORE._load_object_manifest(root, output_ref, verify_payload=True)
+    with tempfile.TemporaryDirectory(prefix="cko-analysis-artifact-") as temporary:
+        STORE.materialize_object_member(
+            root, output_ref, "result.json", Path(temporary) / "result.json"
+        )
+        normalized_driver_result = validate_driver_result(
+            Path(temporary) / "result.json",
+            driver_request,
+            bundle_manifest=manifest,
+        )
+    if normalized_driver_result["artifacts"] != receipt["driver_artifacts"]:
+        raise ValueError("driver artifact receipt changed")
+    artifacts = [
+        artifact
+        for artifact in normalized_driver_result["artifacts"]
+        if artifact["relative_path"] == relative_path
+    ]
+    if len(artifacts) != 1:
+        raise ValueError("artifact_ref does not select one declared driver artifact")
+    artifact = artifacts[0]
+    members = [
+        entry
+        for entry in manifest["entries"]
+        if entry["kind"] == "file" and entry["path"] == relative_path
+    ]
+    if (
+        len(members) != 1
+        or members[0]["sha256"] != artifact["sha256"]
+        or members[0]["size_bytes"] < 0
+    ):
+        raise ValueError("selected driver artifact member is not manifest-bound")
+    artifact = {**artifact, "size_bytes": members[0]["size_bytes"]}
+    variants = result.get("variant_refs")
+    role = driver_request.get("role")
+    request_variant = driver_request.get("variant")
+    matches = []
+    if type(variants) is list and type(request_variant) is dict:
+        matches = [
+            variant
+            for variant in variants
+            if type(variant) is dict
+            and variant.get("role") == role
+            and variant.get("kind") == request_variant.get("kind")
+            and variant.get("digest") == request_variant.get("digest")
+        ]
+    if len(matches) != 1:
+        raise ValueError("selected driver receipt Variant is not result-bound")
+    bound = {
+        **response,
+        "source": "invocation_driver_artifact",
+        "invocation_ref": invocation_ref,
+        "receipt_index": index,
+        "object_ref": dict(output_ref),
+        "artifact": dict(artifact),
+        "role": role,
+        "variant": dict(matches[0]),
+    }
+    if role == "candidate":
+        if result.get("operation") not in {"screen", "target"}:
+            raise ValueError("candidate artifact operation is invalid")
+        experiment_ref = result.get("experiment_ref")
+        if type(experiment_ref) is not dict or set(experiment_ref) != {"id", "sha256"}:
+            raise ValueError("candidate artifact has no Experiment binding")
+        experiment = _read_bound_json(
+            root / "experiments" / f"{experiment_ref['id']}.json",
+            experiment_ref["sha256"],
+            "experiment_ref",
+        )
+        if (
+            experiment.get("record_type") != "experiment"
+            or experiment.get("format_version")
+            != "cuda-kernel-optimizer/experiment-v1"
+            or experiment.get("id") != experiment_ref["id"]
+            or experiment.get("target_ref") != normalized_target_ref
+            or experiment.get("candidate") != matches[0]
+        ):
+            raise ValueError("candidate artifact Experiment binding is invalid")
+        bound["experiment_ref"] = dict(experiment_ref)
+        bound["mechanism_key"] = _text(
+            experiment.get("mechanism_key"),
+            "experiment mechanism_key",
+            maximum=256,
+        )
+    return bound
+
+
+def _validate_metrics(value, label: str) -> dict:
+    if type(value) is not dict:
+        raise ValueError(f"{label} must be an object")
+    if len(value) > _MAX_METRICS:
+        raise ValueError(f"{label} exceeds the metric limit")
+    return {
+        _text(name, f"{label} metric name", maximum=128): _finite(
+            metric, f"{label}.{name}"
+        )
+        for name, metric in value.items()
+    }
+
+
+def _validate_correctness(value) -> dict:
+    correctness = _closed(value, _CORRECTNESS_FIELDS, "correctness")
+    if correctness["status"] not in {"passed", "failed"}:
+        raise ValueError("correctness.status must be passed or failed")
+    return {
+        "status": correctness["status"],
+        "metrics": _validate_metrics(correctness["metrics"], "correctness.metrics"),
+    }
+
+
+def _validate_measurements(value) -> dict:
+    measurements = _closed(value, _MEASUREMENTS_FIELDS, "measurements")
+    primary = _closed(
+        measurements["primary"],
+        _PRIMARY_MEASUREMENT_FIELDS,
+        "measurements.primary",
+    )
+    samples = primary["samples"]
+    if isinstance(samples, (str, bytes, bytearray)) or not isinstance(
+        samples, Sequence
+    ):
+        raise ValueError("measurements.primary.samples must be a number list")
+    normalized_samples = [
+        _finite(item, f"measurements.primary.samples[{index}]")
+        for index, item in enumerate(samples)
+    ]
+    if not normalized_samples:
+        raise ValueError("measurements.primary.samples must not be empty")
+    if len(normalized_samples) > _MAX_SAMPLES:
+        raise ValueError("measurements.primary.samples exceeds the sample limit")
+    constraints = measurements["constraints"]
+    if type(constraints) is not list:
+        raise ValueError("measurements.constraints must be a list")
+    if len(constraints) > _MAX_CONSTRAINTS:
+        raise ValueError("measurements.constraints exceeds the constraint limit")
+    normalized_constraints = []
+    names = set()
+    for index, item in enumerate(constraints):
+        item = _closed(
+            item,
+            _CONSTRAINT_MEASUREMENT_FIELDS,
+            f"measurements.constraints[{index}]",
+        )
+        name = _text(
+            item["name"],
+            f"measurements.constraints[{index}].name",
+            maximum=128,
+        )
+        if name in names:
+            raise ValueError("measurements.constraints names must be unique")
+        names.add(name)
+        values = item["samples"]
+        if isinstance(values, (str, bytes, bytearray)) or not isinstance(
+            values, Sequence
+        ):
+            raise ValueError(
+                f"measurements.constraints[{index}].samples must be a number list"
+            )
+        normalized_values = [
+            _finite(
+                sample,
+                f"measurements.constraints[{index}].samples[{sample_index}]",
+            )
+            for sample_index, sample in enumerate(values)
+        ]
+        if not normalized_values:
+            raise ValueError(
+                f"measurements.constraints[{index}].samples must not be empty"
+            )
+        if len(normalized_values) > _MAX_SAMPLES:
+            raise ValueError(
+                f"measurements.constraints[{index}].samples exceeds the sample limit"
+            )
+        normalized_constraints.append(
+            {
+                "name": name,
+                "unit": _text(
+                    item["unit"],
+                    f"measurements.constraints[{index}].unit",
+                    maximum=64,
+                ),
+                "samples": normalized_values,
             }
         )
-        try:
-            process = subprocess.Popen(
-                list(spec.source),
-                shell=False,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-                text=False,
-            )
-        except FileNotFoundError as error:
-            raise RuntimeError(
-                f"workload command not found: {spec.source[0]}"
-            ) from error
-        except OSError as error:
-            raise RuntimeError(f"failed to execute workload command: {error}") from error
-        process_group = process.pid
-        stdout_capture = _BoundedCapture()
-        stderr_capture = _BoundedCapture()
-        streams = (process.stdout, process.stderr)
-        reader_threads = (
-            threading.Thread(
-                target=_drain_pipe,
-                args=(process.stdout, stdout_capture),
-                daemon=True,
-            ),
-            threading.Thread(
-                target=_drain_pipe,
-                args=(process.stderr, stderr_capture),
-                daemon=True,
-            ),
-        )
-        started_threads = []
-        timeout_error = None
-        try:
-            for thread in reader_threads:
-                thread.start()
-                started_threads.append(thread)
-            try:
-                returncode = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired as error:
-                timeout_error = error
-        finally:
-            _stop_process_group(process, process_group)
-            _finish_readers(started_threads, streams)
-        if timeout_error is not None:
-            raise RuntimeError(
-                "workload command timed out"
-                + _diagnostics(
-                    stdout_capture.text(),
-                    stderr_capture.text(),
-                    secret_values=secret_values,
-                )
-            ) from timeout_error
-        stdout = stdout_capture.text()
-        stderr = stderr_capture.text()
-        if returncode != 0:
-            raise RuntimeError(
-                f"workload command exited with exit {returncode}"
-                f"{_diagnostics(stdout, stderr, secret_values=secret_values)}"
-            )
-        try:
-            return _read_command_output(output_path)
-        except RuntimeError as error:
-            raise RuntimeError(
-                f"{error}{_diagnostics(stdout, stderr, secret_values=secret_values)}"
-            ) from error
+    return {
+        "primary": {
+            "name": _text(primary["name"], "measurements.primary.name", maximum=128),
+            "unit": _text(primary["unit"], "measurements.primary.unit", maximum=64),
+            "samples": normalized_samples,
+        },
+        "constraints": normalized_constraints,
+    }
 
 
-def _verify_source_hash(
-    spec: WorkloadSpec, snapshots: Sequence[_FileSnapshot]
-) -> None:
-    try:
-        current = _normalized_source_hash(
-            spec.kind,
-            spec.source,
-            spec.objective,
-            spec.cases,
-            snapshots=snapshots,
+def _validate_environment(value) -> dict:
+    environment = _closed(value, _ENVIRONMENT_FIELDS, "driver environment")
+    gpu_uuids = environment["gpu_uuids"]
+    gpu_models = environment["gpu_models"]
+    gpu_architectures = environment["gpu_architectures"]
+    if (
+        type(gpu_uuids) is not list
+        or any(not isinstance(item, str) or not item for item in gpu_uuids)
+        or len(gpu_uuids) != len(set(gpu_uuids))
+    ):
+        raise ValueError("driver environment gpu_uuids must be a unique string list")
+    if len(gpu_uuids) > _MAX_GPUS:
+        raise ValueError("driver environment exceeds the GPU limit")
+    if (
+        type(gpu_models) is not list
+        or any(not isinstance(item, str) or not item for item in gpu_models)
+        or len(gpu_models) != len(gpu_uuids)
+    ):
+        raise ValueError("driver environment gpu_models must align with gpu_uuids")
+    if (
+        type(gpu_architectures) is not list
+        or any(
+            not isinstance(item, str) or not item
+            for item in gpu_architectures
         )
-    except (OSError, ValueError) as error:
-        raise ValueError(f"workload source_hash verification failed: {error}") from error
-    if current != spec.source_hash:
+        or len(gpu_architectures) != len(gpu_uuids)
+    ):
         raise ValueError(
-            "workload source_hash mismatch; source or frozen contract changed "
-            "after normalization"
+            "driver environment gpu_architectures must align with gpu_uuids"
         )
-
-
-def _verify_command_source(spec: WorkloadSpec) -> None:
-    try:
-        normalized, snapshots = _normalize_command_source(spec.source)
-    except (OSError, ValueError) as error:
-        raise ValueError(f"workload source_hash verification failed: {error}") from error
-    if normalized != list(spec.source):
-        raise ValueError(
-            "workload source_hash mismatch; command resolution changed after "
-            "normalization"
-        )
-    _verify_source_hash(spec, snapshots)
-
-
-def verify_frozen_spec(spec: WorkloadSpec) -> None:
-    """Verify frozen source bytes and contract without executing user code."""
-    if not isinstance(spec, WorkloadSpec):
-        raise ValueError("spec must be a WorkloadSpec")
-    if spec.kind == "command":
-        _verify_command_source(spec)
-        return
-    if spec.kind != "python" or not isinstance(spec.source, str):
-        raise ValueError("frozen workload kind or source is invalid")
-    try:
-        bundle = _read_python_bundle(spec.source)
-    except (OSError, ValueError) as error:
-        raise ValueError(
-            f"workload source_hash verification failed: {error}"
-        ) from error
-    snapshots = (bundle.source,) + tuple(
-        snapshot for _, snapshot in bundle.dependencies
+    frameworks = environment["frameworks"]
+    if type(frameworks) is not dict or any(
+        not isinstance(name, str)
+        or not name
+        or not isinstance(version, str)
+        or not version
+        for name, version in frameworks.items()
+    ):
+        raise ValueError("driver environment frameworks must map names to versions")
+    if len(frameworks) > _MAX_FRAMEWORKS:
+        raise ValueError("driver environment exceeds the framework limit")
+    container = _closed(
+        environment["container"], _CONTAINER_FIELDS, "driver environment container"
     )
-    _verify_source_hash(spec, snapshots)
+    return {
+        "gpu_uuids": list(gpu_uuids),
+        "gpu_models": list(gpu_models),
+        "gpu_architectures": list(gpu_architectures),
+        "driver_version": _text(
+            environment["driver_version"],
+            "driver environment driver_version",
+            maximum=256,
+        ),
+        "cuda_runtime_version": _text(
+            environment["cuda_runtime_version"],
+            "driver environment cuda_runtime_version",
+            maximum=256,
+        ),
+        "frameworks": dict(sorted(frameworks.items())),
+        "container": {
+            "kind": _text(container["kind"], "driver environment container.kind"),
+            "identity": _text(
+                container["identity"],
+                "driver environment container.identity",
+            ),
+        },
+    }
 
 
-def run_spec_once(
-    spec: WorkloadSpec,
-    *,
-    candidate,
-    role: str,
-    case: dict | None = None,
-    timeout: float | None = None,
-) -> dict:
-    """Run any normalized workload through one lifecycle result contract."""
-    if not isinstance(spec, WorkloadSpec):
-        raise ValueError("spec must be a WorkloadSpec")
-    normalized_role = _nonempty_string(role, "role")
-    normalized_case = _normalize_case(case)
+def _artifact_relative_path(value, label: str) -> tuple[str, ...]:
+    relative = _text(value, label)
+    if "\\" in relative or "\x00" in relative:
+        raise ValueError(f"{label} must be a canonical POSIX relative path")
+    path = PurePosixPath(relative)
+    if (
+        path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or str(path) != relative
+    ):
+        raise ValueError(f"{label} must be a canonical POSIX relative path")
+    return path.parts
 
-    frozen_objective = validate_objective(spec.objective)
 
-    if spec.kind == "python":
-        if not isinstance(spec.source, str):
-            raise ValueError("Python workload source must be a file path")
-        if timeout is not None:
-            raise ValueError(
-                "timeout is only runner-enforced for command workloads; "
-                "Python adapters must raise TimeoutError themselves"
-            )
+def _sha256_relative_regular_file(
+    root: Path,
+    parts: tuple[str, ...],
+    label: str,
+) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = flags | getattr(os, "O_DIRECTORY", 0)
+    descriptors: list[int] = []
+    try:
+        descriptor = os.open(root, directory_flags)
+        descriptors.append(descriptor)
+        for part in parts[:-1]:
+            descriptor = os.open(part, directory_flags, dir_fd=descriptor)
+            descriptors.append(descriptor)
+        file_descriptor = os.open(parts[-1], flags, dir_fd=descriptor)
         try:
-            bundle = _read_python_bundle(spec.source)
-        except (OSError, ValueError) as error:
-            raise ValueError(
-                f"workload source_hash verification failed: {error}"
-            ) from error
-        snapshots = (bundle.source,) + tuple(
-            snapshot for _, snapshot in bundle.dependencies
-        )
-        _verify_source_hash(spec, snapshots)
-        source_path = bundle.source.path
-        adapter = _load_python_bundle(bundle)
-        current_objective = _adapter_objective(adapter, source_path)
-        if current_objective != frozen_objective:
-            raise ValueError(
-                "conflicting objective: Python adapter metrics() changed after "
-                "normalization"
-            )
-        result = run_once(
-            adapter,
-            candidate=candidate,
-            role=normalized_role,
-            case=normalized_case,
-        )
-        if result["objective"] != frozen_objective:
-            raise ValueError(
-                "conflicting objective: Python adapter metrics() changed during run"
-            )
-        return result
+            metadata = os.fstat(file_descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError(f"{label} must select a regular file")
+            if metadata.st_size > _MAX_ARTIFACT_BYTES:
+                raise ValueError(f"{label} exceeds the artifact byte limit")
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(file_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            after = os.fstat(file_descriptor)
+            if (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            ):
+                raise ValueError(f"{label} changed while being inspected")
+            return digest.hexdigest()
+        finally:
+            os.close(file_descriptor)
+    except OSError as error:
+        raise ValueError(f"{label} is unavailable or unsafe") from error
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
-    if spec.kind == "command":
-        if not isinstance(spec.source, list):
-            raise ValueError("command workload source must be an argv list")
-        command_result = run_command_once(
-            spec,
-            candidate=candidate,
-            role=normalized_role,
-            case=normalized_case,
-            timeout=timeout,
+
+def _validate_artifacts(value, result_path, manifest_files=None) -> list[dict]:
+    if type(value) is not list:
+        raise ValueError("driver result artifacts must be a list")
+    if len(value) > _MAX_ARTIFACTS:
+        raise ValueError("driver result artifacts exceeds the artifact limit")
+    root = Path(
+        os.path.abspath(os.path.expanduser(os.fspath(result_path)))
+    ).parent
+    normalized = []
+    relative_paths = set()
+    for index, item in enumerate(value):
+        artifact = _closed(
+            item,
+            _ARTIFACT_FIELDS,
+            f"driver result artifacts[{index}]",
         )
-        validation = command_result["validation"]
-        if _validation_failed(validation):
-            raise ValueError("workload validation failed")
-        result = {
-            "role": normalized_role,
-            "case": normalized_case,
-            "validation": validation,
-            "benchmark": command_result["benchmark"],
-            "objective": frozen_objective,
+        kind = _text(
+            artifact["kind"],
+            f"driver result artifacts[{index}].kind",
+            maximum=128,
+        )
+        parts = _artifact_relative_path(
+            artifact["relative_path"],
+            f"driver result artifacts[{index}].relative_path",
+        )
+        relative_path = "/".join(parts)
+        if relative_path == "result.json":
+            raise ValueError("driver result artifact path is reserved: result.json")
+        if relative_path in relative_paths:
+            raise ValueError("driver result artifact paths must be unique")
+        relative_paths.add(relative_path)
+        expected = _sha256(
+            artifact["sha256"],
+            f"driver result artifacts[{index}].sha256",
+        )
+        if manifest_files is None:
+            actual = _sha256_relative_regular_file(
+                root,
+                parts,
+                f"driver result artifacts[{index}]",
+            )
+        else:
+            entry = manifest_files.get(relative_path)
+            if type(entry) is not dict or entry.get("kind") != "file":
+                raise ValueError(
+                    f"driver result artifacts[{index}] is absent from frozen bundle"
+                )
+            actual = entry.get("sha256")
+        if actual != expected:
+            raise ValueError(
+                f"driver result artifacts[{index}] digest does not match"
+            )
+        normalized.append(
+            {
+                "kind": kind,
+                "relative_path": relative_path,
+                "sha256": expected,
+            }
+        )
+    return normalized
+
+
+def evaluate_correctness(correctness: Mapping, acceptance: Mapping) -> dict:
+    """Apply the frozen correctness rule instead of trusting driver status."""
+    normalized = _validate_correctness(dict(correctness))
+    rule = _closed(
+        dict(acceptance),
+        {"metric", "operator", "value"},
+        "correctness acceptance",
+    )
+    metric = _text(rule["metric"], "correctness acceptance metric", maximum=128)
+    if metric not in normalized["metrics"]:
+        raise ValueError("correctness acceptance metric is missing")
+    threshold = _finite(rule["value"], "correctness acceptance value")
+    observed = normalized["metrics"][metric]
+    operator = rule["operator"]
+    if operator == "greater_or_equal":
+        computed = observed >= threshold
+    elif operator == "less_or_equal":
+        computed = observed <= threshold
+    elif operator == "equal":
+        computed = observed == threshold
+    else:
+        raise ValueError("correctness acceptance operator is unsupported")
+    return {
+        "passed": bool(computed and normalized["status"] == "passed"),
+        "driver_status": normalized["status"],
+        "metric": metric,
+        "operator": operator,
+        "threshold": threshold,
+        "observed": observed,
+        "status_consistent": (
+            normalized["status"] == ("passed" if computed else "failed")
+        ),
+    }
+
+
+def validate_driver_result(path, expected_request: Mapping, *, bundle_manifest=None) -> dict:
+    """Validate one driver result against the exact request that produced it."""
+    request = _closed(
+        dict(expected_request), _REQUEST_FIELDS, "expected driver request"
+    )
+    result = _strict_json(path)
+    required = set(_RESULT_BASE_FIELDS)
+    mode = request["mode"]
+    if mode in {"correctness", "combined"}:
+        required.add("correctness")
+    if mode in {"measure", "combined"}:
+        required.add("measurements")
+    result = _closed(result, required, "driver result")
+    if result["protocol_version"] != RESULT_PROTOCOL:
+        raise ValueError("driver result protocol_version is unsupported")
+    expected_echoes = {
+        "request_digest": request["request_digest"],
+        "target_id": request["target_id"],
+        "execution_id": request["execution_id"],
+        "variant_digest": request["variant"]["digest"],
+        "role": request["role"],
+        "mode": request["mode"],
+        "case_id": request["case"].get("id"),
+        "driver_identity": request["driver_identity"],
+    }
+    for field, expected in expected_echoes.items():
+        if result[field] != expected:
+            raise ValueError(f"driver result {field} does not match request")
+    manifest_files = None
+    manifest_directories = None
+    if bundle_manifest is not None:
+        bundle_manifest = STORE._validated_manifest(bundle_manifest)
+        if (
+            bundle_manifest.get("source_kind") != "directory"
+        ):
+            raise ValueError("driver output bundle manifest is invalid")
+        manifest_files = {}
+        manifest_directories = set()
+        for entry in bundle_manifest["entries"]:
+            if type(entry) is not dict or entry.get("kind") not in {"file", "directory"}:
+                raise ValueError("driver output bundle manifest is invalid")
+            relative = "/".join(
+                _artifact_relative_path(
+                    entry.get("path"), "driver output bundle manifest path"
+                )
+            )
+            if entry["kind"] == "file":
+                if relative in manifest_files:
+                    raise ValueError("driver output bundle contains duplicate files")
+                manifest_files[relative] = entry
+            else:
+                manifest_directories.add(relative)
+    artifacts = _validate_artifacts(result["artifacts"], path, manifest_files)
+    if manifest_files is not None:
+        expected_files = {"result.json"} | {
+            artifact["relative_path"] for artifact in artifacts
         }
-        return result
+        expected_directories = set()
+        for relative in expected_files:
+            parent = PurePosixPath(relative).parent
+            while str(parent) != ".":
+                expected_directories.add(str(parent))
+                parent = parent.parent
+        if set(manifest_files) != expected_files or manifest_directories != expected_directories:
+            raise ValueError("driver output bundle contains undeclared members")
+        result_entry = manifest_files.get("result.json")
+        if type(result_entry) is not dict or result_entry.get("kind") != "file":
+            raise ValueError("driver output bundle omits result.json")
+    cleanup = _closed(
+        result["cleanup"], _CLEANUP_RESULT_FIELDS, "driver result cleanup"
+    )
+    if cleanup["status"] != "confirmed":
+        raise ValueError("driver cleanup is not confirmed")
+    if type(cleanup["live_tasks"]) is not list or cleanup["live_tasks"]:
+        raise ValueError("driver reports live tasks after completion")
+    normalized = {
+        field: _json_copy(result[field], f"driver result {field}")
+        for field in _RESULT_BASE_FIELDS
+    }
+    normalized["artifacts"] = artifacts
+    normalized["environment"] = _validate_environment(result["environment"])
+    if "correctness" in required:
+        normalized["correctness"] = _validate_correctness(result["correctness"])
+    if "measurements" in required:
+        normalized["measurements"] = _validate_measurements(result["measurements"])
+    return normalized
 
-    raise ValueError(f"unknown workload kind: {spec.kind}")
+
+__all__ = [
+    "DRIVER_PROTOCOL",
+    "REQUEST_PROTOCOL",
+    "RESULT_PROTOCOL",
+    "build_argv",
+    "build_driver_request",
+    "evaluate_correctness",
+    "materialize_target_inputs",
+    "materialize_variant",
+    "resolve_analysis_artifact",
+    "resolve_profile_collection",
+    "validate_driver",
+    "validate_driver_result",
+    "validate_variant",
+    "verify_driver",
+]

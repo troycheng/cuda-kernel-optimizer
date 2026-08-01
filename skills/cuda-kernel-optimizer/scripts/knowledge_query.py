@@ -1,230 +1,544 @@
 #!/usr/bin/env python3
-"""Return a small, target-compatible set of optimization knowledge cards."""
+"""Return a bounded, identity-compatible set of local knowledge cards."""
 
 from __future__ import annotations
 
 import argparse
-import importlib.util
+import hashlib
 import json
+import os
 import re
-from collections.abc import Mapping
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+import stat
+import sys
+from pathlib import Path, PurePosixPath
 
 
+INPUT_VERSION = "cuda-kernel-optimizer/knowledge-input-v1"
 REFERENCE_DIR = Path(__file__).resolve().parent.parent / "references"
-REGISTRY_PATH = REFERENCE_DIR / "method_registry.json"
-WORKLOAD_PATH = REFERENCE_DIR / "workload_methods.json"
+KNOWLEDGE_DIR = REFERENCE_DIR / "knowledge"
+CARDS_PATH = KNOWLEDGE_DIR / "cards.json"
+SOURCES_PATH = KNOWLEDGE_DIR / "sources.json"
+
+_COMMON_INPUT_FIELDS = {"format_version", "operation", "filters", "limits"}
+_DETACHED_INPUT_FIELDS = _COMMON_INPUT_FIELDS | {"identity"}
+_TARGET_INPUT_FIELDS = _COMMON_INPUT_FIELDS | {
+    "artifact_root",
+    "target_ref",
+    "phenomena",
+}
+_IDENTITY_FIELDS = {
+    "gpu_architecture",
+    "cuda_version",
+    "frameworks",
+    "phenomena",
+    "claim_layer",
+}
+_FILTER_FIELDS = {"mechanism_keys"}
+_LIMIT_FIELDS = {"max_results", "max_context_bytes"}
+_TARGET_REF_FIELDS = {"id", "sha256"}
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
-def _load_diagnostic_knowledge():
-    path = Path(__file__).with_name("diagnostic_knowledge.py")
-    spec = importlib.util.spec_from_file_location(
-        "cuda_optimizer_diagnostic_knowledge_query", path
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load diagnostic knowledge runtime: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+class KnowledgeError(ValueError):
+    pass
 
 
-def _load(path: Path) -> Dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _sm_number(arch: str) -> int:
-    match = re.fullmatch(r"sm_(\d+)", arch)
-    if match is None:
-        raise ValueError(f"Invalid exact architecture: {arch}")
-    return int(match.group(1))
-
-
-def _kernel_cards(
-    registry: Dict[str, Any],
-    arch: str,
-    axis: Optional[str],
-    bottleneck: Optional[str],
-    observed_metrics: Dict[str, float],
-) -> List[Dict[str, Any]]:
-    feature_map = registry.get("arch_feature_map", {})
-    if arch not in feature_map:
-        raise ValueError(
-            "Unknown architecture %s; exact capability data is required." % arch
+def _closed(value, fields: set[str], label: str) -> dict:
+    if type(value) is not dict:
+        raise KnowledgeError(f"{label} must be an object")
+    missing = fields - set(value)
+    unknown = set(value) - fields
+    if missing or unknown:
+        raise KnowledgeError(
+            f"{label} has missing={sorted(missing)} unknown={sorted(unknown)}"
         )
-    available = set(feature_map[arch])
-    needle = (bottleneck or "").lower()
-    cards = []
-    for method_id, method in registry["methods"].items():
-        if axis and method.get("axis") != axis:
-            continue
-        if _sm_number(arch) < int(method["min_sm"]):
-            continue
-        required = set(method.get("required_features", []))
-        if not required.issubset(available):
-            continue
-        searchable = " ".join(
-            [method_id, str(method.get("name", "")), str(method.get("trigger_metric", ""))]
-        ).lower()
-        if needle and needle not in searchable:
-            continue
-        metric = method.get("trigger_metric")
-        direction = method.get("trigger_direction")
-        threshold = method.get("trigger_bad")
-        observed = observed_metrics.get(metric) if metric else None
-        applicability = "unverified"
-        if observed is not None and threshold is not None:
-            triggered = (direction == "low_is_bad" and observed <= threshold) or (
-                direction == "high_is_bad" and observed >= threshold
-            )
-            applicability = (
-                "observed_bad_trigger" if triggered else "observed_not_triggered"
-            )
-        cards.append(
-            {
-                "id": method_id,
-                "layer": "kernel",
-                "axis": method["axis"],
-                "priority": method["priority"],
-                "name": method["name"],
-                "trigger_metric": method.get("trigger_metric"),
-                "trigger_direction": method.get("trigger_direction"),
-                "trigger_bad": threshold,
-                "observed_value": observed,
-                "applicability": applicability,
-                "required_features": method.get("required_features", []),
-                "reference_impl": method.get("reference_impl"),
-                "evidence_required": "correctness plus paired target measurement",
-            }
-        )
-    applicability_rank = {
-        "observed_bad_trigger": 0,
-        "unverified": 1,
-        "observed_not_triggered": 2,
-    }
-    return sorted(
-        cards,
-        key=lambda item: (
-            applicability_rank[item["applicability"]],
-            item["priority"],
-            item["id"],
-        ),
-    )
+    return value
 
 
-def _workload_cards(bottleneck: Optional[str]) -> List[Dict[str, Any]]:
-    cards = _load(WORKLOAD_PATH)["methods"]
-    if bottleneck:
-        needle = bottleneck.lower()
-        cards = [
-            item
-            for item in cards
-            if needle
-            in " ".join(
-                [item["id"], item["bottleneck"], item["name"], " ".join(item["signals"])]
-            ).lower()
-        ]
-    return sorted(cards, key=lambda item: (item["priority"], item["id"]))
+def _text(value, label: str, *, maximum=4096) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise KnowledgeError(f"{label} must be a non-empty bounded string")
+    return value
 
 
-def query(
-    arch: str,
-    layer: str = "kernel",
-    axis: Optional[str] = None,
-    bottleneck: Optional[str] = None,
-    limit: int = 5,
-    observed_metrics: Optional[Dict[str, float]] = None,
-) -> Dict[str, Any]:
-    if limit < 1 or limit > 20:
-        raise ValueError("limit must be between 1 and 20")
-    registry = _load(REGISTRY_PATH)
-    if layer == "kernel":
-        methods = _kernel_cards(
-            registry, arch, axis, bottleneck, observed_metrics or {}
-        )
-    elif layer == "workload":
-        if arch not in registry.get("arch_feature_map", {}):
-            raise ValueError(
-                "Unknown architecture %s; exact capability data is required." % arch
-            )
-        methods = _workload_cards(bottleneck)
-    else:
-        raise ValueError("layer must be kernel or workload")
-    return {
-        "schema_version": "cuda-optimizer/knowledge-query-v1",
-        "arch": arch,
-        "layer": layer,
-        "filters": {"axis": axis, "bottleneck": bottleneck},
-        "observed_metrics": observed_metrics or {},
-        "methods": methods[:limit],
-        "truncated": len(methods) > limit,
-        "promotion_authority": "local_correctness_and_measurement_only",
-    }
+def _strings(value, label: str) -> list[str]:
+    if type(value) is not list or any(
+        not isinstance(item, str) or not item for item in value
+    ):
+        raise KnowledgeError(f"{label} must be a string list")
+    if len(value) != len(set(value)):
+        raise KnowledgeError(f"{label} must not contain duplicates")
+    return list(value)
 
 
-def query_frozen(
-    frozen_inputs: Mapping[str, object], *, limit: int = 3
-) -> Dict[str, Any]:
-    result = _load_diagnostic_knowledge().build_knowledge_context(
-        frozen_inputs,
-        limit=limit,
-    )
-    if result["candidates"]:
-        raise ValueError(
-            "Detached frozen-input inspection cannot verify execution provenance; "
-            "inspect the Controller-owned knowledge_context.json instead"
-        )
-    return result
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Query a bounded set of offline GPU optimization knowledge cards."
-    )
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--arch", help="Exact architecture, for example sm_120")
-    mode.add_argument("--frozen-input", help="Closed V1.3 frozen-input JSON file")
-    parser.add_argument("--layer", choices=("kernel", "workload"), default="kernel")
-    parser.add_argument("--axis", choices=("compute", "memory", "latency"))
-    parser.add_argument("--bottleneck")
-    parser.add_argument(
-        "--metrics", help="Optional JSON object mapping profiler metric names to values"
-    )
-    parser.add_argument("--limit", type=int)
-    args = parser.parse_args()
+def _strict_json(path: Path) -> dict:
     try:
-        if args.frozen_input:
-            if (
-                args.axis is not None
-                or args.bottleneck is not None
-                or args.metrics is not None
-                or args.layer != "kernel"
-            ):
-                parser.error(
-                    "--frozen-input cannot be combined with legacy query filters"
-                )
-            result = query_frozen(
-                _load(Path(args.frozen_input)),
-                limit=3 if args.limit is None else args.limit,
-            )
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-            return 0
-        observed_metrics = _load(Path(args.metrics)) if args.metrics else {}
-        if not isinstance(observed_metrics, dict) or not all(
-            isinstance(value, (int, float)) for value in observed_metrics.values()
-        ):
-            parser.error("--metrics must contain a JSON object of numeric values")
-        result = query(
-            arch=args.arch,
-            layer=args.layer,
-            axis=args.axis,
-            bottleneck=args.bottleneck,
-            limit=5 if args.limit is None else args.limit,
-            observed_metrics=observed_metrics,
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise KnowledgeError(f"JSON source is invalid: {path}") from error
+    if type(value) is not dict:
+        raise KnowledgeError(f"JSON source must contain an object: {path}")
+    return value
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise KnowledgeError(f"JSON source has duplicate key: {key}")
+        value[key] = item
+    return value
+
+
+def _knowledge_json(filename: str) -> tuple[dict, str]:
+    root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    root_fd = file_fd = None
+    try:
+        root_fd = os.open(KNOWLEDGE_DIR, root_flags)
+        file_fd = os.open(filename, file_flags, dir_fd=root_fd)
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise KnowledgeError(f"knowledge source is not a regular file: {filename}")
+        parts = []
+        while True:
+            chunk = os.read(file_fd, 1024 * 1024)
+            if not chunk:
+                break
+            parts.append(chunk)
+        after = os.fstat(file_fd)
+    except OSError as error:
+        raise KnowledgeError(f"knowledge source is unavailable or unsafe: {filename}") from error
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise KnowledgeError(f"knowledge source changed while reading: {filename}")
+    try:
+        payload = b"".join(parts)
+        value = json.loads(payload.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise KnowledgeError(f"knowledge source is invalid JSON: {filename}") from error
+    if type(value) is not dict:
+        raise KnowledgeError(f"knowledge source must contain an object: {filename}")
+    return value, hashlib.sha256(payload).hexdigest()
+
+
+def _validated_playbook(card: dict) -> dict | None:
+    details = card.get("details")
+    if type(details) is not dict:
+        return None
+    relative = details.get("playbook")
+    expected = details.get("playbook_sha256")
+    if relative is None and expected is None:
+        return None
+    reference = PurePosixPath(str(relative))
+    if (
+        reference.is_absolute()
+        or len(reference.parts) != 2
+        or reference.parts[0] != "playbooks"
+        or reference.suffix != ".md"
+        or any(part in {"", ".", ".."} for part in reference.parts)
+        or _SHA256.fullmatch(str(expected)) is None
+    ):
+        raise KnowledgeError(f"knowledge playbook reference is invalid: {card.get('id')}")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    root_fd = playbooks_fd = file_fd = None
+    try:
+        root_fd = os.open(KNOWLEDGE_DIR, directory_flags)
+        playbooks_fd = os.open(
+            "playbooks", directory_flags | nofollow, dir_fd=root_fd
         )
-    except ValueError as exc:
-        parser.error(str(exc))
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+        file_fd = os.open(reference.name, os.O_RDONLY | nofollow, dir_fd=playbooks_fd)
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 1024 * 1024:
+            raise KnowledgeError(f"knowledge playbook is unsafe: {relative}")
+        payload = b""
+        while len(payload) <= 1024 * 1024:
+            chunk = os.read(file_fd, 64 * 1024)
+            if not chunk:
+                break
+            payload += chunk
+        after = os.fstat(file_fd)
+    except OSError as error:
+        raise KnowledgeError(f"knowledge playbook is unavailable: {relative}") from error
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if playbooks_fd is not None:
+            os.close(playbooks_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise KnowledgeError(f"knowledge playbook changed while reading: {relative}")
+    if hashlib.sha256(payload).hexdigest() != expected:
+        raise KnowledgeError(f"knowledge playbook digest does not match: {relative}")
+    return {"path": str(reference), "sha256": expected}
+
+
+def _canonical_bytes(value) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as error:
+        raise KnowledgeError("knowledge value is not finite JSON") from error
+
+
+def _validate_request(value) -> dict:
+    if type(value) is not dict:
+        raise KnowledgeError("knowledge input must be an object")
+    if set(value) == _DETACHED_INPUT_FIELDS:
+        request = value
+        identity_source = {"kind": "detached"}
+        identity = _closed(request["identity"], _IDENTITY_FIELDS, "identity")
+    elif set(value) == _TARGET_INPUT_FIELDS:
+        request = value
+        root = Path(request["artifact_root"]).expanduser().resolve()
+        target_ref = _closed(
+            request["target_ref"], _TARGET_REF_FIELDS, "target_ref"
+        )
+        try:
+            payload = (root / "target.json").read_bytes()
+            target = json.loads(payload.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise KnowledgeError("target record is unavailable or invalid") from error
+        if (
+            hashlib.sha256(payload).hexdigest() != target_ref["sha256"]
+            or type(target) is not dict
+            or target.get("record_type") != "target"
+            or target.get("id") != target_ref["id"]
+        ):
+            raise KnowledgeError("target reference does not match target record")
+        runtime = target.get("environment", {}).get("runtime", {})
+        architectures = runtime.get("gpu_architectures", [])
+        if not architectures or len(set(architectures)) != 1:
+            raise KnowledgeError(
+                "target knowledge query requires one exact GPU architecture"
+            )
+        identity = {
+            "gpu_architecture": architectures[0],
+            "cuda_version": runtime.get("cuda_runtime_version"),
+            "frameworks": runtime.get("frameworks"),
+            "phenomena": request["phenomena"],
+            "claim_layer": target.get("claim_layer"),
+        }
+        identity_source = {
+            "kind": "target",
+            "target_ref": dict(target_ref),
+        }
+    else:
+        raise KnowledgeError(
+            "knowledge input must contain either identity or target_ref fields"
+        )
+    if request["format_version"] != INPUT_VERSION or request["operation"] != "query":
+        raise KnowledgeError("knowledge input version or operation is unsupported")
+    frameworks = identity["frameworks"]
+    if type(frameworks) is not dict or any(
+        not isinstance(name, str)
+        or not name
+        or not isinstance(version, str)
+        or not version
+        for name, version in frameworks.items()
+    ):
+        raise KnowledgeError("identity.frameworks must map names to versions")
+    phenomena = _strings(identity["phenomena"], "identity.phenomena")
+    filters = _closed(request["filters"], _FILTER_FIELDS, "filters")
+    mechanism_keys = _strings(
+        filters["mechanism_keys"], "filters.mechanism_keys"
+    )
+    limits = _closed(request["limits"], _LIMIT_FIELDS, "limits")
+    max_results = limits["max_results"]
+    max_context = limits["max_context_bytes"]
+    if (
+        isinstance(max_results, bool)
+        or not isinstance(max_results, int)
+        or not 1 <= max_results <= 50
+    ):
+        raise KnowledgeError("limits.max_results must be between 1 and 50")
+    if (
+        isinstance(max_context, bool)
+        or not isinstance(max_context, int)
+        or not 256 <= max_context <= 1024 * 1024
+    ):
+        raise KnowledgeError(
+            "limits.max_context_bytes must be between 256 and 1048576"
+        )
+    if identity["claim_layer"] not in {
+        "diagnostic",
+        "kernel",
+        "workload",
+        "serving",
+    }:
+        raise KnowledgeError("identity.claim_layer is unsupported")
+    return {
+        "identity": {
+            "gpu_architecture": _text(
+                identity["gpu_architecture"],
+                "identity.gpu_architecture",
+                maximum=64,
+            ),
+            "cuda_version": _text(
+                identity["cuda_version"],
+                "identity.cuda_version",
+                maximum=64,
+            ),
+            "frameworks": dict(sorted(frameworks.items())),
+            "phenomena": phenomena,
+            "claim_layer": identity["claim_layer"],
+        },
+        "mechanism_keys": mechanism_keys,
+        "max_results": max_results,
+        "max_context_bytes": max_context,
+        "identity_source": identity_source,
+    }
+
+
+def _load_knowledge() -> tuple[list[dict], dict[str, dict], dict]:
+    card_document, cards_sha256 = _knowledge_json("cards.json")
+    source_document, sources_sha256 = _knowledge_json("sources.json")
+    if (
+        card_document.get("schema_version")
+        != "cuda-kernel-optimizer/knowledge-cards-v1"
+        or type(card_document.get("cards")) is not list
+    ):
+        raise KnowledgeError("knowledge card registry version is unsupported")
+    if (
+        source_document.get("schema_version")
+        != "cuda-kernel-optimizer/knowledge-sources-v1"
+        or type(source_document.get("sources")) is not list
+    ):
+        raise KnowledgeError("knowledge source registry version is unsupported")
+    sources = {}
+    for source in source_document["sources"]:
+        if type(source) is not dict:
+            raise KnowledgeError("knowledge source entry must be an object")
+        source_id = _text(source.get("id"), "knowledge source id", maximum=256)
+        if source_id in sources:
+            raise KnowledgeError("knowledge source ids must be unique")
+        if source.get("status") != "verified":
+            raise KnowledgeError(f"knowledge source is not verified: {source_id}")
+        if _SHA256.fullmatch(str(source.get("summary_sha256", ""))) is None:
+            raise KnowledgeError(f"knowledge source digest is invalid: {source_id}")
+        sources[source_id] = source
+    cards = []
+    seen = set()
+    for card in card_document["cards"]:
+        if type(card) is not dict:
+            raise KnowledgeError("knowledge card entry must be an object")
+        card_id = _text(card.get("id"), "knowledge card id", maximum=256)
+        mechanism = _text(
+            card.get("mechanism_key"),
+            "knowledge mechanism_key",
+            maximum=256,
+        )
+        if card_id in seen:
+            raise KnowledgeError("knowledge card ids must be unique")
+        seen.add(card_id)
+        source_ids = _strings(card.get("source_ids"), f"{card_id}.source_ids")
+        missing = sorted(set(source_ids) - set(sources))
+        if missing:
+            raise KnowledgeError(
+                f"knowledge card has unknown sources: {card_id}: {missing}"
+            )
+        if not isinstance(card.get("priority"), int):
+            raise KnowledgeError(f"knowledge card priority is invalid: {card_id}")
+        if mechanism:
+            cards.append(card)
+    provenance = {
+        "cards_sha256": cards_sha256,
+        "sources_sha256": sources_sha256,
+    }
+    return cards, sources, provenance
+
+
+def _observation_ids(card: dict) -> set[str]:
+    rules = card.get("observation_rules")
+    if type(rules) is not dict:
+        return set()
+    identifiers = set()
+    for group in ("positive", "counter", "invalidators"):
+        entries = rules.get(group, [])
+        if type(entries) is not list:
+            raise KnowledgeError(
+                f"knowledge card observation rules are invalid: {card.get('id')}"
+            )
+        for entry in entries:
+            if type(entry) is dict and isinstance(entry.get("semantic_id"), str):
+                identifiers.add(entry["semantic_id"])
+    return identifiers
+
+
+def _identity_matches(card: dict, identity: dict) -> bool:
+    constraints = card.get("identity_constraints")
+    if type(constraints) is not dict:
+        raise KnowledgeError(
+            f"knowledge card identity constraints are invalid: {card.get('id')}"
+        )
+    architectures = constraints.get("gpu_architecture", [])
+    if architectures and identity["gpu_architecture"] not in architectures:
+        return False
+    cuda_versions = constraints.get("cuda_runtime_version", [])
+    if cuda_versions and identity["cuda_version"] not in cuda_versions:
+        return False
+    framework_constraints = constraints.get("framework_versions", {})
+    if type(framework_constraints) is not dict:
+        raise KnowledgeError(
+            f"knowledge card framework constraints are invalid: {card.get('id')}"
+        )
+    for name, allowed in framework_constraints.items():
+        if name not in identity["frameworks"]:
+            return False
+        if allowed and identity["frameworks"][name] not in allowed:
+            return False
+    claim_layers = constraints.get("claim_layers", [])
+    if (
+        type(claim_layers) is not list
+        or any(layer not in {"diagnostic", "kernel", "workload", "serving"} for layer in claim_layers)
+    ):
+        raise KnowledgeError(
+            f"knowledge card claim layers are invalid: {card.get('id')}"
+        )
+    if claim_layers and identity["claim_layer"] not in claim_layers:
+        return False
+    return True
+
+
+def _phenomena_match(card: dict, phenomena: list[str]) -> bool:
+    if not phenomena:
+        return True
+    exact = _observation_ids(card)
+    searchable = {
+        str(term).lower() for term in card.get("match_terms", []) if term
+    }
+    searchable.add(str(card.get("mechanism_key", "")).lower())
+    for phenomenon in phenomena:
+        if phenomenon in exact or phenomenon.lower() in searchable:
+            return True
+    return False
+
+
+def _projection(card: dict, sources: dict[str, dict]) -> dict:
+    projected = {
+        "id": card["id"],
+        "mechanism_key": card["mechanism_key"],
+        "status": card.get("status"),
+        "priority": card["priority"],
+        "mechanism": card.get("mechanism"),
+        "distinguishing_question": card.get("distinguishing_question"),
+        "cheapest_falsifier": card.get("cheapest_falsifier"),
+        "required_evidence": card.get("required_evidence", []),
+        "counter_signals": card.get("counter_signals", []),
+        "invalidators": card.get("invalidators", []),
+        "local_cases": card.get("local_cases", []),
+        "content_kind": card.get("content_kind"),
+        "sources": [
+            {
+                "id": source_id,
+                "title": sources[source_id]["title"],
+                "version": sources[source_id]["version"],
+                "last_verified": sources[source_id]["last_verified"],
+            }
+            for source_id in card["source_ids"]
+        ],
+    }
+    playbook = _validated_playbook(card)
+    if playbook is not None:
+        projected["playbook"] = playbook
+    return projected
+
+
+def query(value) -> dict:
+    request = _validate_request(value)
+    cards, sources, provenance = _load_knowledge()
+    mechanism_filter = set(request["mechanism_keys"])
+    candidates = [
+        card
+        for card in cards
+        if (not mechanism_filter or card["mechanism_key"] in mechanism_filter)
+        and _identity_matches(card, request["identity"])
+        and _phenomena_match(card, request["identity"]["phenomena"])
+    ]
+    candidates.sort(
+        key=lambda card: (
+            card["priority"],
+            card["mechanism_key"],
+            card["id"],
+        )
+    )
+    matches = []
+    seen_mechanisms = set()
+    context_bytes = 2
+    for card in candidates:
+        if len(matches) >= request["max_results"]:
+            break
+        if card["mechanism_key"] in seen_mechanisms:
+            continue
+        projected = _projection(card, sources)
+        proposed = matches + [projected]
+        size = len(_canonical_bytes(proposed))
+        if size > request["max_context_bytes"]:
+            continue
+        matches = proposed
+        seen_mechanisms.add(card["mechanism_key"])
+        context_bytes = size
+    return {
+        "status": "completed",
+        "matches": matches,
+        "context_bytes": context_bytes,
+        "truncated": len(matches) < len(candidates),
+        "provenance": provenance,
+        "identity_source": request["identity_source"],
+    }
+
+
+def _emit_error(error: BaseException) -> int:
+    print(
+        json.dumps(
+            {
+                "status": "rejected",
+                "error_code": "knowledge_query_invalid",
+                "error": str(error)[:1024],
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
+    return 2
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Query bounded local GPU optimization knowledge."
+    )
+    parser.add_argument("operation", choices=("query",))
+    parser.add_argument("--request", required=True)
+    args = parser.parse_args(argv)
+    try:
+        request = _strict_json(Path(args.request))
+        if request.get("operation") != args.operation:
+            raise KnowledgeError("CLI operation does not match request")
+        result = query(request)
+    except (KnowledgeError, OSError, ValueError) as error:
+        return _emit_error(error)
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 

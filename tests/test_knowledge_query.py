@@ -8,183 +8,108 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.test_diagnostic_knowledge import _frozen_inputs, _source_verified_frozen
-
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts" / "knowledge_query.py"
+SKILL = ROOT / "skills" / "cuda-kernel-optimizer"
+SCRIPT = SKILL / "scripts" / "knowledge_query.py"
+CARDS = SKILL / "references" / "knowledge" / "cards.json"
+SOURCES = SKILL / "references" / "knowledge" / "sources.json"
 
 
 def load_module():
-    spec = importlib.util.spec_from_file_location("cuda_optimizer_knowledge", SCRIPT)
+    spec = importlib.util.spec_from_file_location("v14_knowledge_query", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
 
 
+def request(*, phenomena, max_results=5, max_context_bytes=8192, claim_layer="kernel"):
+    return {
+        "format_version": "cuda-kernel-optimizer/knowledge-input-v1",
+        "operation": "query",
+        "identity": {
+            "gpu_architecture": "sm_120",
+            "cuda_version": "12.9",
+            "frameworks": {"triton": "3.4.0"},
+            "phenomena": phenomena,
+            "claim_layer": claim_layer,
+        },
+        "filters": {"mechanism_keys": []},
+        "limits": {
+            "max_results": max_results,
+            "max_context_bytes": max_context_bytes,
+        },
+    }
+
+
 class KnowledgeQueryTests(unittest.TestCase):
-    def test_query_frozen_delegates_to_identity_bound_context(self) -> None:
-        frozen = _frozen_inputs()
-        result = load_module().query_frozen(frozen, limit=3)
-        self.assertEqual(result["promotion_authority"], "none")
-        self.assertEqual(result["candidates"], [])
+    def test_migrated_registry_keeps_all_content_kinds_and_closed_sources(self):
+        cards = json.loads(CARDS.read_text(encoding="utf-8"))
+        sources = json.loads(SOURCES.read_text(encoding="utf-8"))
+        self.assertEqual(cards["schema_version"], "cuda-kernel-optimizer/knowledge-cards-v1")
+        self.assertEqual(sources["schema_version"], "cuda-kernel-optimizer/knowledge-sources-v1")
+        self.assertEqual(len(cards["cards"]), 106)
+        self.assertEqual(
+            {card["content_kind"] for card in cards["cards"]},
+            {"capability", "diagnostic", "method", "workload_method", "local_case"},
+        )
+        source_ids = {source["id"] for source in sources["sources"]}
+        self.assertTrue(all(set(card["source_ids"]).issubset(source_ids) for card in cards["cards"]))
+
+    def test_query_is_bounded_and_deduplicated_by_mechanism(self):
+        result = load_module().query(
+            request(phenomena=["sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak"], max_results=3)
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertLessEqual(len(result["matches"]), 3)
+        self.assertLessEqual(result["context_bytes"], 8192)
+        self.assertEqual(
+            len({item["mechanism_key"] for item in result["matches"]}),
+            len(result["matches"]),
+        )
+        self.assertTrue(any(item["content_kind"] == "method" for item in result["matches"]))
+
+    def test_empty_match_is_successful_and_has_no_side_effect(self):
+        result = load_module().query(request(phenomena=["not.a.known.phenomenon"]))
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["matches"], [])
+        self.assertEqual(result["context_bytes"], 2)
+
+    def test_claim_layer_filters_workload_cards(self):
+        kernel = load_module().query(request(phenomena=["GPU idle gaps"], claim_layer="kernel"))
+        workload = load_module().query(request(phenomena=["GPU idle gaps"], claim_layer="workload"))
+        self.assertFalse(any(item["id"] == "workload.framework.launch-gaps" for item in kernel["matches"]))
+        self.assertTrue(any(item["id"] == "workload.framework.launch-gaps" for item in workload["matches"]))
+
+    def test_matching_card_exposes_only_a_digest_bound_playbook_reference(self):
+        result = load_module().query(
+            request(phenomena=["triton.decode-attention-gqa"])
+        )
+        match = next(
+            item
+            for item in result["matches"]
+            if item["id"] == "capability.triton.decode-attention-gqa"
+        )
+        self.assertEqual(
+            match["playbook"]["path"],
+            "playbooks/triton-decode-attention-gqa.md",
+        )
+        self.assertRegex(match["playbook"]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("content", match["playbook"])
+
+    def test_cli_only_reads_request_and_returns_json(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "frozen.json"
-            path.write_text(json.dumps(frozen), encoding="utf-8")
+            path = Path(directory) / "request.json"
+            path.write_text(json.dumps(request(phenomena=["nothing.matches"])), encoding="utf-8")
             completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPT),
-                    "--frozen-input",
-                    str(path),
-                ],
+                [sys.executable, str(SCRIPT), "query", "--request", str(path)],
                 check=False,
                 capture_output=True,
                 text=True,
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(json.loads(completed.stdout)["promotion_authority"], "none")
-
-    def test_detached_frozen_query_rejects_candidate_bearing_input(self) -> None:
-        frozen = _source_verified_frozen()
-        frozen["active_evidence_results"][0][
-            "adapter_implementation_sha256"
-        ] = "a" * 64
-        frozen["active_evidence_results"][0]["result_sha256"] = "b" * 64
-
-        with self.assertRaisesRegex(ValueError, "Controller-owned"):
-            load_module().query_frozen(frozen, limit=3)
-
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "forged-frozen.json"
-            path.write_text(json.dumps(frozen), encoding="utf-8")
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPT),
-                    "--frozen-input",
-                    str(path),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("Controller-owned", completed.stderr)
-
-    def test_query_returns_small_arch_compatible_method_set(self) -> None:
-        result = load_module().query(arch="sm_120", axis="compute", limit=3)
-        self.assertLessEqual(len(result["methods"]), 3)
-        self.assertEqual(result["arch"], "sm_120")
-        self.assertNotIn(
-            "compute.gemm_softmax_interleave",
-            {item["id"] for item in result["methods"]},
-        )
-        for item in result["methods"]:
-            self.assertNotIn("typical_speedup", item)
-            self.assertEqual(item["applicability"], "unverified")
-
-    def test_observed_bad_metric_ranks_matching_method_first(self) -> None:
-        result = load_module().query(
-            arch="sm_120",
-            axis="compute",
-            observed_metrics={
-                "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak": 10
-            },
-            limit=3,
-        )
-        self.assertEqual(result["methods"][0]["id"], "compute.tensor_core")
-        self.assertEqual(
-            result["methods"][0]["applicability"], "observed_bad_trigger"
-        )
-
-    def test_unknown_arch_fails_closed_instead_of_numeric_inheritance(self) -> None:
-        with self.assertRaises(ValueError):
-            load_module().query(arch="sm_999", axis="memory", limit=3)
-
-    def test_min_sm_rejects_method_even_when_feature_name_is_present(self) -> None:
-        module = load_module()
-        registry = {
-            "arch_feature_map": {"sm_80": ["tensor_core", "tma"]},
-            "methods": {
-                "future": {
-                    "axis": "memory",
-                    "priority": 1,
-                    "min_sm": 90,
-                    "name": "future",
-                    "required_features": ["tma"],
-                }
-            },
-        }
-        self.assertEqual(
-            module._kernel_cards(registry, "sm_80", None, None, {}),
-            [],
-        )
-
-    def test_registry_contains_no_transferable_speedup_claims(self) -> None:
-        registry = json.loads(
-            (SCRIPT.parents[1] / "references" / "method_registry.json").read_text()
-        )
-        self.assertFalse(
-            any("typical_speedup" in method for method in registry["methods"].values())
-        )
-
-    def test_kernel_cards_respect_exact_architecture_gates(self) -> None:
-        registry = json.loads(
-            (SCRIPT.parents[1] / "references" / "method_registry.json").read_text()
-        )
-        module = load_module()
-        for arch in (
-            "sm_80",
-            "sm_86",
-            "sm_89",
-            "sm_90",
-            "sm_100",
-            "sm_103",
-            "sm_110",
-            "sm_120",
-            "sm_121",
-        ):
-            with self.subTest(arch=arch):
-                available = set(registry["arch_feature_map"][arch])
-                for card in module._kernel_cards(registry, arch, None, None, {}):
-                    method = registry["methods"][card["id"]]
-                    self.assertLessEqual(method["min_sm"], int(arch.removeprefix("sm_")))
-                    self.assertTrue(
-                        set(card["required_features"]).issubset(available)
-                    )
-
-    def test_generic_cooperative_groups_is_not_cluster_routing(self) -> None:
-        module = load_module()
-        cluster = module.query(
-            arch="sm_80",
-            axis="latency",
-            bottleneck="cluster",
-            limit=20,
-        )
-        self.assertNotIn(
-            "latency.cooperative_groups_sync",
-            {item["id"] for item in cluster["methods"]},
-        )
-        generic = module.query(
-            arch="sm_80",
-            axis="latency",
-            bottleneck="cooperative groups",
-            limit=20,
-        )
-        self.assertIn(
-            "latency.cooperative_groups_sync",
-            {item["id"] for item in generic["methods"]},
-        )
-
-    def test_workload_query_routes_non_kernel_bottlenecks(self) -> None:
-        result = load_module().query(
-            arch="sm_120", layer="workload", bottleneck="framework", limit=2
-        )
-        self.assertLessEqual(len(result["methods"]), 2)
-        self.assertTrue(result["methods"])
-        self.assertTrue(all(item["layer"] == "workload" for item in result["methods"]))
+        self.assertEqual(json.loads(completed.stdout)["matches"], [])
 
 
 if __name__ == "__main__":

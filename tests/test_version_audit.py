@@ -66,36 +66,28 @@ def valid_payload():
 
 
 class VersionAuditTests(unittest.TestCase):
-    def run_audit(self, payload=None, *, raw=None, output_symlink=False):
+    def run_audit(self, payload=None, *, raw=None):
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
             source = root / "input.json"
-            output = root / "output.json"
             source.write_text(raw if raw is not None else json.dumps(payload))
-            if output_symlink:
-                target = root / "outside.json"
-                target.write_text("unchanged")
-                output.symlink_to(target)
             result = subprocess.run(
-                [sys.executable, str(SCRIPT), "--input", str(source), "--out", str(output)],
+                [sys.executable, str(SCRIPT), "--input", str(source)],
                 text=True,
                 capture_output=True,
             )
-            report = None
-            if output.exists() and not output.is_symlink():
-                report = json.loads(output.read_text())
-            outside = (root / "outside.json").read_text() if output_symlink else None
-            return result, report, outside
+            report = json.loads(result.stdout) if result.stdout else None
+            return result, report
 
     def test_accepts_pure_fresh_stack_upgrade(self):
-        result, report, _ = self.run_audit(valid_payload())
+        result, report = self.run_audit(valid_payload())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(report["passed"])
 
     def test_rejects_confounded_custom_backend(self):
         payload = valid_payload()
         payload["candidate"]["frozen"]["custom_backend_sha256"] = "f" * 64
-        result, report, _ = self.run_audit(payload)
+        result, report = self.run_audit(payload)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("frozen_mismatch:custom_backend_sha256", report["reasons"])
 
@@ -108,14 +100,14 @@ class VersionAuditTests(unittest.TestCase):
             else:
                 payload[field] = False
                 reason = "timing_started_before_self_repeat_stability"
-            result, report, _ = self.run_audit(payload)
+            result, report = self.run_audit(payload)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(reason, report["reasons"])
 
     def test_rejects_cross_stack_engine_reuse(self):
         payload = valid_payload()
         payload["reuse_engine_across_stacks"] = True
-        result, report, _ = self.run_audit(payload)
+        result, report = self.run_audit(payload)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("engine_reused_across_stacks", report["reasons"])
 
@@ -129,39 +121,54 @@ class VersionAuditTests(unittest.TestCase):
                 payload["invalid_evidence_ids"].append(evidence_id)
             else:
                 payload[field].append(evidence_id)
-            result, report, _ = self.run_audit(payload)
+            result, report = self.run_audit(payload)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("invalid_evidence_referenced:%s" % evidence_id, report["reasons"])
 
     def test_rejects_unknown_duplicate_and_nonfinite_json(self):
         payload = valid_payload()
         payload["unknown"] = True
-        result, report, _ = self.run_audit(payload)
+        result, report = self.run_audit(payload)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unexpected_field:root.unknown", report["reasons"])
 
         raw = json.dumps(valid_payload())[:-1] + ',"schema_version":"duplicate"}'
-        result, report, _ = self.run_audit(raw=raw)
+        result, report = self.run_audit(raw=raw)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("duplicate JSON key", result.stderr)
         self.assertIsNone(report)
 
         raw = json.dumps(valid_payload()).replace('"timing_started": true', '"timing_started": NaN')
-        result, report, _ = self.run_audit(raw=raw)
+        result, report = self.run_audit(raw=raw)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("JSON number must be finite", result.stderr)
         self.assertIsNone(report)
 
-    def test_rejects_symlink_input_and_output_without_touching_target(self):
-        result, report, outside = self.run_audit(valid_payload(), output_symlink=True)
+    def test_cli_has_no_output_path_or_write_side_effect(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            source = root / "input.json"
+            source.write_text(json.dumps(valid_payload()))
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--input", str(source)],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(list(root.iterdir()), [source])
+
+    def test_rejects_input_larger_than_the_audit_boundary(self):
+        oversized = json.dumps(valid_payload()) + (" " * (4 * 1024 * 1024))
+        result, report = self.run_audit(raw=oversized)
+
         self.assertNotEqual(result.returncode, 0)
         self.assertIsNone(report)
-        self.assertEqual(outside, "unchanged")
+        self.assertIn("input exceeds byte limit", result.stderr)
 
     def test_timing_evidence_requires_timing_started(self):
         payload = valid_payload()
         payload["timing_started"] = False
-        result, report, _ = self.run_audit(payload)
+        result, report = self.run_audit(payload)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("measurement_evidence_without_timing", report["reasons"])
 

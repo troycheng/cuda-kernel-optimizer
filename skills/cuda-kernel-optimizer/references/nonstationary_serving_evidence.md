@@ -1,81 +1,28 @@
-# Nonstationary serving evidence
+# 非平稳服务环境中的测量
 
-Use this gate when already-collected serving measurements may have been affected
-by queue depth, load, cache state, power state, or another changing condition.
-It asks whether baseline and candidate were observed under comparable paired
-state. It does not run the workload and does not claim a performance gain.
+共享宿主机、真实流量和服务缓存会随时间变化。简单地先测 A、再测 B，可能把时段差异误判成代码收益。
 
-## Freeze the comparison first
+## 冻结测量设计
 
-The design must contain at least four blocks. Each block contains one baseline
-and one candidate segment, and the full plan balances AB/BA order using
-`site_randomized_balanced`. The user or site planner owns that randomized plan;
-the optimizer must not rearrange it after seeing results.
+- 使用交替的 AB/BA block，并在开始前固定顺序与随机种子；
+- 为每个 block 保留原始样本、时间戳、角色和 phase；
+- 在看结果前声明 burn-in、pair 数量、排除规则和环境容差；
+- 同时记录 GPU 时钟、温度、功耗、队列、并发、服务实例、缓存状态和流量分层中实际可得的 guard；
+- original 与 Candidate 必须走同一请求路径和统计口径。
 
-Before collection, create the anchor beside the design. The CLI writes it once
-and refuses to replace it:
+## 可比较性
 
-```bash
-python3 <skill>/scripts/nonstationarity_guard.py init \
-  --design nonstationarity-design.json \
-  --anchor nonstationarity-anchor.json
-```
+只有 A/B 两个角色的环境差异在预先声明的容差内，pair 才能用于性能推断。环境异常样本可以保留并标注无效，但不能删除原始顺序后只留下“干净”聚合值。
 
-The create-once anchor binds both the design file bytes and its canonical
-semantic digest. `check` reads the design through that anchor; changing a
-tolerance and recomputing the digest inside the series cannot rescue the run.
+常见污染包括：
 
-Automatic comparability requires fixed-duration time windows. Freeze the allowed
-duration range, the number of burn-in rows before each timed row, the minimum
-complete blocks, the primary metric, and every state dimension. Count windows
-may be recorded, but this gate returns an inconclusive result for them because a
-fixed request count can span materially different system states.
+- thermal 或 clock 漂移；
+- 队列深度、并发或 batch 分布变化；
+- cache 预热程度不同；
+- 部署实例、路由权重或依赖服务变化；
+- 请求 shape 或业务分层比例变化；
+- 监控、日志、编译或其他 GPU 任务插入。
 
-Each state dimension has two independent limits:
+如果有效 pair 不足、角色间 guard 系统性不同，或不同 phase 的效果方向不一致，结论应标为不确定。此时可以扩大同一冻结设计的样本，也可以换到更受控环境；不能只挑选有利时段。
 
-- pair tolerance compares the baseline and candidate timed rows in one block;
-- phase tolerance compares the last burn-in row with its following timed row.
-
-Both absolute and percent limits are enforced when both are present. `epsilon`
-only stabilizes the percent denominator; it is not a variance allowance.
-
-## Preserve chronology and raw evidence
-
-The normalized series must follow the frozen block, segment, role, burn-in, and
-timed-row order exactly. Missing, reordered, extra, or post-hoc excluded rows
-make the input invalid. A row declared unusable remains visible and prevents its
-block from satisfying the minimum.
-
-Bind the normalized series to the canonical design digest and to a relative raw
-source artifact. The CLI opens regular files without following symlinks and
-rehashes the raw source before evaluation. A changed source cannot be evaluated
-under the old identity.
-
-## Read-only decision
-
-```bash
-python3 <skill>/scripts/nonstationarity_guard.py check \
-  --anchor nonstationarity-anchor.json \
-  --series nonstationarity-series.json
-```
-
-`comparable_paired_state` means the predeclared rows satisfy duration, pair,
-phase, usability, and minimum-block checks. It permits the existing performance
-gate to evaluate the metric; it is not itself evidence of a speedup.
-
-`inconclusive_nonstationary` means the comparison must be redesigned or
-recollected. The result names the failed blocks and recommends the next
-experiment. It never changes host settings: `host_policy` remains
-`recommend_only`.
-
-Create-once protects against ordinary overwrite and post-hoc AI edits, not
-storage rollback by an actor that can delete the directory and recreate its
-history. Keep the anchor in a retained run directory or a site-owned immutable
-artifact store when that threat matters.
-
-Validate stored artifacts with:
-
-- `templates/nonstationarity_anchor.schema.json`
-- `templates/nonstationarity_design.schema.json`
-- `templates/nonstationarity_series.schema.json`
-- `templates/nonstationarity_verdict.schema.json`
+final audit 应重新使用 original 与当前 Champion，在相同服务身份和 workload 分布下验证。服务层结论必须同时说明收益区间、有效样本、污染检查、覆盖的流量范围和未覆盖风险。

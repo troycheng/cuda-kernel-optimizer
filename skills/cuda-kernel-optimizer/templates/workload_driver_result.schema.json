@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CUDA Kernel Optimizer driver result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "request_digest",
+    "target_id",
+    "execution_id",
+    "variant_digest",
+    "role",
+    "mode",
+    "case_id",
+    "artifacts",
+    "cleanup",
+    "driver_identity",
+    "environment"
+  ],
+  "properties": {
+    "protocol_version": {"const": "cuda-kernel-optimizer/driver-result-v1"},
+    "request_digest": {"$ref": "#/$defs/sha256"},
+    "target_id": {"$ref": "#/$defs/text"},
+    "execution_id": {"$ref": "#/$defs/text"},
+    "variant_digest": {"$ref": "#/$defs/sha256"},
+    "role": {"enum": ["original", "reference", "candidate"]},
+    "mode": {"enum": ["correctness", "measure", "combined"]},
+    "case_id": {"type": ["string", "null"]},
+    "artifacts": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "live_tasks"],
+      "properties": {
+        "status": {"const": "confirmed"},
+        "live_tasks": {"type": "array", "maxItems": 0}
+      }
+    },
+    "driver_identity": {"$ref": "#/$defs/sha256"},
+    "environment": {"$ref": "#/$defs/environment"},
+    "correctness": {"$ref": "#/$defs/correctness"},
+    "measurements": {"$ref": "#/$defs/measurements"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "correctness"}}},
+      "then": {
+        "required": ["correctness"],
+        "not": {"required": ["measurements"]}
+      }
+    },
+    {
+      "if": {"properties": {"mode": {"const": "measure"}}},
+      "then": {
+        "required": ["measurements"],
+        "not": {"required": ["correctness"]}
+      }
+    },
+    {
+      "if": {"properties": {"mode": {"const": "combined"}}},
+      "then": {"required": ["correctness", "measurements"]}
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "text": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "finite_number": {"type": "number"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "relative_path", "sha256"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\\\u0000]+$"
+        },
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gpu_uuids", "gpu_models", "gpu_architectures", "driver_version", "cuda_runtime_version", "frameworks", "container"],
+      "properties": {
+        "gpu_uuids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/text"}},
+        "gpu_models": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+        "gpu_architectures": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+        "driver_version": {"$ref": "#/$defs/text"},
+        "cuda_runtime_version": {"$ref": "#/$defs/text"},
+        "frameworks": {
+          "type": "object",
+          "propertyNames": {"minLength": 1, "maxLength": 4096},
+          "additionalProperties": {"$ref": "#/$defs/text"}
+        },
+        "container": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "identity"],
+          "properties": {"kind": {"$ref": "#/$defs/text"}, "identity": {"$ref": "#/$defs/text"}}
+        }
+      }
+    },
+    "correctness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "metrics"],
+      "properties": {
+        "status": {"enum": ["passed", "failed"]},
+        "metrics": {"type": "object", "additionalProperties": {"$ref": "#/$defs/finite_number"}}
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary", "constraints"],
+      "properties": {
+        "primary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "unit", "samples"],
+          "properties": {
+            "name": {"$ref": "#/$defs/text"},
+            "unit": {"$ref": "#/$defs/text"},
+            "samples": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/finite_number"}}
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "unit", "samples"],
+            "properties": {
+              "name": {"$ref": "#/$defs/text"},
+              "unit": {"$ref": "#/$defs/text"},
+              "samples": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/finite_number"}}
+            }
+          }
+        }
+      }
+    }
+  }
+}

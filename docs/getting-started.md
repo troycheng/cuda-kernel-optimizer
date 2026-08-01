@@ -1,103 +1,37 @@
-# Getting Started
+# Getting started
 
 ## Install with ChatGPT
 
-The reader does not run installation commands or project scripts by hand. Send
-this request in a ChatGPT coding session:
+The user does not run repository scripts manually. Send this request in a ChatGPT coding session:
 
-> Install `skills/cuda-kernel-optimizer` from [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer) at its latest published release tag. Install only that skill into the active skills directory, run its CPU/static `self_check`, and report the installed tag, commit, and destination. Do not use `main` unless I ask.
+> Install `skills/cuda-kernel-optimizer` from the latest published release tag of [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer). Install only that skill into the active skills directory. When replacing an existing version, keep its backup outside the active skills directory so only one skill with this name is loaded. Run the CPU/static self-check and report the tag, commit, and destination. Do not use the moving `main` branch unless I ask.
 
-Use the moving `main` branch only when deliberately testing unreleased changes.
-Start a new session after installation so the agent reloads the skill.
-
-## Run a 10-minute fit check
-
-Use this read-only check before selecting a formal optimization budget:
-
-> Use cuda-kernel-optimizer for a read-only fit check of this project. Spend at most 10 minutes. Do not edit source files, install packages, or change host settings. Confirm the test workload, correctness checks, benchmark, target GPU, and profiler access. Report the supported claim layer, blockers, missing evidence, and the first lowest-cost action. Do not claim a speedup.
-
-The check does not claim a speedup. It answers whether optimization can start,
-what result the current setup could support, and what must be prepared first.
+Open a new session after installation so the skill instructions reload.
 
 ## Prepare the task
 
-Provide as much of the following as currently exists. The skill first reports a
-claim ceiling and helps prepare missing foundations before formal optimization:
+Provide:
 
-1. A **runnable target**: kernel or application code, or an existing `.ncu-rep`.
-2. A **test workload**: a dataset, representative requests, or a replay that
-   reflects the performance target.
-3. **Correctness checks**: expected outputs, tolerances, accuracy criteria,
-   tests, or a validator.
-4. The **test environment**: target GPU, driver, toolchain, dependencies, and
-   access boundaries.
-5. A **performance goal**: latency, throughput, memory, cost, or another primary
-   KPI, including its direction and threshold.
-6. **Constraints**: accuracy, checksums, output quality, memory limits, and any
-   per-case requirements.
-7. The **allowed modification scope**: project paths and isolated environment
-   locations that may change.
+1. a runnable target: source, binary, deployment, or an existing exported profiler artifact;
+2. a test workload: dataset, representative requests, or replay;
+3. correctness checks: expected outputs, tolerances, tests, or accuracy criteria;
+4. a stable benchmark or service metric;
+5. the target GPU, toolchain, framework, and container identity;
+6. the performance objective, minimum useful effect, and constraints;
+7. the allowed modification scope and host-change boundary.
 
-The test workload must be supplied by the user and represent the real target.
-The skill does not download, invent, or replace it with a microbenchmark.
-Without one, the strongest possible result is a kernel-level claim.
+The test workload must be supplied by the user. The skill does not download, invent, or silently replace it with a microbenchmark.
 
-If the runnable target, correctness checks, or stable benchmark is missing,
-start with [Environment readiness](environment-readiness.md). Source-only work
-may produce useful hypotheses, but not a performance result.
+## Run a short fit check
 
-## What the AI does in a formal run
+> Use cuda-kernel-optimizer for a read-only fit check of this project. Spend at most 10 minutes. Do not edit source, install dependencies, or change host settings. Confirm the workload, correctness checks, benchmark, target GPU, and profiler access. Report blockers, the strongest currently supportable claim, and the lowest-cost next step. Do not claim a speedup.
 
-1. Freeze the workload, objective, constraints, environment, allowed paths, and
-   measurement policy.
-2. Run the project's original business baseline before testing a candidate.
-3. Build a performance model from the first global scan and report the benefit
-   ceiling, uncertainty, next action, and whether deeper work is worth its cost.
-4. Evaluate each candidate from the cheapest falsifier through correctness,
-   short paired timing, profiling when needed, and formal workload evidence.
-5. Keep a change only when its declared claim passes; otherwise restore the
-   previous implementation and record the stop reason.
-6. Report progress during long work and finish with the exact run directory.
+This check answers whether the project can be measured, what is missing, and whether formal optimization is worth starting.
 
-## Choose a budget
+## Start a formal run
 
-| Budget | Maximum wall time | Use it for |
-|---|---:|---|
-| `quick` | 45 minutes | Check an idea and narrow the candidate set |
-| `balanced` | 3 hours | Default search and validation depth |
-| `thorough` | 10 hours | Broader exploration and deeper evidence |
+> Use cuda-kernel-optimizer to optimize this Triton workload. Use my workload and correctness checks as authoritative. Optimize end-to-end latency with a 0.5% minimum useful effect. Modify only the specified directory and leave host settings unchanged. Run the original baseline first, then explain the main bottleneck, lowest-cost falsifier, and expected investment before implementing a candidate.
 
-These are ceilings. A task may stop earlier when it has a conclusive result, no
-eligible candidate remains, or required evidence is unavailable.
+ChatGPT freezes a Target, measures original, creates one explicit Experiment for each candidate, and invokes only the operations needed to test the current hypothesis. It reports progress for long operations and finishes with the artifact directory and terminal reason.
 
-Each budget also supplies a default stability policy: confidence and power
-targets, bootstrap count, minimum valid calibration pairs, and a recurring
-audit cadence. The frozen workload contract records the effective values, so a
-long run cannot silently relax them later. Users may override these values
-before the contract is frozen.
-
-## First request
-
-> Use cuda-kernel-optimizer to optimize the Triton kernel in this directory. Confirm the test workload, correctness checks, performance goal, constraints, allowed files, and target environment before profiling. Use the balanced budget and keep a change only when correctness and paired performance both pass.
-
-Next, select the matching [workflow](workflows.md) and review the
-[evidence and safety boundaries](evidence-and-safety.md). For work that may run
-for many iterations, also review the
-[long-running optimization loop](long-running-optimization.md).
-
-## Inspect the result
-
-Start with `<run-dir>/summary.md`. It states the terminal result, elapsed time,
-stop reason, retained or restored change, strongest supported claim, and missing
-evidence. Use `<run-dir>/itervN/decision.json` for the machine-readable
-correctness, performance, constraint, and evidence-integrity decision. Raw
-paired samples and manifests remain in the same run directory for audit.
-
-During diagnosis, `<run-dir>/active_diagnosis/investment_brief.json` is the
-shortest useful checkpoint. It records the current mechanism, supported benefit
-ceiling, uncertainty, cost class, and the one admitted next action. The adjacent
-`performance_model.json` contains the deterministic timing accounting behind it.
-
-A change is **merge-ready** only when the declared workload objective,
-correctness checks, constraints, and evidence integrity all pass. A
-kernel-only improvement is not merge-ready for an end-to-end workload claim.
+See [Preparing a workload and environment](environment-readiness.md) if the foundation is incomplete, and [Optimization workflow](workflows.md) for the durable records.

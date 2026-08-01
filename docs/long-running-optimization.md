@@ -1,103 +1,30 @@
 # Long-running optimization
 
-The long-running Controller is designed for optimization work that may take
-hours, cross many candidates, or resume after interruption. The AI still
-analyzes profiles and writes code, but it does not control the rules of the
-experiment.
+Long runs use the same V1.4 model as short runs. There is no separate long-run engine. ChatGPT retains optimization judgment; Invocation records make repeated operations observable and recoverable.
 
-The project release starts at V1.0.0. Labels such as 2.5, 3.0, and 3.1 in
-schemas and validation records identify pre-V1 protocol generations retained
-for compatibility; they are not project release versions.
+## User authorization
 
-## The control loop
+The user may bound elapsed work, GPU use, modification paths, risk, host actions, or the furthest validation layer. This is an authorization boundary, not a target to consume. Work should stop early when evidence is conclusive or expected value is low.
 
-```mermaid
-flowchart TD
-    user["User workload, objective, constraints"] --> contract["Workload Contract"]
-    contract --> calibration["Noise and MDE calibration"]
-    calibration --> controller["Deterministic Controller"]
-    controller --> evidence["Verified observations and execution map"]
-    evidence --> planner["AI states competing hypotheses"]
-    planner --> selector["Controller selects one evidence action"]
-    selector --> evidence
-    planner --> registry["Load a few matching cards"]
-    registry --> candidate["AI proposes one bounded candidate"]
-    candidate --> controller
-    controller --> measure["Correctness and paired measurement"]
-    measure --> ledger["Append-only ledger"]
-    ledger --> controller
-```
+Normal runs should need at most one planned authorization question after initial analysis. Unattended runs ask none within the granted scope. A new question is reserved for a material change in time, GPU cost, risk, host impact, or modification scope.
 
-The **Workload Contract** freezes the test workload, target files, correctness
-checks, metric, constraints, environment, budget, allowed paths, and host policy.
-Changing one of those identities starts a new run; it does not silently change
-the meaning of an existing result.
+## Dynamic investment
 
-The **Controller** owns the clock, budget, state transitions, evidence adapters,
-candidate admission, and ledger. The AI Planner can propose a hypothesis and a
-small change, but it cannot change the contract, rewrite history, or declare its
-own result successful.
+Before an expensive operation, ChatGPT compares:
 
-The **Capability Registry** is a small, searchable library of methods. Queries
-match exact architecture, task, observed signals, and available evidence before
-loading a playbook. A card can suggest what to try and how to disprove it; it
-cannot authorize execution or promotion.
+- the removable-time ceiling and minimum useful effect;
+- evidence for and against the current mechanism;
+- the specific uncertainty the operation can resolve;
+- measured build, correctness, benchmark, and profiler costs in the current environment;
+- implementation and validation difficulty;
+- remaining user authorization.
 
-Protocol generation 3.1 introduced the active-diagnosis loop between the first
-global scan and candidate admission. The Controller freezes user-owned evidence adapters, obtains available
-capabilities from the current readiness report, and deterministically chooses one
-request from the AI's competing hypotheses. The selected outcome has predefined
-support and opposition effects. Those effects, the artifact digest, equivalent-request
-history, and remaining profile budget become part of the next hash-bound context.
+The estimate should be a range with evidence, not a precise invented duration. If more work is valuable but outside authorization, ChatGPT reports the current evidence and asks once for the additional scope. It does not classify authorization exhaustion as a failed performance direction.
 
-Each run has an exclusive mutation lock. A completed request is idempotent on resume.
-An intent without a completion marker is never executed again or accepted manually;
-the run stops at `manual_recovery` and a child or new run is required. A direction
-experiment may use a project copy, but that copy is only cooperative isolation and
-does not contain untrusted code.
+## Invocation lifetime
 
-## Measuring whether small changes are visible
+Each operation records a request, events, heartbeat, result, elapsed time, stop reason, and cleanup status. Individual command and operation timeouts terminate the process group. V1.4 drivers may start only child tasks that remain in that group; remote or detached background tasks are outside the automatic execution contract. SSH or foreground disconnection does not erase the record; use the operation's `status` to inspect the terminal result.
 
-Before exploring candidates, the Controller replays baseline-only pairs and
-estimates measurement noise and the **minimum detectable effect**. The selected
-budget supplies a default confidence, power, bootstrap count, pair count, and
-audit cadence; advanced users may set them explicitly before the contract is
-frozen.
+If cleanup cannot be confirmed, conflicting work on the same GPU remains blocked until recovery verifies that no declared task is live. Retrying is explicit, and a completed equivalent result is reused instead of launching duplicate work.
 
-The result has three states:
-
-| State | Meaning | Action |
-|---|---|---|
-| `green` | Noise and MDE fit inside the minimum practical effect | Admit a candidate |
-| `yellow` | The current setup cannot distinguish the required effect | Pause candidates and replay or improve measurement |
-| `red` | A hard correctness or environment guard failed | Stop the run |
-
-Invalid pairs stay visible but do not contribute to the baseline or statistics.
-If no pair is valid, the result contains no invented timing value.
-
-## Staying on course
-
-Every candidate is registered before execution with its observation, hypothesis,
-expected metric, cost, kill condition, capability versions, and modification
-scope. Results are appended as `PASS`, `KILL`, `INCONCLUSIVE`, or `DEFERRED`.
-An interrupted run reconstructs state by replaying the complete ledger rather
-than trusting a mutable checkpoint.
-
-The contract field `audit_every_candidates` limits how many candidates may be
-registered between baseline audits. When it is reached, the run enters
-`AUDITING`. Only an audit tied to the same contract, calibration anchor, source,
-and environment can resume exploration. Online execution and ledger replay both
-enforce this rule.
-
-## External sources and models
-
-External search and independent AI review are optional. They can add current
-documentation, alternative explanations, and counterexamples after private
-material is removed. They cannot change the Workload Contract, operate the
-Controller, write the append-only ledger, or decide promotion. Offline runs use
-the bundled source manifest and capability cards; local correctness and
-measurement remain authoritative.
-
-For input requirements, see [Getting Started](getting-started.md). For result
-boundaries, see [Workflows](workflows.md) and
-[Evidence & Safety](evidence-and-safety.md).
+Progress updates should state what is running, what evidence is expected, and the next review point. A long period without a visible heartbeat is a task fault, not normal optimization behavior.

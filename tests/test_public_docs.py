@@ -20,36 +20,13 @@ PUBLIC_PAGES = (
 )
 
 
-def assert_in_order(testcase, text: str, markers: tuple[str, ...]) -> None:
-    positions = [text.index(marker) for marker in markers]
-    testcase.assertEqual(positions, sorted(positions))
-
-
 class PublicDocsTests(unittest.TestCase):
-    def test_public_navigation_contract(self) -> None:
+    def test_public_navigation_and_relative_links(self) -> None:
         config = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
-        assert_in_order(
-            self,
-            config,
-            (
-                "index.md",
-                "getting-started.md",
-                "environment-readiness.md",
-                "workflows.md",
-                "long-running-optimization.md",
-                "evidence-and-safety.md",
-                "compatibility.md",
-                "validation.md",
-                "case-studies.md",
-                "knowledge-and-research.md",
-                "Agent Protocol",
-            ),
-        )
-        self.assertNotIn("superpowers", config.lower())
-        self.assertIn("stylesheets/extra.css", config)
-        self.assertIn("https://github.com/troycheng/cuda-kernel-optimizer", config)
-
-    def test_public_pages_and_relative_links(self) -> None:
+        self.assertNotIn("blob/main", config)
+        self.assertNotIn("Agent Protocol:", config)
+        for page in (Path(item).name for item in PUBLIC_PAGES):
+            self.assertIn(page, config)
         pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
         for relative in PUBLIC_PAGES:
             path = ROOT / relative
@@ -58,241 +35,122 @@ class PublicDocsTests(unittest.TestCase):
                 if "://" in target or target.startswith("#"):
                     continue
                 resolved = (path.parent / target.split("#", 1)[0]).resolve()
-                self.assertTrue(resolved.exists(), f"missing docs link: {target}")
+                self.assertTrue(resolved.exists(), f"{path}: {target}")
 
-    def test_getting_started_defines_inputs_and_installation(self) -> None:
-        text = (ROOT / "docs/getting-started.md").read_text(encoding="utf-8")
+    def test_public_docs_use_only_the_v14_model(self) -> None:
+        prose = "\n".join(
+            (ROOT / relative).read_text(encoding="utf-8")
+            for relative in PUBLIC_PAGES
+        ).lower()
+        for legacy in (
+            "controller",
+            "orchestrator",
+            "planner",
+            "checkpoint",
+            "append-only ledger",
+            "active_diagnosis",
+            "direction admission",
+            "run-level grant",
+            "v2.5",
+            "v3.1",
+        ):
+            self.assertNotIn(legacy, prose)
+        for current in (
+            "target",
+            "variant",
+            "experiment",
+            "invocation",
+            "champion",
+            "chatgpt",
+        ):
+            self.assertIn(current, prose)
+
+    def test_getting_started_and_readiness_define_user_inputs(self) -> None:
+        started = (ROOT / "docs/getting-started.md").read_text(encoding="utf-8")
+        readiness = (ROOT / "docs/environment-readiness.md").read_text(encoding="utf-8")
         for marker in (
-            "ChatGPT",
-            "skills/cuda-kernel-optimizer",
-            "runnable target",
             "test workload",
             "correctness checks",
-            "performance goal",
+            "stable benchmark",
+            "target GPU",
+            "minimum useful effect",
             "allowed modification scope",
-            "quick",
-            "balanced",
-            "thorough",
+            "backup outside the active skills directory",
         ):
-            self.assertIn(marker, text)
-        self.assertIn("must be supplied by the user", text)
-
-    def test_environment_readiness_is_ai_run_and_fail_closed(self) -> None:
-        public = (ROOT / "docs/environment-readiness.md").read_text(
-            encoding="utf-8"
-        )
-        agent = (
-            ROOT
-            / "skills"
-            / "cuda-kernel-optimizer"
-            / "references"
-            / "environment_readiness.md"
-        ).read_text(encoding="utf-8")
-        public_prose = " ".join(public.split())
+            self.assertIn(marker, started)
+        self.assertIn("must be supplied by the user", started)
         for marker in (
-            "The AI runs readiness automatically",
-            "user-provided workload",
-            "explicit authorization",
-            "required",
+            "readiness.py check",
+            "target.json",
+            "original Variant",
+            "command driver",
+            "Host changes",
+            "self-check",
+        ):
+            self.assertIn(marker, readiness)
+
+    def test_workflow_has_one_model_and_explicit_operations(self) -> None:
+        workflow = (ROOT / "docs/workflows.md").read_text(encoding="utf-8")
+        for marker in (
+            "one model-led workflow",
+            "Target",
+            "Variant",
+            "Experiment",
+            "Invocation",
+            "Champion Selection",
+            "Handoff",
+            "check",
             "baseline",
-            "hash-locked isolated pip",
-            "only automatic repair",
-            "host changes remain recommendations",
-            "self_check",
-            "does not prove that the GPU environment is ready",
-            "readiness_contract.schema.json",
-            "readiness_report.schema.json",
-            "ready",
-            "degraded",
-            "user_action_required",
-            "blocked",
+            "screen",
+            "target",
+            "select",
+            "final_audit",
         ):
-            self.assertIn(marker, public_prose)
-        agent_prose = " ".join(agent.split())
-        for marker in (
-            "Run capability readiness before baseline",
-            "required",
-            "isolated_pip",
-            "recommend_only",
-            "readiness_action",
-            "Do not ask the user to run these commands manually",
-        ):
-            self.assertIn(marker, agent_prose)
+            self.assertIn(marker, workflow)
+        self.assertIn("do not store the current optimization stage", workflow)
 
-    def test_workflows_define_four_distinct_claims(self) -> None:
-        text = (ROOT / "docs/workflows.md").read_text(encoding="utf-8")
+    def test_long_run_page_explains_dynamic_investment_without_frequent_questions(self) -> None:
+        text = (ROOT / "docs/long-running-optimization.md").read_text(encoding="utf-8")
         for marker in (
-            "Kernel optimization",
-            "Complete workload",
-            "Serving validation",
-            "Existing NCU report",
-            "kernel-level claim",
-            "end-to-end claim",
-            "read-only",
+            "authorization boundary, not a target to consume",
+            "at most one planned authorization question",
+            "Unattended runs ask none",
+            "removable-time ceiling",
+            "operation timeouts",
+            "terminal result",
+            "heartbeat",
         ):
             self.assertIn(marker, text)
 
-    def test_long_running_page_explains_contract_controller_and_cadence(self) -> None:
-        text = (ROOT / "docs/long-running-optimization.md").read_text(
-            encoding="utf-8"
-        )
-        for marker in (
-            "Workload Contract",
-            "Controller",
-            "Capability Registry",
-            "append-only ledger",
-            "minimum detectable effect",
-            "green",
-            "yellow",
-            "red",
-            "audit_every_candidates",
-            "External",
-        ):
-            self.assertIn(marker, text)
+    def test_evidence_knowledge_and_validation_boundaries_are_explicit(self) -> None:
+        evidence = (ROOT / "docs/evidence-and-safety.md").read_text(encoding="utf-8")
+        knowledge = (ROOT / "docs/knowledge-and-research.md").read_text(encoding="utf-8")
+        validation = (ROOT / "docs/validation.md").read_text(encoding="utf-8")
+        for marker in ("Correctness before performance", "Paired measurement", "fail closed", "ERR_NVGPUCTRPERM"):
+            self.assertIn(marker, evidence)
+        for marker in ("empty result", "does not block", "digest-bound path", "External availability is optional"):
+            self.assertIn(marker, knowledge)
+        self.assertIn("exact 17-module production surface", validation)
+        self.assertIn("does not embed a live test count", validation)
+        self.assertIn("CUDA_V14_HANDOFF_ROOT", validation)
+        self.assertNotIn("/data/triton-handoff", validation)
+        self.assertIn("recomputed statistics remained inconclusive", validation)
+        self.assertIn("historical `REJECT`, `REJECT`, and `STOP`", validation)
 
-    def test_workflows_keep_ai_iterations_on_performance_work(self) -> None:
-        text = (ROOT / "docs/workflows.md").read_text(encoding="utf-8")
-        for marker in (
-            "Performance-first iteration",
-            "falsifiable hypothesis",
-            "candidate_evaluated",
-            "measurement_blocked",
-            "infrastructure_only",
-            "performance_iteration.md",
-        ):
-            self.assertIn(marker, text)
-        for marker in (
-            "Direction admission",
-            "direction_guard.py",
-            "same-layer",
-            "full-elimination",
-            "unrankable",
-            "direction_admission.md",
-        ):
-            self.assertIn(marker, text)
+    def test_case_studies_do_not_publish_an_unreviewed_positive_example(self) -> None:
+        text = (ROOT / "docs/case-studies.md").read_text(encoding="utf-8")
+        self.assertIn("complete evidence", text)
+        self.assertIn("not as a positive public performance case", text)
+        self.assertNotRegex(text, r"\d+(?:\.\d+)?%")
 
-    def test_evidence_page_preserves_formal_boundaries(self) -> None:
-        text = (ROOT / "docs/evidence-and-safety.md").read_text(encoding="utf-8")
-        for marker in (
-            "performance_verdict",
-            "evidence_integrity",
-            "fail closed",
-            "shared-host",
-            "c1/c2/c4/c8/c12",
-            "self_check",
-            "CPU/static",
-            "does not validate a GPU environment",
-            "never changes host configuration automatically",
-        ):
-            self.assertIn(marker, text)
-
-    def test_compatibility_routes_to_canonical_reference(self) -> None:
-        text = (ROOT / "docs/compatibility.md").read_text(encoding="utf-8")
-        for marker in (
-            "CUDA",
-            "CUTLASS",
-            "Triton",
-            "Nsight Compute",
-            "references/compatibility.md",
-            "ERR_NVGPUCTRPERM",
-            "Python 3.10 and 3.12",
-            "POSIX",
-            "native Windows",
-            "Schema identities",
-        ):
-            self.assertIn(marker, text)
-
-    def test_validation_records_v3_1_readiness_without_speed_claim(self) -> None:
-        text = (ROOT / "docs/validation.md").read_text(encoding="utf-8")
-        for marker in (
-            "18 of 18",
-            "52.141",
-            "8.793",
-            "9.297",
-            "Nsys",
-            "ERR_NVGPUCTRPERM",
-            "not evidence that protocol generation 3.1 finds a useful direction faster",
-        ):
-            self.assertIn(marker, text)
-
-    def test_validation_records_v1_3_retained_case_release_gate(self) -> None:
-        text = (ROOT / "docs/validation.md").read_text(encoding="utf-8")
-        for marker in (
-            "six retained Triton decision points",
-            "All six observed diagnosis decisions",
-            "promoted four mechanisms",
-            "rejected two below the 1 us threshold",
-            "six retained-case Controller replays",
-            "3 of 4 promoted mechanisms",
-            "0 of 4",
-            "do not prove generalization to a new workload",
-            "db5d19c",
-            "parallel_nms_select_single_warp_latency",
-        ):
-            self.assertIn(marker, text)
-
-    def test_knowledge_page_explains_v1_3_runtime_authority(self) -> None:
-        text = (ROOT / "docs/knowledge-and-research.md").read_text(
-            encoding="utf-8"
-        ).lower()
-        for marker in (
-            "knowledge_context.json",
-            "semantic observations",
-            "promotion_authority",
-            "historical speedup",
-            "exact identity",
-            "fail closed",
-            "missing knowledge match",
-            "does not block",
-            "12 general mechanism families",
-            "post-adapter semantic routing contracts",
-            "does not parse raw nsys or pytorch reports",
-            "not physical performance validation",
-        ):
-            self.assertIn(marker, text)
-
-    def test_public_docs_distinguish_release_and_protocol_versions(self) -> None:
-        getting_started = (ROOT / "docs/getting-started.md").read_text("utf-8")
-        self.assertIn("troycheng/cuda-kernel-optimizer", getting_started)
-        self.assertNotIn("[troycheng/cuda-optimized-skill]", getting_started)
-        self.assertIn("published release tag", getting_started)
-        self.assertIn("moving `main` branch", getting_started)
-
-        long_running = (ROOT / "docs/long-running-optimization.md").read_text("utf-8")
-        self.assertIn("project release", long_running)
-        self.assertIn("protocol generation", long_running)
-        self.assertNotIn("Version 3.0 is designed", long_running)
-        self.assertNotIn("V3.1 adds", long_running)
-
-    def test_agent_docs_explain_adaptive_investment_boundaries(self) -> None:
-        skill = " ".join(
-            (ROOT / "skills/cuda-kernel-optimizer/SKILL.md").read_text("utf-8").split()
-        )
-        control = " ".join((
-            ROOT
-            / "skills"
-            / "cuda-kernel-optimizer"
-            / "references"
-            / "long_running_control.md"
-        ).read_text("utf-8").split())
-
-        for marker in (
-            "A run grant is the boundary for the next action, not a target to consume:",
-            "Bundled knowledge, search, and external AI may only propose a locally falsifiable shadow direction.",
-            "A missing knowledge-card match does not block a model-proposed mechanism.",
-            "GitHub Copilot is for code and repository-specific review.",
-        ):
-            self.assertIn(marker, skill)
-        for marker in (
-            "The benefit upper bound is removable-time headroom, not an expected gain.",
-            "In normal mode, ask at most once for aggregated authorization.",
-            "In unattended mode, ask zero questions.",
-        ):
-            self.assertIn(marker, control)
-
-    def test_internal_history_is_not_shipped_as_public_documentation(self) -> None:
+    def test_internal_history_is_not_public_documentation(self) -> None:
         self.assertFalse((ROOT / "maintainers").exists())
-        self.assertFalse((ROOT / "docs/superpowers").exists())
+        self.assertFalse((ROOT / "docs" / "superpowers").exists())
+
+    def test_docs_index_routes_to_the_installed_protocol_not_moving_main(self) -> None:
+        index = (ROOT / "docs" / "index.md").read_text(encoding="utf-8")
+        self.assertNotIn("blob/main", index)
+        self.assertIn("skills/cuda-kernel-optimizer/SKILL.md", index)
 
 
 if __name__ == "__main__":

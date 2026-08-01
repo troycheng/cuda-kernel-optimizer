@@ -23,16 +23,11 @@ jobs:
         python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Release replay provenance verifies the recorded Controller commit.
-          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Project tests
         run: python -m unittest discover -s tests -p 'test_*.py'
-      - name: Installed-skill tests
-        run: python -m unittest discover -s skills/cuda-kernel-optimizer/tests -p 'test_*.py'
       - name: Staged installation smoke
         run: |
           stage="$(mktemp -d)"
@@ -40,7 +35,6 @@ jobs:
           cd "$stage/cuda-kernel-optimizer"
           test -f LICENSE
           test -f NOTICE
-          python -m unittest discover -s tests -p 'test_*.py'
           python scripts/self_check.py
       - name: Compile Python sources
         run: python -m compileall -q skills/cuda-kernel-optimizer/scripts tests

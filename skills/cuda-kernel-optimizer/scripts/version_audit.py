@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -44,22 +45,11 @@ DERIVED_FIELDS = {"plugin_sha256", "engine_sha256", "timing_cache_sha256"}
 CORRECTNESS_FIELDS = {"passed", "evidence_id"}
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 EVIDENCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+MAX_INPUT_BYTES = 4 * 1024 * 1024
 
 
 class InputError(ValueError):
     pass
-
-
-def _load_artifact_store():
-    path = Path(__file__).with_name("artifact_store.py")
-    spec = importlib.util.spec_from_file_location("cuda_version_audit_store", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
-STORE = _load_artifact_store()
 
 
 def _pairs_without_duplicates(pairs):
@@ -77,7 +67,61 @@ def _invalid_number(token):
 
 def load_json(path):
     try:
-        raw = STORE.read_regular_bytes(path)
+        target = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory_fd = os.open(target.anchor, flags)
+        try:
+            for index, component in enumerate(target.parts[1:-1]):
+                # macOS root-owned compatibility aliases such as /var point
+                # into /private. Only that root boundary may be followed.
+                component_flags = flags if index == 0 else flags | nofollow
+                child = os.open(
+                    component,
+                    component_flags,
+                    dir_fd=directory_fd,
+                )
+                os.close(directory_fd)
+                directory_fd = child
+            descriptor = os.open(
+                target.name,
+                os.O_RDONLY | nofollow,
+                dir_fd=directory_fd,
+            )
+            try:
+                before = os.fstat(descriptor)
+                if not stat.S_ISREG(before.st_mode):
+                    raise InputError("input is not a regular non-symlink file")
+                if before.st_size > MAX_INPUT_BYTES:
+                    raise InputError("input exceeds byte limit")
+                chunks = []
+                total = 0
+                while True:
+                    chunk = os.read(descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_INPUT_BYTES:
+                        raise InputError("input exceeds byte limit")
+                    chunks.append(chunk)
+                after = os.fstat(descriptor)
+                if (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                ) != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                ) or total != before.st_size:
+                    raise InputError("input changed while reading")
+                raw = b"".join(chunks)
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(directory_fd)
         value = json.loads(
             raw.decode("utf-8"),
             object_pairs_hook=_pairs_without_duplicates,
@@ -210,12 +254,10 @@ def validate(payload):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
-    parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     try:
         payload = load_json(args.input)
         report = validate(payload)
-        STORE.atomic_write_json(args.out, report)
     except (InputError, OSError, ValueError) as error:
         print("error: %s" % error, file=sys.stderr)
         return 2

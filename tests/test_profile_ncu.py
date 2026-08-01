@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import os
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,397 +25,482 @@ def _load(name: str):
     return module
 
 
-class _FakeProfiler:
-    def __init__(self, calls) -> None:
-        self.calls = calls
+def _csv(*, bad_unit: bool = False) -> str:
+    rows = [
+        ("dram__throughput.avg.pct_of_peak_sustained_elapsed", "%", "75"),
+        ("dram__bytes.sum", "byte", "4,096"),
+        ("sm__warps_active.avg.pct_of_peak_sustained_active", "%", "61"),
+        ("sm__cycles_active.avg.pct_of_peak_sustained_elapsed", "%", "84"),
+        (
+            "sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active",
+            "%",
+            "47",
+        ),
+        (
+            "smsp__average_warp_latency_issue_stalled_barrier_per_warp_active.pct",
+            "%",
+            "9",
+        ),
+        (
+            "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct",
+            "cycle" if bad_unit else "%",
+            "32",
+        ),
+        ("unknown__future_metric", "widget", "3"),
+    ]
+    return '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n' + "".join(
+        f'"target_kernel","{name}","{unit}","{value}"\n'
+        for name, unit, value in rows
+    )
 
-    def cudaProfilerStart(self) -> None:
-        self.calls.append("start")
 
-    def cudaProfilerStop(self) -> None:
-        self.calls.append("stop")
+def _write_json(path: Path, value) -> None:
+    path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
 
 
-class _FakeCuda:
-    def __init__(self, calls) -> None:
-        self.calls = calls
-
-    def synchronize(self) -> None:
-        self.calls.append("sync")
+def _collection_fixture(temporary: str, *, counter_denied: bool = False) -> tuple[dict, dict, Path]:
+    """Create one frozen Target and fake NCU/driver pair for public collection."""
+    store = _load("artifact_store")
+    adapter = _load("workload_adapter")
+    root = Path(temporary) / "artifacts"
+    (root / "invocations" / "inv-baseline").mkdir(parents=True)
+    (root / ".locks").mkdir()
+    project = Path(temporary) / "project"
+    project.mkdir()
+    original = project / "original.json"
+    test_suite = project / "test-suite.json"
+    correctness = project / "correctness.json"
+    _write_json(original, {"implementation": "original"})
+    _write_json(test_suite, {"cases": [{"id": "main"}]})
+    _write_json(correctness, {"expected": "fixture"})
+    limits = {"max_files": 8, "max_total_bytes": 1024 * 1024, "max_wall_seconds": 2.0}
+    original_object = store.freeze_path(root, original, limits)
+    test_object = store.freeze_path(root, test_suite, limits)
+    correctness_object = store.freeze_path(root, correctness, limits)
+    events = project / "ncu-events.jsonl"
+    driver = project / "driver.py"
+    driver.write_text(
+        "\n".join(
+            [
+                "import argparse",
+                "import json",
+                "from pathlib import Path",
+                "parser = argparse.ArgumentParser()",
+                "parser.add_argument('--request', required=True)",
+                "request = json.loads(Path(parser.parse_args().request).read_text('utf-8'))",
+                "assert Path(request['variant']['locator']).exists()",
+                "assert Path(request['test_suite']['locator']).exists()",
+                "assert Path(request['correctness']['reference']['locator']).exists()",
+                "result = {",
+                "  'protocol_version': 'cuda-kernel-optimizer/driver-result-v1',",
+                "  'request_digest': request['request_digest'],",
+                "  'target_id': request['target_id'],",
+                "  'execution_id': request['execution_id'],",
+                "  'variant_digest': request['variant']['digest'],",
+                "  'role': request['role'],",
+                "  'mode': request['mode'],",
+                "  'case_id': request['case']['id'],",
+                "  'artifacts': [],",
+                "  'cleanup': {'status': 'confirmed', 'live_tasks': []},",
+                "  'driver_identity': request['driver_identity'],",
+                "  'environment': {",
+                "    'gpu_uuids': ['GPU-0'], 'gpu_models': ['Fixture GPU'],",
+                "    'gpu_architectures': ['sm_fixture'], 'driver_version': 'fixture',",
+                "    'cuda_runtime_version': 'fixture', 'frameworks': {},",
+                "    'container': {'kind': 'none', 'identity': 'fixture'},",
+                "  },",
+                "  'measurements': {'primary': {'name': 'latency_ms', 'unit': 'ms', 'samples': [1.0]}, 'constraints': []},",
+                "}",
+                "Path(request['output_path']).write_text(json.dumps(result, sort_keys=True), encoding='utf-8')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    ncu = project / "ncu"
+    ncu.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json, subprocess, sys",
+                "from pathlib import Path",
+                f"events = Path({str(events)!r})",
+                "args = sys.argv[1:]",
+                "with events.open('a', encoding='utf-8') as handle:",
+                "    handle.write(json.dumps(args) + '\\n')",
+                "if args == ['--version']:",
+                "    print('NVIDIA Nsight Compute version 2026.2.1')",
+                "elif '--import' in args:",
+                f"    Path(args[args.index('--log-file') + 1]).write_text({_csv()!r}, encoding='utf-8')",
+                "else:",
+                f"    if {counter_denied!r}:",
+                "        print('ERR_NVGPUCTRPERM', file=sys.stderr)",
+                "        raise SystemExit(1)",
+                "    Path(args[args.index('--export') + 1]).write_bytes(b'fixture-ncu-report')",
+                f"    subprocess.run(args[args.index({str(driver)!r}) - 1:], check=True)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(ncu, 0o700)
+    frozen_driver = adapter.validate_driver(
+        {
+            "command": [sys.executable, str(driver)],
+            "request_argument": "--request",
+            "execution_mode": "separate",
+            "protocol_version": adapter.DRIVER_PROTOCOL,
+            "profiler_capabilities": ["ncu_wrap_v1"],
+            "side_effects": [],
+            "cleanup_contract": {"kind": "process_group_only", "external_tasks": False},
+        }
+    )
+    original_variant = {
+        "role": "original",
+        "kind": "source_snapshot",
+        "digest": original_object["digest"],
+        "locator": original_object["locator"],
+    }
+    runtime_environment = {
+        "gpu_uuids": ["GPU-0"], "gpu_models": ["Fixture GPU"],
+        "gpu_architectures": ["sm_fixture"], "driver_version": "fixture",
+        "cuda_runtime_version": "fixture", "frameworks": {},
+        "container": {"kind": "none", "identity": "fixture"},
+    }
+    target = {
+        "record_type": "target", "format_version": "cuda-kernel-optimizer/target-v1",
+        "id": "target-collect", "target_mode": "optimization", "original": original_variant,
+        "driver": frozen_driver,
+        "test_suite": {"object_ref": test_object, "case_ids": ["main"]},
+        "correctness": {"reference": correctness_object, "method": "driver", "acceptance": {"metric": "exact_match", "operator": "greater_or_equal", "value": 1.0}},
+        "objective": {"primary_metric": {"name": "latency_ms", "unit": "ms"}, "constraints": []},
+        "environment": {"host": {"host_id": "fixture-host", "gpu_uuids": ["GPU-0"], "tools": {"ncu": {"path": str(ncu), "sha256": store.sha256_file(ncu)}}}, "runtime": runtime_environment},
+    }
+    target_path = root / "target.json"
+    store.create_regular_json(target_path, target)
+    target_ref = {"id": target["id"], "sha256": store.sha256_file(target_path)}
+    baseline = {
+        "operation": "baseline", "target_ref": target_ref, "execution_status": "succeeded",
+        "measurement_validity": "valid", "verdict": "passed", "cleanup_status": "confirmed",
+        "variant_refs": [original_variant],
+    }
+    baseline_path = root / "invocations" / "inv-baseline" / "result.json"
+    _write_json(baseline_path, baseline)
+    request = {
+        "format_version": "cuda-kernel-optimizer/ncu-input-v1", "operation": "collect",
+        "artifact_root": str(root), "target_ref": target_ref,
+        "baseline_ref": {"invocation_id": "inv-baseline", "sha256": hashlib.sha256(baseline_path.read_bytes()).hexdigest()},
+        "role": "original", "case_id": "main", "kernel_name_hints": ["target_kernel"],
+        "resources": {"host_id": "fixture-host", "gpu_uuids": ["GPU-0"]},
+        "operation_timeout_seconds": 5.0, "command_timeout_seconds": 1.0,
+        "resource_wait_timeout_seconds": 1.0, "cleanup_timeout_seconds": 1.0,
+        "launch_deadline": time.time() + 3.0,
+    }
+    return request, {"events": events, "root": root, "target": target, "driver": frozen_driver}, root
 
 
 class ProfileNcuTests(unittest.TestCase):
-    def test_ncu_profiles_only_the_explicit_target_range(self) -> None:
+    def test_public_collect_wraps_the_only_driver_argv_and_freezes_raw_facts(self) -> None:
         profile_ncu = _load("profile_ncu")
-        cmd = profile_ncu._build_profile_command(
-            ncu_bin="ncu",
-            rep_path="out.ncu-rep",
-            benchmark_py="benchmark.py",
-            solution="kernel.py",
-            dims={"M": 128},
-            warmup=3,
-            launch_count=1,
-        )
-        self.assertEqual(cmd[cmd.index("--profile-from-start") + 1], "off")
-        self.assertEqual(cmd[cmd.index("--launch-count") + 1], "1")
-        self.assertIn("--profile-only", cmd)
-        self.assertIn("--target-processes", cmd)
+        with tempfile.TemporaryDirectory() as temporary:
+            request, fixture, root = _collection_fixture(temporary)
+            request_path = Path(temporary) / "collect.json"
+            _write_json(request_path, request)
 
-    def test_profile_target_uses_start_then_one_call_then_stop(self) -> None:
-        benchmark = _load("benchmark")
-        calls = []
-        benchmark._profile_target_once(
-            lambda: calls.append("kernel"),
-            profiler=_FakeProfiler(calls),
-            cuda=_FakeCuda(calls),
-        )
-        self.assertEqual(calls, ["start", "kernel", "sync", "stop"])
-
-    def test_ncu_metric_query_does_not_claim_counter_permission(self) -> None:
-        check_env = _load("check_env")
-        with mock.patch.object(check_env.shutil, "which", return_value="/usr/bin/ncu"), mock.patch.object(
-            check_env,
-            "_run",
-            side_effect=[(0, "NVIDIA Nsight Compute 13.3", ""), (0, "metric", "")],
-        ):
-            result = check_env._detect_ncu()
-        self.assertTrue(result["metrics_query_available"])
-        self.assertIsNone(result["can_read_counters"])
-
-    def test_real_counter_permission_failure_is_recorded_in_state_and_env(self) -> None:
-        profile_ncu = _load("profile_ncu")
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            env_path = root / "env.json"
-            state_path = root / "state.json"
-            env = {"ncu": {"available": True, "can_read_counters": None}}
-            state = {
-                "env": env,
-                "env_path": str(env_path),
-            }
-            env_path.write_text(json.dumps(env), encoding="utf-8")
-            state_path.write_text(json.dumps(state), encoding="utf-8")
-
-            verdict, note = profile_ncu._counter_access_verdict(
-                1,
-                "==ERROR== ERR_NVGPUCTRPERM - permission denied",
-                report_exists=False,
-            )
-            profile_ncu._record_counter_access(
-                str(state_path), state, verdict, note
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "profile_ncu.py"),
+                    "collect",
+                    "--request",
+                    str(request_path),
+                    "--wait",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
 
-            recorded_state = json.loads(state_path.read_text(encoding="utf-8"))
-            recorded_env = json.loads(env_path.read_text(encoding="utf-8"))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["operation"], "collect")
+            self.assertEqual(result["execution_status"], "succeeded")
+            self.assertEqual(result["measurement_validity"], "valid")
+            self.assertNotIn("experiment_ref", result)
+            self.assertNotIn("correctness_ref", result)
+            frozen_request = json.loads((root / "invocations" / result["invocation_id"] / "request.json").read_text(encoding="utf-8"))
+            self.assertNotIn("experiment_ref", frozen_request)
+            self.assertNotIn("correctness_ref", frozen_request)
+            self.assertEqual(
+                [item["semantic_id"] for item in result["observations"]],
+                [
+                    "kernel.barrier_stall_pct",
+                    "kernel.dram_bytes",
+                    "kernel.dram_throughput_pct",
+                    "kernel.long_scoreboard_pct",
+                    "kernel.occupancy_pct",
+                    "kernel.sm_active_pct",
+                    "kernel.tensor_pipe_pct",
+                ],
+            )
+            provenance = result["provenance"]
+            self.assertEqual(provenance["tool"]["version"], "2026.2.1")
+            self.assertEqual(provenance["metrics"], list(profile_ncu._METRICS))
+            self.assertIn("driver_output", provenance)
+            self.assertIn("report", provenance)
+            self.assertIn("csv", provenance)
+            self.assertTrue((root / provenance["report"]["locator"]).is_dir())
+            self.assertTrue((root / provenance["csv"]["locator"]).is_dir())
+            ncu_events = [
+                json.loads(line)
+                for line in fixture["events"].read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(ncu_events[0], ["--version"])
+            self.assertEqual(
+                ncu_events[1][0:7],
+                [
+                    "--config-file", "off", "--metrics", ",".join(profile_ncu._METRICS),
+                    "--target-processes", "all", "--export",
+                ],
+            )
+            self.assertEqual(ncu_events[1][8:-2], fixture["driver"]["command"])
+            self.assertEqual(ncu_events[1][-2], fixture["driver"]["request_argument"])
+            self.assertTrue(Path(ncu_events[1][-1]).is_absolute())
+            self.assertEqual(ncu_events[2][0:3], ["--config-file", "off", "--import"])
+            self.assertTrue(Path(ncu_events[2][3]).is_absolute())
+            self.assertEqual(ncu_events[2][4:6], ["--csv", "--page"])
+            self.assertEqual(
+                ncu_events[2][6:12],
+                ["raw", "--print-units", "base", "--print-metric-name", "name", "--log-file"],
+            )
+            self.assertTrue(Path(ncu_events[2][12]).is_absolute())
+            self.assertNotEqual(
+                Path(ncu_events[2][3]),
+                Path(ncu_events[1][ncu_events[1].index("--export") + 1]),
+            )
 
-        self.assertFalse(recorded_state["env"]["ncu"]["can_read_counters"])
-        self.assertFalse(recorded_env["ncu"]["can_read_counters"])
-        self.assertEqual(recorded_env["ncu"]["counter_access_error"], "ERR_NVGPUCTRPERM")
+    def test_candidate_collect_missing_correctness_rejects_before_invocation_or_ncu(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            request, fixture, root = _collection_fixture(temporary)
+            request.update(
+                {
+                    "role": "candidate",
+                    "experiment_ref": {"id": "exp-fixture", "sha256": "a" * 64},
+                }
+            )
+            request_path = Path(temporary) / "candidate-collect.json"
+            _write_json(request_path, request)
+            before = sorted(path.name for path in (root / "invocations").iterdir())
 
-    def test_successful_real_profile_records_counter_access(self) -> None:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "profile_ncu.py"),
+                    "collect",
+                    "--request",
+                    str(request_path),
+                    "--wait",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("requires experiment_ref and correctness_ref", completed.stderr)
+            self.assertEqual(sorted(path.name for path in (root / "invocations").iterdir()), before)
+            self.assertFalse(fixture["events"].exists())
+
+    def test_collect_counter_permission_denied_is_an_invalid_measurement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            request, _fixture, _root = _collection_fixture(temporary, counter_denied=True)
+            request_path = Path(temporary) / "counter-denied.json"
+            _write_json(request_path, request)
+
+            completed = subprocess.run(
+                [
+                    sys.executable, str(SCRIPTS / "profile_ncu.py"), "collect",
+                    "--request", str(request_path), "--wait",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["execution_status"], "failed")
+            self.assertEqual(result["measurement_validity"], "invalid")
+            self.assertEqual(result["stop_reason"], "ncu_counter_access_denied")
+            self.assertEqual(result["observations"], [])
+            self.assertIn("ERR_NVGPUCTRPERM", result["diagnostic"]["error"])
+            self.assertEqual(result["provenance"]["tool"]["version"], "2026.2.1")
+            self.assertEqual(
+                [receipt["argv"][1] for receipt in result["provenance"]["command_receipts"]],
+                ["--version", "--config-file"],
+            )
+
+    def test_a_partial_metric_set_reports_only_the_metrics_that_exist(self) -> None:
         profile_ncu = _load("profile_ncu")
-        verdict, note = profile_ncu._counter_access_verdict(
-            0, "==PROF== Disconnected", report_exists=True
-        )
-        self.assertTrue(verdict)
-        self.assertIsNone(note)
-
-    def test_long_form_csv_is_normalized(self) -> None:
-        profile_ncu = _load("profile_ncu")
-        text = (
-            '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
-            '"target","dram__throughput.avg.pct_of_peak_sustained_elapsed","%","75"\n'
-        )
-        rows = profile_ncu._parse_ncu_csv(text)
-        self.assertEqual(rows[0]["Metric Name"], "dram__throughput.avg.pct_of_peak_sustained_elapsed")
-
-    def test_wide_form_csv_selects_target_kernel(self) -> None:
-        profile_ncu = _load("profile_ncu")
-        text = (
-            '"Kernel Name","gpu__time_duration.sum","dram__throughput.avg.pct_of_peak_sustained_elapsed"\n'
-            '"rng_setup","100","10"\n'
-            '"target_kernel","20","75"\n'
-        )
-        rows = profile_ncu._parse_ncu_csv(text, kernel_name_hints=["target_kernel"])
-        self.assertTrue(rows)
-        self.assertEqual({row["Kernel Name"] for row in rows}, {"target_kernel"})
-
-    def test_profile_csv_emits_stable_semantics_without_heuristic_axis(self) -> None:
-        profile_ncu = _load("profile_ncu")
-        text = (
-            '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
-            '"target","dram__throughput.avg.pct_of_peak_sustained_elapsed","%","75"\n'
-            '"target","smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct","%","32"\n'
-            '"target","unknown__metric","%","9"\n'
-        )
-
-        result = profile_ncu._semantic_ncu_observations(text, "2026.2")
-
-        self.assertEqual(
-            [item["semantic_id"] for item in result["semantic_observations"]],
-            ["kernel.dram_throughput_pct", "kernel.long_scoreboard_pct"],
-        )
-        self.assertNotIn("primary_axis", result)
-        self.assertEqual(
-            result["unmodeled_metrics"],
-            [{"metric_name": "unknown__metric", "reason": "unknown_metric"}],
-        )
-
-    def test_real_profile_csv_preserves_all_stable_raw_kernel_semantics(self) -> None:
-        profile_ncu = _load("profile_ncu")
-        rows = [
-            ("dram__bytes.sum", "byte", "4096"),
-            ("dram__throughput.avg.pct_of_peak_sustained_elapsed", "%", "75"),
-            (
-                "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct",
-                "%",
-                "32",
-            ),
-            (
-                "sm__warps_active.avg.pct_of_peak_sustained_active",
-                "%",
-                "61",
-            ),
-            (
-                "sm__cycles_active.avg.pct_of_peak_sustained_elapsed",
-                "%",
-                "84",
-            ),
-            (
-                "sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active",
-                "%",
-                "47",
-            ),
-            (
-                "smsp__average_warp_latency_issue_stalled_barrier_per_warp_active.pct",
-                "%",
-                "9",
-            ),
-        ]
         csv_text = (
             '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
-            + "".join(
-                f'"target","{metric}","{unit}","{value}"\n'
-                for metric, unit, value in rows
-            )
+            '"target_kernel","dram__bytes.sum","byte","4096"\n'
         )
 
-        result = profile_ncu._semantic_ncu_observations(csv_text, "2026.2")
+        result = profile_ncu.parse_ncu_csv(csv_text, "2026.2.1", [])
 
         self.assertEqual(
-            {
-                item["semantic_id"]
-                for item in result["semantic_observations"]
-            },
-            {
+            [item["semantic_id"] for item in result["observations"]],
+            ["kernel.dram_bytes"],
+        )
+
+    def test_supported_2026_2_long_csv_produces_only_stable_observations(self) -> None:
+        profile_ncu = _load("profile_ncu")
+
+        result = profile_ncu.parse_ncu_csv(_csv(), "2026.2.1", ["target_kernel"])
+
+        self.assertEqual(
+            [item["semantic_id"] for item in result["observations"]],
+            [
+                "kernel.barrier_stall_pct",
                 "kernel.dram_bytes",
                 "kernel.dram_throughput_pct",
                 "kernel.long_scoreboard_pct",
                 "kernel.occupancy_pct",
                 "kernel.sm_active_pct",
                 "kernel.tensor_pipe_pct",
-                "kernel.barrier_stall_pct",
-            },
+            ],
+        )
+        self.assertEqual(
+            result["unmodeled"],
+            [{"metric_name": "unknown__future_metric", "reason": "unknown_metric"}],
+        )
+        self.assertEqual(
+            next(item["value"] for item in result["observations"] if item["semantic_id"] == "kernel.dram_bytes"),
+            4096.0,
         )
 
-    def test_zero_raw_metrics_remain_stable_inputs_not_mechanism_positives(
-        self,
-    ) -> None:
+    def test_known_metric_with_wrong_unit_fails_closed(self) -> None:
         profile_ncu = _load("profile_ncu")
-        cards = json.loads(
-            (
-                SCRIPTS.parent / "references" / "diagnostic_cards.json"
-            ).read_text(encoding="utf-8")
-        )["cards"]
-        kernel_mechanisms = {
-            "global_memory_transactions",
-            "redundant_dram_traffic",
-            "memory_latency_hiding",
-            "register_or_shared_pressure",
-            "parallelism_or_wave_tail",
-            "compute_pipeline_or_dtype",
-            "synchronization_or_atomic_contention",
-        }
-        card_positives = {
-            rule["semantic_id"]
-            for card in cards
-            if card["mechanism_key"] in kernel_mechanisms
-            for rule in card["observation_rules"]["positive"]
-        }
-        metrics = [
-            ("dram__bytes.sum", "byte"),
-            ("dram__throughput.avg.pct_of_peak_sustained_elapsed", "%"),
-            (
-                "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct",
-                "%",
-            ),
-            ("sm__warps_active.avg.pct_of_peak_sustained_active", "%"),
-            ("sm__cycles_active.avg.pct_of_peak_sustained_elapsed", "%"),
-            (
-                "sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active",
-                "%",
-            ),
-            (
-                "smsp__average_warp_latency_issue_stalled_barrier_per_warp_active.pct",
-                "%",
-            ),
-        ]
-        csv_text = (
-            '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
-            + "".join(
-                f'"target","{metric}","{unit}","0"\n'
-                for metric, unit in metrics
+
+        with self.assertRaisesRegex(profile_ncu.NcuError, "unexpected_unit"):
+            profile_ncu.parse_ncu_csv(_csv(bad_unit=True), "2026.2", [])
+
+    def test_unknown_csv_column_is_retained_as_unmodeled(self) -> None:
+        profile_ncu = _load("profile_ncu")
+        csv_text = _csv().replace(
+            '"Kernel Name","Metric Name","Metric Unit","Metric Value"',
+            '"Kernel Name","Metric Name","Metric Unit","Metric Value","Future Field"',
+            1,
+        )
+        csv_text = "\n".join(
+            line + ',"x"' if index else line
+            for index, line in enumerate(csv_text.splitlines())
+        ) + "\n"
+
+        self.assertIn(
+            {"column_name": "Future Field", "reason": "unmodeled_column"},
+            profile_ncu.parse_ncu_csv(csv_text, "2026.2", [])["unmodeled"],
+        )
+
+    def test_public_analyze_materializes_the_frozen_report_and_writes_facts(self) -> None:
+        profile_ncu = _load("profile_ncu")
+        store = _load("artifact_store")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "artifacts"
+            (root / "invocations").mkdir(parents=True)
+            (root / ".locks").mkdir()
+            report = Path(temporary) / "report.csv"
+            report.write_text(_csv(), encoding="utf-8")
+            report_object = store.freeze_path(
+                root,
+                report,
+                {"max_files": 1, "max_total_bytes": 1024 * 1024, "max_wall_seconds": 2.0},
             )
-        )
+            material = {
+                "sha256": report_object["digest"],
+                "kind": "report",
+                "tool": "ncu",
+                "tool_version": "2026.2.1",
+                "dialect": "ncu-csv-long-v1",
+                "object_ref": report_object,
+            }
+            material_identity = {
+                key: material[key]
+                for key in ("kind", "tool", "tool_version", "dialect", "object_ref")
+            }
+            material["id"] = hashlib.sha256(
+                json.dumps(
+                    material_identity,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            target = {
+                "record_type": "target",
+                "format_version": "cuda-kernel-optimizer/target-v1",
+                "id": "diagnostic-target",
+                "target_mode": "diagnostic",
+                "diagnostic_materials": [material],
+            }
+            target_path = root / "target.json"
+            store.create_regular_json(target_path, target)
+            request = {
+                "format_version": "cuda-kernel-optimizer/ncu-input-v1",
+                "operation": "analyze",
+                "artifact_root": str(root),
+                "target_ref": {
+                    "id": target["id"],
+                    "sha256": hashlib.sha256(target_path.read_bytes()).hexdigest(),
+                },
+                "report_ref": {"id": material["id"], "sha256": material["sha256"]},
+                "kernel_name_hints": ["target_kernel"],
+                "resources": {"host_id": "test-host", "gpu_uuids": []},
+                "operation_timeout_seconds": 5.0,
+                "command_timeout_seconds": 1.0,
+                "resource_wait_timeout_seconds": 1.0,
+                "cleanup_timeout_seconds": 1.0,
+                "launch_deadline": time.time() + 3.0,
+            }
+            request_path = Path(temporary) / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            gpu_request = {
+                **request,
+                "resources": {
+                    "host_id": "test-host",
+                    "gpu_uuids": ["GPU-0"],
+                },
+            }
+            with self.assertRaisesRegex(
+                profile_ncu.NcuError,
+                "must not request GPU",
+            ):
+                profile_ncu._validate_analyze(gpu_request)
 
-        result = profile_ncu._semantic_ncu_observations(csv_text, "2026.2")
-        raw_semantics = {
-            item["semantic_id"] for item in result["semantic_observations"]
-        }
+            completed = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPTS / "profile_ncu.py"),
+                    "analyze",
+                    "--request",
+                    str(request_path),
+                    "--wait",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
 
-        self.assertEqual(len(raw_semantics), 7)
-        self.assertTrue(card_positives.isdisjoint(raw_semantics))
-
-    def test_profile_main_uses_actual_ncu_version_not_state_snapshot(self) -> None:
-        profile_ncu = _load("profile_ncu")
-        csv_text = (
-            '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
-            '"target","dram__throughput.avg.pct_of_peak_sustained_elapsed","%","75"\n'
-        )
-        cases = [
-            ("2026.3", "2026.2", ["kernel.dram_throughput_pct"]),
-            ("2026.2", "2026.3", []),
-        ]
-        for state_version, actual_version, expected_ids in cases:
-            with self.subTest(
-                state_version=state_version, actual_version=actual_version
-            ), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                solution = root / "kernel.py"
-                solution.write_text("def solve(): pass\n", encoding="utf-8")
-                ncu = root / "ncu"
-                ncu.write_text(
-                    "#!/bin/sh\n"
-                    f"printf 'NVIDIA Nsight Compute {actual_version}\\n'\n",
-                    encoding="utf-8",
-                )
-                ncu.chmod(0o700)
-                state_path = root / "state.json"
-                state_path.write_text(
-                    json.dumps(
-                        {
-                            "run_dir": str(root),
-                            "best_file": str(solution),
-                            "dims": {},
-                            "ptr_size": 0,
-                            "ncu_num": 5,
-                            "env": {
-                                "ncu": {
-                                    "available": True,
-                                    "path": str(ncu),
-                                    "version": state_version,
-                                }
-                            },
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-
-                def profile(**kwargs):
-                    Path(kwargs["rep_path"]).write_bytes(b"report")
-                    return 0, "profiled"
-
-                argv = [
-                    "profile_ncu.py",
-                    "--state",
-                    str(state_path),
-                    "--iter",
-                    "1",
-                    "--which",
-                    "best_input",
-                ]
-                with mock.patch.object(
-                    profile_ncu, "_run_ncu_profile", side_effect=profile
-                ), mock.patch.object(
-                    profile_ncu,
-                    "_import_metrics_csv",
-                    return_value=(0, csv_text, ""),
-                ), mock.patch.object(profile_ncu.sys, "argv", argv):
-                    profile_ncu.main()
-
-                result = json.loads(
-                    (root / "iterv1" / "ncu_top.json").read_text(encoding="utf-8")
-                )
-                self.assertEqual(
-                    [
-                        item["semantic_id"]
-                        for item in result["semantic_observations"]
-                    ],
-                    expected_ids,
-                )
-
-    def test_ncu_version_query_timeout_returns_none(self) -> None:
-        profile_ncu = _load("profile_ncu")
-        with mock.patch.object(
-            profile_ncu.subprocess,
-            "run",
-            side_effect=subprocess.TimeoutExpired(["ncu", "--version"], 2),
-        ) as run:
-            self.assertIsNone(profile_ncu._query_ncu_version("ncu", timeout=2))
-        run.assert_called_once_with(
-            ["ncu", "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=2,
-        )
-
-    def test_all_metric_sample_units_fail_closed_independent_of_row_order(self) -> None:
-        profile_ncu = _load("profile_ncu")
-        metric = "dram__throughput.avg.pct_of_peak_sustained_elapsed"
-        cases = [
-            (("%", ""), "missing_unit"),
-            (("", "%"), "missing_unit"),
-            (("%", "percent"), "inconsistent_units"),
-            (("percent", "%"), "inconsistent_units"),
-        ]
-        for units, reason in cases:
-            with self.subTest(units=units, reason=reason):
-                text = (
-                    '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
-                    f'"kernel-a","{metric}","{units[0]}","70"\n'
-                    f'"kernel-b","{metric}","{units[1]}","80"\n'
-                )
-                result = profile_ncu._semantic_ncu_observations(text, "2026.2")
-                self.assertEqual(result["semantic_observations"], [])
-                self.assertEqual(
-                    result["unmodeled_metrics"],
-                    [{"metric_name": metric, "reason": reason}],
-                )
-
-    def test_invalid_value_sample_cannot_hide_its_unit_failure(self) -> None:
-        profile_ncu = _load("profile_ncu")
-        metric = "dram__throughput.avg.pct_of_peak_sustained_elapsed"
-        cases = [
-            ((("%", "70"), ("", "invalid")), "missing_unit"),
-            ((("", "invalid"), ("%", "70")), "missing_unit"),
-            ((("%", "70"), ("percent", "invalid")), "inconsistent_units"),
-            ((("percent", "invalid"), ("%", "70")), "inconsistent_units"),
-        ]
-        for samples, reason in cases:
-            with self.subTest(samples=samples, reason=reason):
-                text = (
-                    '"Kernel Name","Metric Name","Metric Unit","Metric Value"\n'
-                    f'"kernel-a","{metric}","{samples[0][0]}","{samples[0][1]}"\n'
-                    f'"kernel-b","{metric}","{samples[1][0]}","{samples[1][1]}"\n'
-                )
-                result = profile_ncu._semantic_ncu_observations(text, "2026.2")
-                self.assertEqual(result["semantic_observations"], [])
-                self.assertEqual(
-                    result["unmodeled_metrics"],
-                    [{"metric_name": metric, "reason": reason}],
-                )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["measurement_validity"], "valid")
+            self.assertEqual(result["provenance"]["tool"]["version"], "2026.2.1")
+            self.assertNotIn("workload_adapter.py", [item["name"] for item in result["provenance"]["tool_identity"]["implementations"]])
+            self.assertFalse((root / "objects" / "sha256" / report_object["digest"] / "payload" / "report.csv").samefile(report))
 
 
 if __name__ == "__main__":

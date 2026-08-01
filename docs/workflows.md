@@ -1,101 +1,39 @@
-# Workflows
+# Optimization workflow
 
-Choose the workflow from the strongest claim your inputs can support. A faster
-kernel does not automatically establish a faster product workload.
+V1.4 has one model-led workflow. ChatGPT decides what to investigate and whether more work is worthwhile. Public tools execute one explicit operation and write facts; they do not call one another to plan the run.
 
-## Environment readiness
+## Durable model
 
-Use this path when the test workload, correctness checks, reproducible build,
-stable benchmark, or target access is incomplete. The skill reports the current
-claim ceiling and prepares project-local scaffolding rather than inventing
-missing inputs. See [Preparing a workload and test environment](environment-readiness.md).
+| Record | Meaning | Created by |
+|---|---|---|
+| Target | Frozen objective, original Variant, workload, correctness, driver, environment, and validity requirements | readiness `check` |
+| Variant | Immutable original or Candidate content | readiness or Experiment creation |
+| Experiment | One candidate mechanism, mutation, falsifier, measurement design, and acceptance boundary | workload `experiment` |
+| Invocation | One operation request, event stream, result, timeout, and cleanup outcome | the invoked tool |
+| Champion Selection | Explicit record that a valid formal result became the current best Variant | champion `select` |
+| Handoff | User-facing conclusion, retained changes, rejected directions, evidence gaps, and terminal reason | ChatGPT when pausing or finishing |
 
-## Direction admission
+These machine records describe facts and explicit selections. The Handoff summarizes them for the user and later ChatGPT sessions; tools never read it. They do not store the current optimization stage or a machine-generated next action.
 
-Before creating candidates, the AI uses `direction_guard.py` to decide whether
-the direction still has enough measured headroom. Automatic ranking is limited
-to same-layer additive time and uses a full-elimination ceiling. Cross-layer,
-throughput, and composite comparisons are `unrankable`; they need a separate
-experiment instead of invented weights. Closed directions stay closed unless
-new evidence meets the frozen reopen rules. See the
-[direction-admission contract](../skills/cuda-kernel-optimizer/references/direction_admission.md).
+## Typical path
 
-## Performance-first iteration
+1. `check`: freeze the Target and exercise the original correctness smoke.
+2. `baseline`: establish original performance before any candidate exists.
+3. ChatGPT analyzes source and observations, then chooses the lowest-cost evidence that can distinguish the leading hypotheses.
+4. `experiment`: freeze one Candidate and its measurement design.
+5. `screen`: run correctness and the declared short paired screen. Independent low-cost falsifiers are completed before the Experiment is created; a conclusive failure blocks later expensive work.
+6. A specific profiler `analyze` or `collect`: only when it answers an explicit unresolved question.
+7. `target`: perform formal paired comparison with original or the current Champion.
+8. `select`: explicitly record a passing Candidate as Champion.
+9. `final_audit`: compare original with the current Champion before the strongest workload or serving claim.
 
-Before the first candidate, freeze the baseline, environment, and prevalidated
-measurement paths in a create-once lineage anchor. Every round then begins with
-a falsifiable hypothesis and bounded candidate scope. Only a rehashed V2.5
-evidence closure can produce `candidate_evaluated`; `measurement_blocked` and
-`infrastructure_only` keep incomplete experiments separate from tool work.
+`status` and `cancel` inspect or stop an Invocation. They do not resume an optimization plan; ChatGPT reads the completed evidence and decides what to do next.
 
-Measurement support has a fixed time and repair budget. Once exhausted, the AI
-may use only a prevalidated fallback or stop that direction; it does not turn
-the optimization round into runner development. See the
-[performance-first iteration contract](../skills/cuda-kernel-optimizer/references/performance_iteration.md).
+## Different claim layers
 
-For a search that spans many candidates or sessions, the V3 Controller adds a
-frozen Workload Contract, baseline noise calibration, an append-only ledger,
-periodic champion replay, and deterministic recovery. See
-[Long-running optimization](long-running-optimization.md).
+- Kernel work uses runnable correctness checks and a stable kernel workload.
+- Complete-workload work includes framework, CPU, transfer, communication, I/O, and environment effects.
+- Serving work adds deployment identity, route coverage, traffic strata, queue/cache state, and environmental guards.
+- Existing profiler artifacts support read-only diagnosis only within their recorded identity and field coverage.
 
-## Kernel optimization
-
-Use this path for a CUDA, CUTLASS, or Triton implementation with runnable
-correctness checks. The skill can profile, inspect compiler and SASS evidence,
-change authorized kernel code, and run paired measurements.
-
-The result supports a **kernel-level claim** only. It does not establish serving
-latency, throughput, or cost without a test workload that represents the real
-target.
-
-## Complete workload
-
-Use this path when the bottleneck may be in kernels, framework scheduling, CPU
-processing, host-to-device transfers, communication, I/O, or the environment.
-The workload, validation command, objective, constraints, and mutation roots
-must be explicit.
-
-An **end-to-end claim** requires the supplied workload evaluation to pass. A
-kernel win may still be recorded even when the complete workload is unchanged,
-but it cannot promote the product result.
-
-## Serving validation
-
-Use this path to test whether an implementation change improves a serving KPI.
-The formal design freezes c1/c2/c4/c8/c12 strata, warmup and request counts,
-fresh-process behavior, HTTP or gRPC mode, QPS/average/P95/P99 metrics, server
-timing components, and per-stratum constraints.
-
-A valid result also needs shared-host cleanliness, serving-stack artifact
-identity, execution-path coverage, raw rows, and a sealed attempt. Performance
-and evidence integrity remain separate decisions.
-
-When load or runtime state may drift during collection, freeze a balanced AB/BA
-block plan and the state tolerances before measurement. The V2.8 read-only gate
-checks fixed-duration windows, burn-in transitions, paired state, chronology,
-and the raw-source digest. `comparable_paired_state` allows the existing
-performance gate to interpret the metric; it does not establish a win.
-`inconclusive_nonstationary` requires a redesigned or recollected experiment.
-See [Nonstationary serving evidence](../skills/cuda-kernel-optimizer/references/nonstationary_serving_evidence.md).
-
-## Existing NCU report
-
-Use this path when a `.ncu-rep` already exists and launching the profiled program
-is not allowed. The importer performs **read-only** analysis and records exact
-degradation when the report cannot be interpreted.
-
-Importing a report does not prove current NCU counter permission, current binary
-identity, or current environment cleanliness. Profiler output is diagnostic and
-cannot promote a candidate by itself.
-
-## Software-stack version comparison
-
-Use the single-variable audit when comparing Triton, TensorRT, CUDA, PyTorch,
-vLLM, or complete container-stack versions. Freeze source, inputs, objective,
-GPU, driver, build intent, and measurement design; rebuild derived engines,
-plugins, timing caches, and kernels separately in each stack. Correctness and
-self-repeat stability must pass before timing. See
-[Software-stack audit](../skills/cuda-kernel-optimizer/references/version_stack_audit.md).
-
-Review [Evidence & Safety](evidence-and-safety.md) before using a result for a
-performance decision.
+See [Evidence and safety](evidence-and-safety.md) before adopting a result.

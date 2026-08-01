@@ -1,28 +1,12 @@
-# Optimizer capability and limits
+# 能力边界
 
-The skill assumes the agent can reason about CUDA execution, memory hierarchy,
-occupancy, latency hiding, CUTLASS/CuTe, Triton, compiler IR, PTX/SASS, profiling,
-and common PyTorch or serving bottlenecks. That knowledge is useful for forming
-hypotheses, not for declaring target behavior without measurement.
+本 skill 能提高分析和执行的一致性，但不能凭空制造缺失的 workload、精度标准、硬件权限或稳定测量环境。
 
-## Limits that require evidence
+- 没有真实测试集，只能验证局部机制，不能声称完整业务收益。
+- 没有精度校验，不能接受任何性能候选。
+- profiler 无权限或格式未知时，只能降低结论强度或改用其他证据。
+- 离线知识库没有匹配时，ChatGPT 仍可分析源码、提出假设和设计实验；知识覆盖面不是优化准入条件。
+- 外部 AI 的意见不能替代本地精度和性能证据。
+- 宿主机变更默认只给建议，除非用户明确授权。
 
-- current compiler code generation and undocumented microarchitecture behavior;
-- proprietary operator semantics and hidden application constraints;
-- the target shape, data, concurrency, and request distribution;
-- CPU, GPU, network, scheduler, allocator, and I/O interactions;
-- whether a candidate improves the actual objective on the target machine.
-
-## How the skill compensates
-
-- capability detection instead of architecture inference;
-- compact profiler and workload summaries instead of raw-log intuition;
-- bottleneck-conditioned knowledge retrieval instead of global method priority;
-- explicit hypotheses, falsification tests, and bounded search;
-- correctness oracles, paired timing, identity binding, and claim ceilings;
-- strategy memory for failed methods and stop rules for exhausted directions;
-- optional independent challenge when local reasoning plateaus.
-
-The skill cannot compensate for a missing runnable target, representative input,
-correctness oracle, or measurement environment. In those cases it must surface
-the gap, help prepare the foundation, and stop below the unsupported claim.
+长时间优化应复查已经被拒绝的 Experiment、对应结果和 terminal reason，避免给同一机制换名字后重复消耗。复查的目标是判断新证据是否真正改变了结论，而不是维护另一份全局流程状态。

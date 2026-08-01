@@ -1,20 +1,7 @@
 # Case studies
 
-These are historical examples of how the workflow reached a decision. Their
-numbers apply only to the recorded code, inputs, environment, and objective.
+Case studies are published only when the original workload, correctness checks, environment identity, raw measurements, and terminal decision remain available. Their numbers apply only to that recorded identity and are not expected gains for a new project.
 
-## Reproducible workload fixture
+The V1.4 branch currently uses retained Triton material for regression validation, not as a positive public performance case. A new case will be added only after its complete evidence can be reviewed independently.
 
-The fixture's end-to-end latency improved by 60.4616% while its declared
-constraints passed. This demonstrates that the complete workflow can preserve a
-reference, measure a baseline and candidate, and retain a verified change. It
-does not set an expected gain for another project.
-
-## Existing Nsight Compute report
-
-The read-only importer parsed 140 metrics without launching the profiled
-program. The result supported diagnosis only: it did not establish current GPU
-counter permissions, binary identity, or environment cleanliness.
-
-See [Validation status](validation.md) for project checks rather than workload
-outcomes.
+See [Validation records](validation.md) for project checks.

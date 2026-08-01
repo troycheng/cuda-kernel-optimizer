@@ -1,62 +1,42 @@
-# Environment readiness and claim ceiling
+# 优化前的环境检查
 
-Use this workflow before optimization when the user has not supplied a runnable
-target, correctness checks, stable measurement path, or representative test
-workload. Do not invent any of them.
+`readiness.py check` 用于确认一次优化是否具备可运行、可校验、可比较的基础条件，并将这些条件冻结为 Target。它不会选择优化方向，也不会自动安装依赖。
 
-Run capability readiness before baseline. Do not ask the user to run these
-commands manually; the agent owns contract construction, bounded probes,
-report interpretation, and safe resume.
+## 优化 Target 必需输入
 
-## Readiness ladder
+- original：待优化代码、binary 或部署快照；
+- 测试集：真实数据集、代表性请求或可重复 replay；
+- 精度校验：期望输出、容差或业务精度标准；
+- command driver：读取封闭 request、执行一次 workload、写回封闭 result；
+- 性能目标：主要指标、方向、最低有效收益和约束；
+- 环境要求：目标 GPU 与必需工具；
+- 统计要求：最小配对数量、置信度和采样规则；
+- smoke：一次低成本精度检查；
+- 扫描上限：冻结文件的数量、总字节数和时间上限。
 
-| Available foundation | Strongest permitted result |
-|---|---|
-| Source only | Static hypotheses; no speed claim |
-| Source, correctness checks, reproducible build | Correctness and compiler evidence |
-| Stable kernel benchmark | Kernel performance claim |
-| Representative workload | End-to-end workload claim |
-| Frozen serving experiment | Serving KPI claim |
+诊断 Target 可以绑定已有 profiler 报告而不提供 workload，但输出只能是诊断事实，不能形成完整 workload 性能结论。
 
-Run `scripts/readiness.py` with a small JSON inventory. Set `requested_claim` to
-`kernel`, `workload`, or `serving`; omitted means `kernel`. `source_available`
-means the current task can read the source. The script accepts a path or stdin
-and reports only the missing foundation required for that target. Treat its
-`claim_ceiling` as an upper bound, not a target to stretch.
+## Command driver
 
-For a new Controller run, use `control-v2` and a closed readiness contract.
-Run foundation requirements before workload requirements. A failed `required`
-item must return `readiness_action`; do not load the baseline evaluator or start
-high-cost workload profiling. A failed diagnostic item may become `degraded`
-when a lower valid evidence layer remains.
+从 `templates/` 中的协议和示例开始适配。driver 是唯一的 workload 运行接口，它必须：
 
-## What to prepare
+- 严格校验 request 与 output path；
+- 读取指定 Variant、测试集和精度 reference；
+- 返回原始精度结果、性能样本、环境身份和清理状态；
+- 不自行选择候选、改变测试范围或安装依赖；
+- 不在未声明的位置留下后台任务。
 
-When the foundation is incomplete, help the user create project-local pieces:
+## 失败处理
 
-- correctness checks with representative cases, expected outputs, tolerances,
-  accuracy criteria, or a validator;
-- a reproducible build/import command in an isolated environment;
-- warmup, paired timing, raw samples, and a frozen aggregation rule;
-- a shape and request inventory approved by the user;
-- an adapter based on `templates/workload.py` and `scripts/workload_adapter.py`;
-- profiler collection commands and an environment capability report;
-- a remote-run checklist when the target GPU is elsewhere.
+以下问题应在修改代码前解决：
 
-The user owns workload representativeness, business objectives, and acceptable
-quality loss. The agent may propose a scaffold, but must ask the user to validate
-those facts before making an end-to-end claim.
+- original 本身无法通过精度校验；
+- 测试集不能代表用户要优化的真实目标；
+- driver 不能稳定产生原始样本；
+- 环境身份或 GPU 资源无法确认；
+- 关键工具缺失且没有等价证据路径；
+- 测量噪声大到无法识别最低有效收益。
 
-Do not change drivers, counter permissions, clocks, power limits, services, or
-host policy. Keep all host work `recommend_only`: report the exact blocker and
-provide a recommendation instead.
+普通 Python 工具可在用户授权的隔离环境中安装。驱动、GPU 权限、时钟、功耗、服务和容器运行时等宿主机变化默认只给建议。修复测试脚本或依赖不是一次性能迭代，应单独说明耗时和剩余风险。
 
-The only executable remediation is contract-authorized `isolated_pip` with a
-regular hash-locked requirements file and a fixed repair/time budget. It may
-write only to the approved isolated environment. Recompute the full environment
-identity and restart foundation probes after a successful install. If the
-requirements digest, interpreter identity, report marker, TTL, or environment
-identity changes unexpectedly, fail closed and keep the old run for audit.
-
-`self_check` is CPU/static packaging validation. It does not establish target
-GPU readiness.
+成功的 readiness 会生成 `target.json`、冻结 original object，并完成一次低成本 smoke。之后任何 operation 都必须显式引用同一个 Target。

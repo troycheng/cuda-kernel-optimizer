@@ -1,248 +1,32 @@
 from __future__ import annotations
 
-import hashlib
-import importlib
-import inspect
 import json
+import hashlib
+import importlib.util
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-from dataclasses import dataclass
 from pathlib import Path
+
+from tests.v14_support import V14Project, decode_stdout, write_json
 
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-BENCHMARK = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts" / "benchmark.py"
-CHECK_ENV = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts" / "check_env.py"
-SCRIPTS = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts"
 RUNNER = Path(__file__).resolve().parent / "remote" / "run_lane.sh"
 NCU_AUTHORIZED_RUNNER = (
     Path(__file__).resolve().parent / "remote" / "run_ncu_authorized_smoke.sh"
 )
 ARTIFACTS = Path(os.environ.get("CUDA_E2E_ARTIFACTS", "/tmp/cuda-sm120-acceptance"))
-WORKLOAD_CONTROLLER = SCRIPTS / "workload_controller.py"
-READINESS_SMOKE = FIXTURES / "readiness_smoke.py"
-DIAGNOSTIC_SCENARIOS = FIXTURES / "diagnostic_scenarios.py"
-
-
-@dataclass(frozen=True)
-class Case:
-    name: str
-    solution: str
-    reference: str
-    dims: tuple[str, ...]
-    extra: tuple[str, ...] = ()
-
-
-CASES = (
-    Case(
-        "triton_vector",
-        "triton_vector.py",
-        "triton_vector_ref.py",
-        ("--N=1048576",),
-    ),
-    Case(
-        "cuda_reduction",
-        "cuda_reduction.cu",
-        "cuda_reduction_ref.py",
-        ("--N=1048576",),
-        ("--ptr-size", "1048576"),
-    ),
-    Case(
-        "cutlass_gemm",
-        "cutlass_gemm.cu",
-        "cutlass_gemm_ref.py",
-        ("--M=512", "--N=512", "--K=512"),
-        ("--ptr-size", "262144"),
-    ),
-)
-
-
-def _run(command: list[str], json_path: Path) -> dict:
-    json_path = Path(json_path)
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        old = json_path.lstat()
-    except FileNotFoundError:
-        pass
-    else:
-        if stat.S_ISLNK(old.st_mode):
-            raise AssertionError(f"refusing symlink JSON output: {json_path}")
-        if not stat.S_ISREG(old.st_mode):
-            raise AssertionError(f"refusing non-regular JSON output: {json_path}")
-        json_path.unlink()
-    started_ns = time.time_ns()
-    completed = subprocess.run(command, text=True, capture_output=True)
-    if completed.returncode != 0:
-        raise AssertionError(
-            f"command failed ({completed.returncode}): {' '.join(command)}\n"
-            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
-        )
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(json_path, flags)
-    except OSError as error:
-        raise AssertionError(f"fresh JSON output is missing or unsafe: {json_path}") from error
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
-            raise AssertionError(f"fresh JSON output is not regular: {json_path}")
-        if opened.st_mtime_ns < started_ns:
-            raise AssertionError(f"JSON output is not fresh: {json_path}")
-        chunks = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        after = os.fstat(descriptor)
-        identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
-        if any(getattr(opened, field) != getattr(after, field) for field in identity_fields):
-            raise AssertionError(f"JSON output changed while reading: {json_path}")
-    finally:
-        os.close(descriptor)
-    try:
-        return json.loads(b"".join(chunks).decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as error:
-        raise AssertionError(f"fresh JSON output is invalid: {json_path}") from error
-
-
-def _load_script(name: str):
-    scripts = str(SCRIPTS)
-    if scripts not in sys.path:
-        sys.path.insert(0, scripts)
-    module = importlib.import_module(name)
-    expected = (SCRIPTS / f"{name}.py").resolve(strict=True)
-    actual = Path(module.__file__).resolve(strict=True)
-    if actual != expected:
-        raise ImportError(f"canonical module {name} resolved outside optimizer scripts")
-    return module
-
-
-def _fixture_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _stage_fixture_workspace(
-    name: str, *, artifacts=ARTIFACTS, fixtures=FIXTURES
-) -> Path:
-    if (
-        not isinstance(name, str)
-        or not name
-        or name in {".", ".."}
-        or any(
-            not (character.isalnum() or character in "._-")
-            for character in name
-        )
-    ):
-        raise ValueError("workspace name must contain only letters, digits, ., _, or -")
-    artifact_root = Path(artifacts).expanduser().resolve()
-    artifact_root.mkdir(parents=True, exist_ok=True)
-    artifact_root = artifact_root.resolve(strict=True)
-    fixture_root = Path(fixtures).expanduser().resolve(strict=True)
-    if not fixture_root.is_dir():
-        raise ValueError("fixtures must be a directory")
-    case_root = artifact_root / name
-    if case_root.is_symlink():
-        raise ValueError("artifact case directory must not be a symlink")
-    case_root.mkdir(parents=True, exist_ok=True)
-    if case_root.resolve(strict=True).parent != artifact_root:
-        raise ValueError("artifact case directory escapes the artifact root")
-    workspace = case_root / "workspace"
-    if workspace.is_symlink():
-        raise ValueError("artifact workspace must not be a symlink")
-    if workspace.exists():
-        shutil.rmtree(workspace)
-    shutil.copytree(
-        fixture_root,
-        workspace,
-        ignore=shutil.ignore_patterns(
-            "__pycache__", "*.pyc", "*.pyo", "*.so", "compiler_evidence", ".*"
-        ),
-    )
-    return workspace
+SCRIPTS = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts"
+PHYSICAL = os.environ.get("CUDA_SM120_E2E") == "1"
 
 
 class Sm120AcceptanceHelperTests(unittest.TestCase):
-    def test_fixture_workspace_copies_relative_dependencies_under_artifacts(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            fixtures = root / "source-fixtures"
-            fixtures.mkdir()
-            (fixtures / "kernel.cu").write_text("// source", encoding="utf-8")
-            (fixtures / "reference.py").write_text("# reference", encoding="utf-8")
-            (fixtures / "nested").mkdir()
-            (fixtures / "nested" / "helper.py").write_text(
-                "VALUE = 1", encoding="utf-8"
-            )
-            artifacts = root / "artifacts"
-
-            workspace = _stage_fixture_workspace(
-                "cuda_case", artifacts=artifacts, fixtures=fixtures
-            )
-            evidence = workspace / "compiler_evidence" / "manifest.json"
-            evidence.parent.mkdir()
-            evidence.write_text("{}", encoding="utf-8")
-
-            self.assertEqual(
-                workspace, artifacts.resolve() / "cuda_case" / "workspace"
-            )
-            self.assertEqual((workspace / "kernel.cu").read_text("utf-8"), "// source")
-            self.assertTrue((workspace / "nested" / "helper.py").is_file())
-            self.assertTrue(evidence.is_file())
-            self.assertFalse((fixtures / "compiler_evidence").exists())
-
-    def test_script_loader_reuses_canonical_workload_spec_class(self) -> None:
-        workload_adapter = _load_script("workload_adapter")
-        workload_evaluate = _load_script("workload_evaluate")
-
-        self.assertIs(workload_adapter, sys.modules["workload_adapter"])
-        self.assertIs(workload_evaluate, sys.modules["workload_evaluate"])
-        self.assertIs(
-            workload_adapter.WorkloadSpec, workload_evaluate.WorkloadSpec
-        )
-
-    def test_workload_acceptance_uses_production_outer_evidence_seam(self) -> None:
-        source = inspect.getsource(
-            Sm120AcceptanceTests.test_user_workload_smoke_produces_separate_outer_raw_evidence
-        )
-
-        self.assertIn("evaluate_outer_candidate", source)
-        self.assertIn("workload_paired_samples", source)
-        self.assertNotIn("write_paired_samples", source)
-
-    def test_run_never_reuses_a_stale_json_output(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            output = Path(tmp) / "result.json"
-            output.write_text('{"stale":true}', encoding="utf-8")
-
-            with self.assertRaisesRegex(AssertionError, "fresh|missing"):
-                _run([sys.executable, "-c", "pass"], output)
-
-            self.assertFalse(output.exists())
-
-    def test_run_rejects_symlink_output_without_touching_target(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            target = root / "outside.json"
-            output = root / "result.json"
-            target.write_text('{"outside":true}', encoding="utf-8")
-            try:
-                output.symlink_to(target)
-            except OSError:
-                self.skipTest("symlinks are unavailable")
-
-            with self.assertRaisesRegex(AssertionError, "symlink"):
-                _run([sys.executable, "-c", "pass"], output)
-
-            self.assertEqual(target.read_text("utf-8"), '{"outside":true}')
-
     def test_runner_contract_is_fail_closed_and_uses_immutable_image(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
 
@@ -252,6 +36,10 @@ class Sm120AcceptanceHelperTests(unittest.TestCase):
         self.assertIn("requested_ref", source)
         self.assertIn('"$resolved_image_id"', source)
         self.assertIn("must be empty", source)
+        self.assertNotIn("CUTLASS_PATH", source)
+        self.assertIn(
+            "retained replay root must not overlap writable artifacts", source
+        )
 
     def test_authorized_ncu_runner_is_explicit_ephemeral_and_does_not_change_host_policy(self) -> None:
         source = NCU_AUTHORIZED_RUNNER.read_text(encoding="utf-8")
@@ -267,18 +55,6 @@ class Sm120AcceptanceHelperTests(unittest.TestCase):
         self.assertNotIn("sysctl", source)
         self.assertNotIn("RmProfilingAdminOnly", source)
 
-    def test_runner_restricts_cutlass_to_the_dedicated_checkout(self) -> None:
-        source = RUNNER.read_text(encoding="utf-8")
-
-        self.assertIn("CUDA_E2E_ROOT", source)
-        self.assertIn("CUTLASS_PATH", source)
-        self.assertNotIn("/data/tcheng", source)
-        self.assertIn("include/cutlass/cutlass.h", source)
-        self.assertIn("include/cutlass/version.h", source)
-        self.assertIn('expected_cutlass_version="4.6.1"', source)
-        self.assertIn("vllm-opt", source)
-        self.assertIn('-v "$repo_root:$repo_root:ro"', source)
-
     def test_runner_rejects_a_writable_artifact_mount_inside_the_repository(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -286,22 +62,15 @@ class Sm120AcceptanceHelperTests(unittest.TestCase):
             runner = repository / "tests" / "gpu" / "sm120" / "remote" / "run_lane.sh"
             runner.parent.mkdir(parents=True)
             shutil.copy2(RUNNER, runner)
-            cutlass = root / "cutlass"
-            include = cutlass / "include" / "cutlass"
-            include.mkdir(parents=True)
-            (include / "cutlass.h").write_text("// fixture\n", encoding="utf-8")
-            (include / "version.h").write_text(
-                "#define CUTLASS_MAJOR 4\n"
-                "#define CUTLASS_MINOR 6\n"
-                "#define CUTLASS_PATCH 1\n",
-                encoding="utf-8",
-            )
+            handoff = root / "handoff"
+            handoff.mkdir()
+            (handoff / "blind-run-summary.json").write_text("{}\n", encoding="utf-8")
             environment = os.environ.copy()
             environment.update(
                 {
                     "CUDA_E2E_ROOT": str(root),
                     "CUDA_E2E_ARTIFACTS": str(repository / "writable"),
-                    "CUTLASS_PATH": str(cutlass),
+                    "CUDA_V14_HANDOFF_ROOT": str(handoff),
                 }
             )
 
@@ -315,1325 +84,257 @@ class Sm120AcceptanceHelperTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 2, completed.stderr)
             self.assertIn("must not overlap", completed.stderr)
 
-    def test_v2_4_lane_uses_the_production_workload_controller(self) -> None:
-        source = inspect.getsource(
-            Sm120AcceptanceTests.test_workload_controller_promotes_real_gpu_candidate
-        )
-        for marker in ("start_run", "register_change", "evaluate_change"):
-            self.assertIn(marker, source)
-        for fixture in (
-            "triton_vector_slow.py",
-            "workload_probe.py",
-            "workload_smoke.py",
-        ):
-            self.assertTrue((FIXTURES / fixture).is_file(), fixture)
-        adapter = (FIXTURES / "workload_smoke.py").read_text(encoding="utf-8")
-        self.assertIn("Mapping", adapter)
-        self.assertIn('candidate["path"]', adapter)
 
-    def test_v3_lane_uses_contract_bound_stability_control(self) -> None:
-        source = inspect.getsource(
-            Sm120AcceptanceTests.test_v3_real_pairs_drive_stability_state
+class Sm120V14Project(V14Project):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        marker = '{"value":1}\n'
+        (self.original / "implementation.json").write_text(marker, encoding="utf-8")
+        (self.candidate / "implementation.json").write_text(marker, encoding="utf-8")
+        shutil.copy2(FIXTURES / "triton_vector_slow.py", self.original / "kernel.py")
+        shutil.copy2(FIXTURES / "triton_vector.py", self.candidate / "kernel.py")
+        shutil.copy2(FIXTURES / "v14_workload_driver.py", self.driver)
+        write_json(
+            self.test_suite,
+            {"cases": [{"id": "main", "size": 1_048_576, "seed": 20260801}]},
         )
-        for marker in (
-            "run_paired",
-            "freeze_contract",
-            "stability.calibrate",
-            "apply_run_calibration",
-        ):
-            self.assertIn(marker, source)
-
-    def test_v3_1_lane_gates_real_workload_on_readiness(self) -> None:
-        source = inspect.getsource(
-            Sm120AcceptanceTests.test_readiness_gate_precedes_real_workload
+        write_json(
+            self.correctness_reference,
+            {"expression": "x*x+1", "atol": 1e-5},
         )
-        self.assertTrue(READINESS_SMOKE.is_file())
-        combined = source + READINESS_SMOKE.read_text("utf-8")
-        for marker in (
-            "cuda-foundation",
-            "nsys",
-            "ncu",
-            "sanitizer",
-            "workload-smoke",
-            "foundation-complete",
-            "workload-smoke-start",
-        ):
-            self.assertIn(marker, combined)
-
-    def test_v3_1_lane_executes_active_diagnosis_on_gpu(self) -> None:
-        source = inspect.getsource(
-            Sm120AcceptanceTests.test_active_diagnosis_collects_gpu_profile_evidence
-        )
-        for marker in (
-            "analysis_contract",
-            "register_active_diagnosis_proposal",
-            "collect_active_diagnosis_evidence",
-            "torch.profiler.profile",
-        ):
-            self.assertIn(marker, source)
-
-    def test_v1_1_lane_uses_four_real_controlled_gpu_scenarios(self) -> None:
-        self.assertTrue(DIAGNOSTIC_SCENARIOS.is_file())
-        source = DIAGNOSTIC_SCENARIOS.read_text(encoding="utf-8")
-        for marker in (
-            "cuda_graph_launch_batching",
-            "memory_coalescing",
-            "tf32_tensor_core_path",
-            "async_transfer_overlap",
-            "torch.cuda.CUDAGraph",
-            "pin_memory=True",
-            "torch.mm",
-        ):
-            self.assertIn(marker, source)
-        acceptance_source = inspect.getsource(
-            Sm120AcceptanceTests.test_v1_1_controller_admits_fresh_controlled_gpu_evidence
-        )
-        for marker in (
-            "controller.start_run",
-            "register_active_diagnosis_proposal",
-            "collect_active_diagnosis_evidence",
-            '"confidence": "plausible"',
-            '"confidence": "direction_supported"',
-            "time_to_first_supported_direction_seconds",
-            "expensive_profiler_action_count",
-        ):
-            self.assertIn(marker, acceptance_source)
-        self.assertNotIn("frozen_baseline", acceptance_source)
-        self.assertNotIn('["ev-cpu", "ev-gpu"]', acceptance_source)
-
-
-@unittest.skipUnless(
-    os.environ.get("CUDA_SM120_E2E") == "1",
-    "set CUDA_SM120_E2E=1 on an SM120 CUDA host",
-)
-class Sm120AcceptanceTests(unittest.TestCase):
-
-    def test_v1_1_controller_admits_fresh_controlled_gpu_evidence(self) -> None:
-        expected = {
-            "launch_graph": ("cuda_graph_launch_batching", "runtime"),
-            "memory_coalescing": ("memory_coalescing", "kernel"),
-            "compute_gemm": ("tf32_tensor_core_path", "kernel"),
-            "transfer_overlap": ("async_transfer_overlap", "runtime"),
-        }
-        controller = _load_script("workload_controller")
-        engine_results = []
-        for name, (mechanism, layer) in expected.items():
-            started = time.monotonic()
-            case_root = ARTIFACTS / "diagnostic_scenarios" / name
-            workspace = _stage_fixture_workspace("workspace", artifacts=case_root)
-            (workspace / "scenario-config.json").write_text(
-                json.dumps({"scenario": name}), encoding="utf-8"
-            )
-            global_scan = workspace / "scenario_global_scan.py"
-            direction_adapter = workspace / "scenario_direction_evidence.py"
-            requirement = self._readiness_requirement(
-                workspace,
-                case_root / "probe-work",
-                "workload.smoke",
-                "workload-smoke",
-                necessity="required",
-                phase="workload",
-                kind="workload_smoke",
-                extra=("--workload", str(workspace / "triton_vector.py")),
-            )
-            control, run_dir = self._readiness_control(
-                case_root, workspace, [requirement]
-            )
-            analysis_contract = workspace / "active-diagnosis.json"
-            analysis_contract.write_text(
-                json.dumps(
-                    {
-                        "schema_version": "cuda-optimizer/active-diagnosis-contract-v1",
-                        "global_scan_probe_id": "timeline",
-                        "adapter_path": str(global_scan),
-                        "analysis_policy_sha256": "a" * 64,
-                        "minimum_effect_us": 1.0,
-                        "source": {
-                            "profiler": "custom",
-                            "profiler_version": "controlled-sm120-v2",
-                            "export_schema": "controlled-scenario-v2",
-                            "adapter_id": "sm120-controlled-scan",
-                            "adapter_version": "2.0.0",
-                            "adapter_sha256": _fixture_hash(global_scan),
-                        },
-                        "actions": [
-                            {
-                                "action_id": "direction-experiment-project-copy",
-                                "adapter_path": str(direction_adapter),
-                                "adapter_sha256": _fixture_hash(direction_adapter),
-                                "argv": [sys.executable, str(direction_adapter)],
-                                "timeout_seconds": 120,
-                            }
-                        ],
-                        "selection_policy": {
-                            "schema_version": "cuda-optimizer/evidence-selection-policy-v1",
-                            "max_cost": "high",
-                            "max_perturbation": "high",
-                            "max_risk": "low",
-                            "remaining_profile_actions": 0,
-                            "available_capability_ids": [],
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            control["analysis_contract"] = str(analysis_contract)
-            control["probes"][0]["argv"] = [sys.executable, str(global_scan)]
-
-            state = controller.start_run(control, run_dir)
-            self.assertEqual(state["next_action"], "propose_hypotheses")
-            active = run_dir / "active_diagnosis"
-            raw_scan = json.loads(
-                (active / "global-scan-observation.json").read_text("utf-8")
-            )
-            observation = raw_scan["observation"]
-            self.assertEqual(raw_scan["device"]["capability"], [12, 0])
-            self.assertEqual(observation["mechanism"], mechanism)
-            self.assertEqual(observation["claim_layer"], layer)
-            self.assertGreaterEqual(len(observation["samples_us"]), 5)
-            self.assertTrue(observation["correctness_passed"])
-
-            epoch = json.loads((active / "epoch.json").read_text("utf-8"))
-            context = json.loads(
-                (run_dir / "diagnosis_context.json").read_text("utf-8")
-            )
-            scope_node_id = "gpu-kernel" if layer == "kernel" else "cpu-launch"
-            hypothesis = {
-                "schema_version": "cuda-optimizer/hypothesis-set-v1",
-                "set_id": f"hypotheses-{name}-initial",
-                "epoch_id": epoch["epoch_id"],
-                "epoch_sha256": context["epoch_sha256"],
-                "execution_map_sha256": context["execution_map_sha256"],
-                "hypotheses": [
-                    {
-                        "hypothesis_id": f"h-{name}-mechanism",
-                        "kind": "mechanism",
-                        "scope_node_ids": [scope_node_id],
-                        "statement": f"The controlled {name} workload exposes {mechanism}.",
-                        "mechanism": mechanism,
-                        "claim_layer": layer,
-                        "disposition": "active",
-                        "confidence": "plausible",
-                        "support_evidence_ids": ["ev-global-scan"],
-                        "oppose_evidence_ids": [],
-                        "missing_evidence_kinds": ["direction_experiment"],
-                        "falsification_question": "Does an independent controlled rerun fail to reproduce the expected direction?",
-                    },
-                    {
-                        "hypothesis_id": f"h-{name}-alternative",
-                        "kind": "mechanism",
-                        "scope_node_ids": [scope_node_id],
-                        "statement": f"The controlled {name} effect is not caused by {mechanism}.",
-                        "mechanism": f"{name}_unexplained_alternative",
-                        "claim_layer": layer,
-                        "disposition": "active",
-                        "confidence": "inconclusive",
-                        "support_evidence_ids": [],
-                        "oppose_evidence_ids": [],
-                        "missing_evidence_kinds": ["direction_experiment"],
-                        "falsification_question": "Does an independent controlled rerun reproduce the expected direction?",
-                    },
-                ],
-                "relationships": [
-                    {
-                        "relation": "exclusive",
-                        "left": f"h-{name}-alternative",
-                        "right": f"h-{name}-mechanism",
-                    }
-                ],
-            }
-            hypothesis_result = controller._load_hypothesis_space_module().validate_hypothesis_set(
-                hypothesis,
-                epoch=epoch,
-                execution_map=json.loads(
-                    (active / "execution_map.json").read_text("utf-8")
-                ),
-                evidence_catalog=json.loads(
-                    (active / "evidence_catalog.json").read_text("utf-8")
-                ),
-            )
-            request = {
-                "schema_version": "cuda-optimizer/evidence-request-set-v1",
-                "request_set_id": f"requests-{name}-initial",
-                "epoch_id": epoch["epoch_id"],
-                "epoch_sha256": context["epoch_sha256"],
-                "hypothesis_set_sha256": hypothesis_result[
-                    "hypothesis_set_sha256"
-                ],
-                "requests": [
-                    {
-                        "request_id": f"direction-{name}",
-                        "action_id": "direction-experiment-project-copy",
-                        "question": "Does an independent controlled rerun reproduce the expected direction?",
-                        "target_hypothesis_ids": [
-                            f"h-{name}-alternative",
-                            f"h-{name}-mechanism",
-                        ],
-                        "exclusive_pairs": [
-                            {
-                                "left": f"h-{name}-alternative",
-                                "right": f"h-{name}-mechanism",
-                            }
-                        ],
-                        "outcomes": [
-                            {
-                                "outcome_id": "alternative-supported",
-                                "supports": [f"h-{name}-alternative"],
-                                "opposes": [f"h-{name}-mechanism"],
-                            },
-                            {
-                                "outcome_id": "mechanism-supported",
-                                "supports": [f"h-{name}-mechanism"],
-                                "opposes": [f"h-{name}-alternative"],
-                            },
-                        ],
-                    }
-                ],
-            }
-            state = controller.register_active_diagnosis_proposal(
-                control, run_dir, hypothesis, request
-            )
-            self.assertEqual(state["next_action"], "collect_evidence")
-            initial_selection = json.loads(
-                (active / "evidence_selection.json").read_text("utf-8")
-            )
-            self.assertEqual(
-                initial_selection["selected_request"]["action_id"],
-                "direction-experiment-project-copy",
-            )
-
-            collected = controller.collect_active_diagnosis_evidence(
-                control, run_dir
-            )
-            self.assertEqual(collected["next_action"], "propose_hypotheses")
-            refreshed_context = json.loads(
-                (run_dir / "diagnosis_context.json").read_text("utf-8")
-            )
-            evidence_result = refreshed_context["evidence_results"][-1]
-            self.assertEqual(evidence_result["outcome_id"], "mechanism-supported")
-            evidence_catalog = json.loads(
-                (active / "evidence_catalog.json").read_text("utf-8")
-            )
-            evidence_id = next(
-                evidence_id
-                for evidence_id, item in evidence_catalog.items()
-                if item["kind"] == "direction_experiment"
-            )
-
-            confirmed = json.loads(json.dumps(hypothesis))
-            confirmed["set_id"] = f"hypotheses-{name}-confirmed"
-            confirmed["execution_map_sha256"] = refreshed_context[
-                "execution_map_sha256"
-            ]
-            by_id = {
-                item["hypothesis_id"]: item for item in confirmed["hypotheses"]
-            }
-            by_id[f"h-{name}-mechanism"].update(
-                {
-                    "confidence": "direction_supported",
-                    "support_evidence_ids": ["ev-global-scan", evidence_id],
-                    "missing_evidence_kinds": [],
-                }
-            )
-            by_id[f"h-{name}-alternative"].update(
-                {
-                    "disposition": "rejected",
-                    "oppose_evidence_ids": [evidence_id],
-                    "missing_evidence_kinds": [],
-                }
-            )
-            confirmed_result = controller._load_hypothesis_space_module().validate_hypothesis_set(
-                confirmed,
-                epoch=epoch,
-                execution_map=json.loads(
-                    (active / "execution_map.json").read_text("utf-8")
-                ),
-                evidence_catalog=evidence_catalog,
-            )
-            confirmed_request = json.loads(json.dumps(request))
-            confirmed_request["request_set_id"] = f"requests-{name}-confirmed"
-            confirmed_request["hypothesis_set_sha256"] = confirmed_result[
-                "hypothesis_set_sha256"
-            ]
-            final_state = controller.register_active_diagnosis_proposal(
-                control, run_dir, confirmed, confirmed_request
-            )
-            decision = json.loads((active / "decision.json").read_text("utf-8"))
-            elapsed = time.monotonic() - started
-            expensive_profiler_action_count = int(
-                initial_selection["selected_request"]["controller_action"]["cost"]
-                == "high"
-            )
-            self.assertEqual(final_state["next_action"], "register_change")
-            self.assertEqual(decision["decision"], "PURSUE")
-            self.assertEqual(decision["primary_diagnosis"]["mechanism"], mechanism)
-            self.assertEqual(expensive_profiler_action_count, 0)
-            self.assertTrue(
-                any(
-                    path.name == "controlled-observation.json"
-                    for path in (active / "evidence").glob("**/*.json")
-                )
-            )
-            engine_results.append(
-                {
-                    "scenario": name,
-                    "mechanism": mechanism,
-                    "decision": decision["decision"],
-                    "time_to_first_supported_direction_seconds": elapsed,
-                    "expensive_profiler_action_count": expensive_profiler_action_count,
-                }
-            )
-        controller_output = (
-            ARTIFACTS / "diagnostic_scenarios" / "controller-acceptance.json"
-        )
-        controller_output.write_text(
-            json.dumps(
-                {
-                    "schema_version": "cuda-optimizer/sm120-controller-acceptance-v1",
-                    "claim_scope": "controller_evidence_admission_only",
-                    "scenarios": engine_results,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-
-        self.assertEqual(len(engine_results), 4)
-
-    def _readiness_control(
-        self,
-        case_root: Path,
-        workspace: Path,
-        requirements: list[dict],
-        *,
-        max_repairs: int = 0,
-    ) -> tuple[dict, Path]:
-        environment = case_root / "isolated-environment"
-        environment.mkdir(parents=True, exist_ok=True)
-        workload_manifest = workspace / "readiness_workload.json"
-        workload_manifest.write_text(
-            json.dumps(
-                {
-                    "kind": "python",
-                    "source": "workload_smoke.py",
-                    "objective": json.loads(
-                        (workspace / "objective.json").read_text("utf-8")
-                    ),
-                    "cases": [{"N": 1_048_576}],
-                }
-            ),
-            encoding="utf-8",
-        )
-        contract_path = workspace / "readiness.json"
-        contract_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": "cuda-workload-optimizer/readiness-contract-v1",
-                    "requested_claim": "workload",
-                    "budget": {
-                        "max_seconds": 240,
-                        "max_repairs": max_repairs,
-                    },
-                    "requirements": requirements,
-                }
-            ),
-            encoding="utf-8",
-        )
-        control = {
-            "schema_version": "cuda-workload-optimizer/control-v2",
-            "project_root": str(workspace),
-            "workload_manifest": str(workload_manifest),
-            "readiness_contract": str(contract_path),
-            "baseline_candidate": {
-                "name": "readiness-baseline",
-                "revision": "fixture-current",
-                "path": str(workspace / "triton_vector.py"),
-            },
-            "budget": "fast",
-            "mutation": {
-                "project_paths": ["triton_vector.py"],
-                "environment_root": str(environment),
-                "host_policy": "recommend_only",
-            },
-            "probes": [
-                {
-                    "id": "timeline",
-                    "kind": "timeline",
-                    "argv": [sys.executable, str(workspace / "workload_probe.py")],
-                    "timeout_seconds": 60,
-                }
-            ],
-        }
-        return control, case_root / "run"
-
-    def _readiness_requirement(
-        self,
-        workspace: Path,
-        work_dir: Path,
-        requirement_id: str,
-        mode: str,
-        *,
-        necessity: str,
-        phase: str,
-        kind: str,
-        timeout: float = 90,
-        remediation: dict | None = None,
-        extra: tuple[str, ...] = (),
-    ) -> dict:
-        return {
-            "id": requirement_id,
-            "necessity": necessity,
-            "control_scope": "host" if remediation else "project",
-            "phase": phase,
-            "kind": kind,
-            "max_age_seconds": 300,
-            "probe": {
-                "argv": [
-                    sys.executable,
-                    str(workspace / "readiness_smoke.py"),
-                    "--mode",
-                    mode,
-                    "--requirement-id",
-                    requirement_id,
-                    "--work-dir",
-                    str(work_dir),
-                    *extra,
-                ],
-                "timeout_seconds": timeout,
-            },
-            "remediation": remediation or {"mode": "none"},
-        }
-
-    def test_readiness_gate_precedes_real_workload(self) -> None:
-        controller = _load_script("workload_controller")
-        case_root = ARTIFACTS / "readiness_v31"
-        workspace = _stage_fixture_workspace("workspace", artifacts=case_root)
-        work_dir = case_root / "probe-work"
-        requirements = [
-            self._readiness_requirement(
-                workspace,
-                work_dir,
-                "cuda-foundation",
-                "cuda-foundation",
-                necessity="required",
-                phase="foundation",
-                kind="target_compile",
-            ),
-            self._readiness_requirement(
-                workspace,
-                work_dir,
-                "nsys",
-                "nsys",
-                necessity="diagnostic",
-                phase="workload",
-                kind="nsys_trace",
-            ),
-            self._readiness_requirement(
-                workspace,
-                work_dir,
-                "ncu",
-                "ncu",
-                necessity="diagnostic",
-                phase="workload",
-                kind="ncu_counters",
-                remediation={
-                    "mode": "user_action",
-                    "message": (
-                        "Grant GPU performance-counter access or use lower evidence."
-                    ),
-                },
-            ),
-            self._readiness_requirement(
-                workspace,
-                work_dir,
-                "sanitizer",
-                "sanitizer",
-                necessity="diagnostic",
-                phase="workload",
-                kind="sanitizer",
-            ),
-            self._readiness_requirement(
-                workspace,
-                work_dir,
-                "workload-smoke",
-                "workload-smoke",
-                necessity="required",
-                phase="workload",
-                kind="workload_smoke",
-                extra=("--workload", str(workspace / "triton_vector.py")),
-            ),
-        ]
-        control, run_dir = self._readiness_control(
-            case_root, workspace, requirements
-        )
-
-        state = controller.start_run(control, run_dir)
-
-        self.assertEqual(state["next_action"], "register_change")
-        env_path = case_root / "env.json"
-        _run([sys.executable, str(CHECK_ENV), "--out", str(env_path)], env_path)
-        env = json.loads(env_path.read_text("utf-8"))
-        self.assertEqual(env["primary_sm_arch"], "sm_120")
-        report = json.loads(
-            (run_dir / "readiness" / "report.json").read_text("utf-8")
-        )
-        self.assertTrue(report["can_start_diagnosis"])
-        results = {item["requirement_id"]: item for item in report["results"]}
-        self.assertEqual(results["cuda-foundation"]["admission_status"], "ready")
-        self.assertEqual(results["workload-smoke"]["admission_status"], "ready")
-        self.assertEqual(results["nsys"]["admission_status"], "degraded")
-        self.assertIn(
-            results["ncu"]["admission_status"], {"ready", "user_action_required"}
-        )
-        self.assertIn(
-            results["sanitizer"]["admission_status"], {"ready", "degraded"}
-        )
-        events = [
-            json.loads(line)["event"]
-            for line in (work_dir / "events.jsonl").read_text("utf-8").splitlines()
-        ]
-        self.assertLess(
-            events.index("foundation-complete"),
-            events.index("workload-smoke-start"),
-        )
-        self.assertTrue((run_dir / "baseline" / "observation.json").is_file())
-
-    def test_active_diagnosis_collects_gpu_profile_evidence(self) -> None:
-        controller = _load_script("workload_controller")
-        case_root = ARTIFACTS / "active_diagnosis_v31"
-        workspace = _stage_fixture_workspace("workspace", artifacts=case_root)
-        global_scan = workspace / "global_scan.py"
-        shutil.copy2(
-            ROOT / "tests" / "fixtures" / "active_diagnosis" / "emit_global_scan.py",
-            global_scan,
-        )
-        evidence_adapter = workspace / "collect_gpu_profile.py"
-        evidence_adapter.write_text(
-            "import json, os, torch\n"
-            "from pathlib import Path\n"
-            "request = json.load(open(os.environ['CUDA_OPTIMIZER_EVIDENCE_REQUEST']))\n"
-            "trace = Path(os.environ['CUDA_OPTIMIZER_EVIDENCE_DIR']) / 'torch-trace.json'\n"
-            "x = torch.arange(1 << 20, device='cuda', dtype=torch.float32)\n"
-            "with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as p:\n"
-            "    y = x.square().add_(1)\n"
-            "    torch.cuda.synchronize()\n"
-            "assert float(y[1].item()) == 2.0\n"
-            "p.export_chrome_trace(str(trace))\n"
-            "json.dump({'schema_version': 'cuda-optimizer/evidence-result-v1', "
-            "'request_signature': request['request_signature'], 'status': 'observed', "
-            "'outcome_id': 'gap-present', 'observations': {'cuda_events': True}, "
-            "'artifacts': [{'path': str(trace)}]}, "
-            "open(os.environ['CUDA_OPTIMIZER_EVIDENCE_OUTPUT'], 'w'))\n",
-            encoding="utf-8",
-        )
-        requirement = self._readiness_requirement(
-            workspace,
-            case_root / "probe-work",
-            "pytorch.profiler",
-            "cuda-foundation",
-            necessity="required",
-            phase="foundation",
-            kind="gpu_execute",
-        )
-        control, run_dir = self._readiness_control(
-            case_root, workspace, [requirement]
-        )
-        analysis_contract = workspace / "active-diagnosis.json"
-        analysis_contract.write_text(
-            json.dumps(
-                {
-                    "schema_version": "cuda-optimizer/active-diagnosis-contract-v1",
-                    "global_scan_probe_id": "timeline",
-                    "adapter_path": str(global_scan),
-                    "analysis_policy_sha256": "a" * 64,
-                    "minimum_effect_us": 1.0,
-                    "source": {
-                        "profiler": "custom",
-                        "profiler_version": "gpu-smoke-v1",
-                        "export_schema": "global-scan-v1",
-                        "adapter_id": "sm120-global-scan",
-                        "adapter_version": "1.0.0",
-                        "adapter_sha256": _fixture_hash(global_scan),
-                    },
-                    "actions": [
-                        {
-                            "action_id": "pytorch-operator-trace",
-                            "adapter_path": str(evidence_adapter),
-                            "adapter_sha256": _fixture_hash(evidence_adapter),
-                            "argv": [sys.executable, str(evidence_adapter)],
-                            "timeout_seconds": 60,
-                        }
-                    ],
-                    "selection_policy": {
-                        "schema_version": "cuda-optimizer/evidence-selection-policy-v1",
-                        "max_cost": "high",
-                        "max_perturbation": "high",
-                        "max_risk": "low",
-                        "remaining_profile_actions": 1,
-                        "available_capability_ids": [],
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-        control["analysis_contract"] = str(analysis_contract)
-        control["probes"][0]["argv"] = [sys.executable, str(global_scan)]
-
-        state = controller.start_run(control, run_dir)
-        self.assertEqual(state["next_action"], "propose_hypotheses")
-        active = run_dir / "active_diagnosis"
-        epoch = json.loads((active / "epoch.json").read_text("utf-8"))
-        context = json.loads((run_dir / "diagnosis_context.json").read_text("utf-8"))
-        hypothesis = {
-            "schema_version": "cuda-optimizer/hypothesis-set-v1",
-            "set_id": "sm120-hypotheses",
-            "epoch_id": epoch["epoch_id"],
-            "epoch_sha256": context["epoch_sha256"],
-            "execution_map_sha256": context["execution_map_sha256"],
-            "hypotheses": [
-                {
-                    "hypothesis_id": "h-framework-gap", "kind": "mechanism",
-                    "scope_node_ids": ["cpu-launch", "gpu-kernel"],
-                    "statement": "CPU launch work delays the measured GPU operation.",
-                    "mechanism": "framework_launch_overhead", "claim_layer": "runtime", "disposition": "active",
-                    "confidence": "plausible", "support_evidence_ids": ["ev-global-scan"],
-                    "oppose_evidence_ids": [], "missing_evidence_kinds": ["framework_trace"],
-                    "falsification_question": "Does a framework trace show no launch gap?",
-                },
-                {
-                    "hypothesis_id": "h-kernel-bound", "kind": "mechanism",
-                    "scope_node_ids": ["gpu-kernel"],
-                    "statement": "Kernel execution dominates the measured path.",
-                    "mechanism": "kernel_execution", "claim_layer": "kernel", "disposition": "active",
-                    "confidence": "inconclusive", "support_evidence_ids": [],
-                    "oppose_evidence_ids": [], "missing_evidence_kinds": ["ncu_kernel"],
-                    "falsification_question": "Does framework evidence explain the path?",
-                },
-            ],
-            "relationships": [{"relation": "exclusive", "left": "h-framework-gap", "right": "h-kernel-bound"}],
-        }
-        hypothesis_result = controller._load_hypothesis_space_module().validate_hypothesis_set(
-            hypothesis,
-            epoch=epoch,
-            execution_map=json.loads((active / "execution_map.json").read_text("utf-8")),
-            evidence_catalog=json.loads((active / "evidence_catalog.json").read_text("utf-8")),
-        )
-        request = {
-            "schema_version": "cuda-optimizer/evidence-request-set-v1",
-            "request_set_id": "sm120-requests", "epoch_id": epoch["epoch_id"],
-            "epoch_sha256": context["epoch_sha256"],
-            "hypothesis_set_sha256": hypothesis_result["hypothesis_set_sha256"],
-            "requests": [{
-                "request_id": "gpu-framework-trace", "action_id": "pytorch-operator-trace",
-                "question": "Does the GPU trace discriminate launch overhead from kernel time?",
-                "target_hypothesis_ids": ["h-framework-gap", "h-kernel-bound"],
-                "exclusive_pairs": [{"left": "h-framework-gap", "right": "h-kernel-bound"}],
-                "outcomes": [
-                    {"outcome_id": "gap-present", "supports": ["h-framework-gap"], "opposes": ["h-kernel-bound"]},
-                    {"outcome_id": "kernel-dominant", "supports": ["h-kernel-bound"], "opposes": ["h-framework-gap"]},
-                ],
-            }],
-        }
-        controller.register_active_diagnosis_proposal(
-            control, run_dir, hypothesis, request
-        )
-
-        completed = controller.collect_active_diagnosis_evidence(control, run_dir)
-
-        self.assertEqual(completed["next_action"], "propose_hypotheses")
-        updated = json.loads((run_dir / "diagnosis_context.json").read_text("utf-8"))
-        self.assertEqual(updated["evidence_results"][0]["status"], "observed")
-        catalog = json.loads((active / "evidence_catalog.json").read_text("utf-8"))
-        observed = next(item for key, item in catalog.items() if key != "ev-global-scan")
-        self.assertEqual(observed["supports_hypothesis_ids"], ["h-framework-gap"])
-        self.assertEqual(observed["opposes_hypothesis_ids"], ["h-kernel-bound"])
-        self.assertEqual(len(list((active / "evidence").glob("*/torch-trace.json"))), 1)
-
-    def test_readiness_faults_fail_closed_before_baseline(self) -> None:
-        controller = _load_script("workload_controller")
-
-        timeout_root = ARTIFACTS / "readiness_v31_timeout"
-        timeout_workspace = _stage_fixture_workspace(
-            "workspace", artifacts=timeout_root
-        )
-        timeout_requirement = self._readiness_requirement(
-            timeout_workspace,
-            timeout_root / "probe-work",
-            "probe-timeout",
-            "sleep",
-            necessity="required",
-            phase="foundation",
-            kind="gpu_execute",
-            timeout=0.1,
-        )
-        timeout_control, timeout_run = self._readiness_control(
-            timeout_root, timeout_workspace, [timeout_requirement]
-        )
-        timeout_state = controller.start_run(timeout_control, timeout_run)
-        self.assertEqual(timeout_state["next_action"], "readiness_action")
-        self.assertFalse((timeout_run / "baseline" / "observation.json").exists())
-
-        workload_root = ARTIFACTS / "readiness_v31_workload_failure"
-        workload_workspace = _stage_fixture_workspace(
-            "workspace", artifacts=workload_root
-        )
-        workload_requirement = self._readiness_requirement(
-            workload_workspace,
-            workload_root / "probe-work",
-            "workload-failure",
-            "workload-smoke",
-            necessity="required",
-            phase="workload",
-            kind="workload_smoke",
-            extra=(
-                "--workload",
-                str(workload_workspace / "triton_vector.py"),
-                "--fail",
-            ),
-        )
-        workload_control, workload_run = self._readiness_control(
-            workload_root, workload_workspace, [workload_requirement]
-        )
-        workload_state = controller.start_run(workload_control, workload_run)
-        self.assertEqual(workload_state["next_action"], "readiness_action")
-        self.assertFalse((workload_run / "baseline" / "observation.json").exists())
-
-        hash_root = ARTIFACTS / "readiness_v31_hash_failure"
-        hash_workspace = _stage_fixture_workspace("workspace", artifacts=hash_root)
-        hash_environment = hash_root / "isolated-environment"
-        python_path = hash_environment / "bin" / "python"
-        python_path.parent.mkdir(parents=True)
-        shutil.copy2(sys.executable, python_path)
-        requirements_path = hash_workspace / "requirements.txt"
-        requirements_path.write_text(
-            "packaging==24.2 --hash=sha256:" + "a" * 64 + "\n"
-        )
-        hash_requirement = self._readiness_requirement(
-            hash_workspace,
-            hash_root / "probe-work",
-            "hash-failure",
-            "cuda-foundation",
-            necessity="required",
-            phase="foundation",
-            kind="target_compile",
-            remediation={
-                "mode": "isolated_pip",
-                "authorization_id": "sm120-hash-fault",
-                "python": str(python_path),
-                "requirements_file": str(requirements_path),
-                "requirements_sha256": "0" * 64,
-                "timeout_seconds": 10,
-            },
-            extra=("--fail",),
-        )
-        hash_requirement["control_scope"] = "isolated_environment"
-        hash_control, hash_run = self._readiness_control(
-            hash_root,
-            hash_workspace,
-            [hash_requirement],
-            max_repairs=1,
-        )
-        hash_state = controller.start_run(hash_control, hash_run)
-        self.assertEqual(hash_state["next_action"], "readiness_action")
-        self.assertFalse((hash_run / "baseline" / "observation.json").exists())
-        receipts = list(hash_run.glob("readiness/attempts/**/installs/*.json"))
-        self.assertEqual(len(receipts), 1)
-        receipt = json.loads(receipts[0].read_text("utf-8"))
-        self.assertEqual(receipt["reason"], "requirements_digest_mismatch")
-
-    def test_environment_and_fixture_matrix(self) -> None:
-        ARTIFACTS.mkdir(parents=True, exist_ok=True)
-        env_path = ARTIFACTS / "env.json"
-        _run([sys.executable, str(CHECK_ENV), "--out", str(env_path)], env_path)
-        env = json.loads(env_path.read_text(encoding="utf-8"))
-        self.assertEqual(env["primary_sm_arch"], "sm_120")
-
-        for case in CASES:
-            with self.subTest(case=case.name):
-                workspace = _stage_fixture_workspace(case.name)
-                result_path = ARTIFACTS / case.name / "bench.json"
-                command = [
-                    sys.executable,
-                    str(BENCHMARK),
-                    str(workspace / case.solution),
-                    "--ref",
-                    str(workspace / case.reference),
-                    "--warmup",
-                    "3",
-                    "--repeat",
-                    "8",
-                    "--json-out",
-                    str(result_path),
-                    *case.extra,
-                    *case.dims,
-                ]
-                result = _run(command, result_path)
-                self.assertTrue(result["correctness"]["passed"])
-                self.assertIn("samples_ms", result["kernel"])
-                self.assertGreater(len(result["kernel"]["samples_ms"]), 4)
-                self.assertIn("median_ms", result["kernel"])
-                self.assertIn("p95_ms", result["kernel"])
-                self.assertIn("stddev_ms", result["kernel"])
-                self.assertIn("cv_pct", result["kernel"])
-
-    def test_paired_noop_is_inconclusive_with_recomputable_raw_pairs(self) -> None:
-        paired_benchmark = _load_script("paired_benchmark")
-        paired_stats = _load_script("paired_stats")
-        artifact_store = _load_script("artifact_store")
-        pair_count = int(os.environ.get("CUDA_E2E_NOOP_PAIRS", "30"))
-        workspace = _stage_fixture_workspace("paired_noop")
-        solution = workspace / "triton_vector.py"
-        classifier = {
-            "direction": "lower",
-            "min_effect_pct": 0.5,
-            "confidence": 0.95,
-            "bootstrap_samples": 2000,
-            "seed": 17,
-        }
-
-        raw = paired_benchmark.run_paired(
-            str(solution),
-            str(solution),
-            backend="triton",
-            dims={"N": 1_048_576},
-            ptr_size=0,
-            arch="sm_120",
-            nvcc_bin="nvcc",
-            seed=classifier["seed"],
-            blocks=pair_count,
-            warmup=5,
-        )
-        statistics = paired_stats.classify_pairs(raw["pairs"], **classifier)
-        evidence = artifact_store.write_paired_samples(
-            ARTIFACTS / "paired_noop" / "paired_samples.jsonl",
-            raw["pairs"],
-            kind="kernel",
-            input_hash=_fixture_hash(solution),
-            iteration=1,
-            candidate_id="triton-identical-noop",
-            candidate_file=solution,
-            classifier_config=classifier,
-        )
-        artifact_store.atomic_write_json(
-            ARTIFACTS / "paired_noop" / "statistics.json", statistics
-        )
-
-        records = artifact_store.ArtifactStore(ARTIFACTS).read_jsonl(
-            "paired_noop/paired_samples.jsonl"
-        )
-        recomputed = paired_stats.classify_pairs(
-            [record["pair"] for record in records], **classifier
-        )
-        self.assertEqual(statistics["status"], "inconclusive")
-        self.assertEqual(recomputed, statistics)
-        self.assertEqual(len(records), pair_count)
-        self.assertGreater(statistics["valid_pairs"], 0)
-        self.assertTrue(
-            all(record["kind"] == "kernel" for record in records)
-        )
-        self.assertTrue(
-            all(record["pair"]["order"] in {"AB", "BA"} for record in records)
-        )
-
-    def test_user_workload_smoke_produces_separate_outer_raw_evidence(self) -> None:
-        orchestrate = _load_script("orchestrate")
-        case_root = ARTIFACTS / "workload_smoke"
-        iter_dir = case_root / "iterv1"
-        workspace = _stage_fixture_workspace("iterv1", artifacts=case_root)
-        solution = workspace / "triton_vector.py"
-        objective_path = workspace / "objective.json"
-        workload_path = workspace / "workload_smoke.py"
-        objective = orchestrate.workload_evaluate.validate_objective(
-            json.loads(objective_path.read_text(encoding="utf-8"))
-        )
-        workload = orchestrate.normalize_workload(workload=str(workload_path))
-        self.assertIsNotNone(workload)
-        self.assertEqual(workload.objective, objective)
-        kernel_pairs = [
-            {"baseline": 100.0, "candidate": 98.0, "valid": True}
-            for _ in range(20)
-        ]
-        kernel_statistics = orchestrate.workload_evaluate.paired_stats.classify_pairs(
-            kernel_pairs,
-            direction="lower",
-            min_effect_pct=0.5,
-            confidence=0.95,
-            bootstrap_samples=2000,
-            seed=23,
-        )
-        self.assertEqual(kernel_statistics["status"], "confirmed_win")
-        candidate = {
-            "id": "triton-workload-noop",
-            "status": "confirmed_win",
-            "candidate_file": str(solution),
-            "statistics": kernel_statistics,
-        }
-        pair_count = int(os.environ.get("CUDA_E2E_WORKLOAD_PAIRS", "8"))
-        policy = orchestrate.resolve_budget(
-            "custom",
-            max_seconds=900,
-            max_rounds=1,
-            branches=1,
-            min_pairs=pair_count,
-            max_pairs=pair_count,
-            outer_candidates=1,
-            reserve_seconds=30,
-        )
-        input_hash = hashlib.sha256(
-            f"{workload.source_hash}:{_fixture_hash(solution)}".encode("utf-8")
-        ).hexdigest()
-
-        terminal = orchestrate.evaluate_outer_candidate(
-            candidate,
-            mode="full",
-            workload_spec=workload,
-            baseline=str(solution),
-            policy=policy,
-            confidence=0.95,
-            candidate_root=iter_dir,
-            input_hash=input_hash,
-            iteration=1,
-            retries=0,
-            seed=23,
-        )
-        evidence = terminal["workload_paired_samples"]
-        expected_path = (
-            iter_dir
-            / "workload"
-            / terminal["candidate_sha256"][:16]
-            / "paired_samples.jsonl"
-        )
-        self.assertEqual(Path(evidence["path"]), expected_path.resolve(strict=True))
-        records = orchestrate.ArtifactStore(iter_dir).read_jsonl(
-            str(expected_path.relative_to(iter_dir))
-        )
-        classifier = evidence["classifier"]
-        recomputed = orchestrate.workload_evaluate.classify_recorded_pairs(
-            classifier["objective"],
-            [record["pair"] for record in records],
-            confidence=classifier["confidence"],
-            bootstrap_samples=classifier["bootstrap_samples"],
-            seed=classifier["seed"],
-        )
-        self.assertEqual(terminal["status"], "kernel_only_win")
-        self.assertNotEqual(terminal["status"], "end_to_end_win")
-        self.assertEqual(terminal["workload_status"], "evaluated")
-        self.assertEqual(terminal["workload_statistics"]["status"], "inconclusive")
-        self.assertEqual(recomputed["primary"], terminal["workload_statistics"])
-        self.assertEqual(recomputed["constraints"], terminal["constraints"])
-        terminal_status, promote_global = orchestrate.state_manager._promotion_for(
-            terminal["status"], "full"
-        )
-        self.assertEqual(terminal_status, "kernel_only_win")
-        self.assertFalse(promote_global)
-        self.assertGreater(len(records), 0)
-        self.assertTrue(
-            all(record["kind"] == "workload" for record in records)
-        )
-        self.assertTrue(
-            all(
-                "latency_ms" in record["pair"]["baseline_metrics"]
-                and "latency_ms" in record["pair"]["candidate_metrics"]
-                for record in records
-            )
-        )
-
-    def test_v3_real_pairs_drive_stability_state(self) -> None:
-        paired_benchmark = _load_script("paired_benchmark")
-        workload_contract = _load_script("workload_contract")
-        stability = _load_script("stability_calibration")
-        run_control = _load_script("run_control")
-        artifact_store = _load_script("artifact_store")
-        case_root = ARTIFACTS / "v3_stability"
-        workspace = _stage_fixture_workspace("workspace", artifacts=case_root)
-        environment_root = case_root / "environment"
-        environment_root.mkdir()
-        solution = workspace / "triton_vector.py"
-        reference = workspace / "triton_vector_ref.py"
-        pair_count = int(os.environ.get("CUDA_E2E_V3_STABILITY_PAIRS", "8"))
-        raw = paired_benchmark.run_paired(
-            str(solution),
-            str(solution),
-            backend="triton",
-            dims={"N": 1_048_576},
-            ptr_size=0,
-            arch="sm_120",
-            nvcc_bin="nvcc",
-            seed=31,
-            blocks=pair_count,
-            warmup=5,
-        )
-        blocks = [
-            {
-                "pair_id": f"gpu-pair-{index}",
-                "first": pair["baseline"],
-                "second": pair["candidate"],
-                "valid": pair["valid"],
-            }
-            for index, pair in enumerate(raw["pairs"], 1)
-        ]
-        draft = {
-            "schema_version": "cuda-optimizer/workload-contract-draft-v1",
-            "run_id": "sm120-v3-stability",
-            "parent_run": None,
-            "requested_claim": "kernel",
-            "project_root": str(workspace),
-            "artifacts": [
-                {"role": "kernel", "path": solution.name},
-                {"role": "correctness_reference", "path": reference.name},
-            ],
-            "workload": {
-                "argv": [sys.executable, solution.name],
-                "input_distribution": "sm120-opt-in-identical-kernel",
-                "representative_cases": ["N-1048576"],
-            },
-            "objective": {
-                "metric": "kernel_latency",
-                "unit": "ms",
-                "direction": "lower",
-                "aggregation": "median",
-                "minimum_practical_effect_pct": 0.5,
-                "constraints": ["reference_correctness"],
-            },
-            "budget": {
-                "preset": "quick",
-                "max_seconds": 300,
-                "max_candidates": 2,
-            },
-            "mutation": {
-                "project_paths": [solution.name],
-                "environment_root": str(environment_root),
-                "host_policy": "recommend_only",
-            },
-            "evidence": {"max_age_seconds": 300},
-        }
-        contract_path = case_root / "contract.json"
-        frozen = workload_contract.freeze_contract(draft, contract_path)
-        seal_key = b"sm120-v3-controller-test-key" * 2
-        environment_sha256 = hashlib.sha256(
-            json.dumps(
-                {
-                    "gpu": "sm_120",
-                    "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-                },
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()
-        calibration = stability.calibrate(
-            contract_path=contract_path,
-            blocks=blocks,
-            hard_guardrails_passed=True,
-            environment_sha256=environment_sha256,
-            source_sha256=_fixture_hash(solution),
-            recorded_at=3.0,
-            controller_seal_key=seal_key,
-        )
-        artifact_store.atomic_write_json(case_root / "calibration.json", calibration)
-        run_dir = case_root / "run"
-        run_dir.mkdir()
-        run_control.initialize_run(contract_path, run_dir, now=0.0)
-        run_control.transition_run(contract_path, run_dir, "freeze", now=1.0)
-        run_control.transition_run(contract_path, run_dir, "calibrate", now=2.0)
-        applied = run_control.apply_run_calibration(
-            contract_path,
-            run_dir,
-            calibration,
-            now=3.0,
-            controller_seal_key=seal_key,
-        )
-
-        self.assertEqual(calibration["contract_sha256"], frozen["contract_sha256"])
-        self.assertEqual(calibration["valid_pairs"], pair_count)
-        self.assertIn(calibration["environment_state"], {"green", "yellow"})
-        expected_phase = (
-            "EXPLORING"
-            if calibration["environment_state"] == "green"
-            else "CALIBRATING"
-        )
-        self.assertEqual(applied["state"]["phase"], expected_phase)
-        reloaded = run_control.load_run(
-            contract_path, run_dir, controller_seal_key=seal_key
-        )
-        self.assertEqual(reloaded, applied)
-
-    def test_ncu_target_profile_records_success_or_explicit_degradation(self) -> None:
-        profile_root = ARTIFACTS / "ncu_target"
-        workspace = _stage_fixture_workspace("ncu_target")
-        env_path = profile_root / "env.json"
-        state_path = profile_root / "state.json"
-        _run([sys.executable, str(CHECK_ENV), "--out", str(env_path)], env_path)
-        env = json.loads(env_path.read_text(encoding="utf-8"))
-        state = {
-            "run_dir": str(profile_root.resolve()),
-            "best_file": str((workspace / "triton_vector.py").resolve()),
-            "env": env,
-            "env_path": str(env_path.resolve()),
-            "dims": {"N": 1_048_576},
-            "ptr_size": 0,
-            "ncu_num": 5,
-        }
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(state), encoding="utf-8")
-        subprocess.run(
+        self.gpu_uuid = subprocess.check_output(
             [
-                sys.executable,
-                str(SCRIPTS / "profile_ncu.py"),
-                "--state",
-                str(state_path),
-                "--iter",
-                "1",
-                "--which",
-                "best_input",
-                "--benchmark",
-                str(BENCHMARK),
+                "nvidia-smi",
+                "--query-gpu=uuid",
+                "--format=csv,noheader,nounits",
             ],
             text=True,
-            capture_output=True,
-            check=True,
+            timeout=10,
+        ).splitlines()[0].strip()
+
+    def _resources(self) -> dict:
+        return {"host_id": "sm120-physical", "gpu_uuids": [self.gpu_uuid]}
+
+    @staticmethod
+    def _runtime_limits(value: dict) -> dict:
+        value["operation_timeout_seconds"] = 240.0
+        value["command_timeout_seconds"] = 180.0
+        value["resource_wait_timeout_seconds"] = 30.0
+        value["cleanup_timeout_seconds"] = 15.0
+        value["launch_deadline"] = time.time() + 60.0
+        return value
+
+    def readiness_input(self) -> dict:
+        value = super().readiness_input()
+        value["environment_requirements"]["gpu_uuids"] = [self.gpu_uuid]
+        value["smoke"]["resources"] = self._resources()
+        value["smoke"]["runtime_limits"] = {
+            "operation_timeout_seconds": 240.0,
+            "command_timeout_seconds": 180.0,
+            "resource_wait_timeout_seconds": 30.0,
+            "cleanup_timeout_seconds": 15.0,
+        }
+        return value
+
+    def baseline_input(self) -> dict:
+        value = super().baseline_input()
+        value["resources"] = self._resources()
+        return self._runtime_limits(value)
+
+    def experiment_input(self, baseline_ref: dict) -> dict:
+        value = super().experiment_input(baseline_ref)
+        value["change_scope"] = ["kernel.py"]
+        for stage in value["estimated_cost"].values():
+            stage["gpu_count"] = 1
+            stage["basis"] = "real SM120 Triton command driver"
+        return value
+
+    def screen_input(self, experiment_ref: dict) -> dict:
+        value = super().screen_input(experiment_ref)
+        value["resources"] = self._resources()
+        return self._runtime_limits(value)
+
+    def target_input(self, experiment_ref: dict) -> dict:
+        value = super().target_input(experiment_ref)
+        value["resources"] = self._resources()
+        return self._runtime_limits(value)
+
+    def final_audit_input(self) -> dict:
+        value = super().final_audit_input()
+        value["resources"] = self._resources()
+        return self._runtime_limits(value)
+
+    def run_tool(
+        self,
+        filename: str,
+        operation: str,
+        request: dict,
+        *,
+        wait: bool = False,
+    ) -> subprocess.CompletedProcess:
+        request_path = self.root / f"{filename}-{operation}-input.json"
+        write_json(request_path, request)
+        command = [
+            sys.executable,
+            str(SCRIPTS / filename),
+            operation,
+            "--request",
+            str(request_path),
+        ]
+        if wait:
+            command.append("--wait")
+        return subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=300,
         )
 
-        top = json.loads(
-            (profile_root / "iterv1" / "ncu_top.json").read_text(encoding="utf-8")
-        )
-        recorded = json.loads(state_path.read_text(encoding="utf-8"))
-        ncu = recorded["env"]["ncu"]
-        if top["degraded"] is False:
-            self.assertIs(ncu.get("can_read_counters"), True)
-            self.assertGreater(top.get("metric_count_collected", 0), 0)
-            self.assertGreater(
-                sum(len(top.get(axis, [])) for axis in ("compute", "memory", "latency")),
-                0,
-            )
-        elif top["degraded"] is True:
-            self.assertIs(ncu.get("can_read_counters"), False)
-            self.assertEqual(
-                ncu.get("counter_access_error"), "ERR_NVGPUCTRPERM"
-            )
-        else:
-            self.fail("ncu_top.degraded must be a literal boolean")
 
-    def test_workload_controller_promotes_real_gpu_candidate(self) -> None:
-        controller = _load_script("workload_controller")
-        case_root = ARTIFACTS / "workload_controller"
-        workspace = _stage_fixture_workspace("workspace", artifacts=case_root)
-        baseline = workspace / "baseline.py"
-        candidate = workspace / "candidate.py"
-        shutil.copy2(workspace / "triton_vector_slow.py", baseline)
-        shutil.copy2(workspace / "triton_vector_slow.py", candidate)
-        workload_manifest = workspace / "controller_workload.json"
-        workload_manifest.write_text(
-            json.dumps(
-                {
-                    "kind": "python",
-                    "source": "workload_smoke.py",
-                    "objective": json.loads(
-                        (workspace / "objective.json").read_text("utf-8")
-                    ),
-                    "cases": [{"N": 1_048_576}],
-                }
-            ),
-            encoding="utf-8",
+@unittest.skipUnless(PHYSICAL, "set CUDA_SM120_E2E=1 for physical SM120 tests")
+class Sm120V14PhysicalTests(unittest.TestCase):
+    def test_real_triton_candidate_runs_the_complete_v14_record_path(self) -> None:
+        ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        case_root = ARTIFACTS / "v14-real-triton"
+        if case_root.exists():
+            self.fail(f"physical acceptance requires a fresh case root: {case_root}")
+        project = Sm120V14Project(case_root)
+        checked = project.check()
+        self.assertEqual(checked["status"], "ready")
+        baseline = project.baseline()
+        self.assertEqual(baseline["measurement_validity"], "valid")
+
+        created = project.run_tool(
+            "workload_evaluate.py",
+            "experiment",
+            project.experiment_input(baseline["result_ref"]),
         )
-        control = {
-            "schema_version": "cuda-workload-optimizer/control-v1",
-            "project_root": str(workspace),
-            "workload_manifest": str(workload_manifest),
-            "baseline_candidate": {
-                "name": "slow-baseline",
-                "revision": "fixture-slow",
-                "path": str(baseline),
+        self.assertEqual(created.returncode, 0, created.stderr)
+        experiment_ref = decode_stdout(created)["experiment_ref"]
+
+        screened = project.run_tool(
+            "workload_evaluate.py",
+            "screen",
+            project.screen_input(experiment_ref),
+            wait=True,
+        )
+        self.assertEqual(screened.returncode, 0, screened.stderr)
+        screen_result = decode_stdout(screened)
+        self.assertEqual(screen_result["measurement_validity"], "valid")
+        self.assertEqual(screen_result["verdict"], "inconclusive")
+        screen_receipt = screen_result["performance_receipt"]
+        self.assertGreater(
+            screen_receipt["statistics"]["estimate_pct"],
+            screen_receipt["acceptance"]["value"],
+        )
+
+        # One diagnostic pair cannot confirm a win. This explicit test path
+        # chooses a formal comparison because the valid signal is large; the
+        # screen tool itself does not promote or start target measurement.
+        compared = project.run_tool(
+            "workload_evaluate.py",
+            "target",
+            project.target_input(experiment_ref),
+            wait=True,
+        )
+        self.assertEqual(compared.returncode, 0, compared.stderr)
+        target_result = decode_stdout(compared)
+        self.assertEqual(target_result["measurement_validity"], "valid")
+        self.assertEqual(target_result["verdict"], "passed")
+
+        selected = project.run_tool(
+            "champion.py",
+            "select",
+            {
+                "format_version": "cuda-kernel-optimizer/champion-input-v1",
+                "operation": "select",
+                "artifact_root": str(project.artifact_root),
+                "target_ref": project.target_ref(),
+                "result_ref": target_result["result_ref"],
+                "expected_selection_ref": None,
             },
-            "budget": "fast",
-            "mutation": {
-                "project_paths": ["candidate.py"],
-                "environment_root": str(case_root / "isolated-environment"),
-                "host_policy": "recommend_only",
-            },
-            "probes": [
+        )
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        self.assertEqual(decode_stdout(selected)["status"], "selected")
+
+        audited = project.run_tool(
+            "workload_evaluate.py",
+            "final_audit",
+            project.final_audit_input(),
+            wait=True,
+        )
+        self.assertEqual(audited.returncode, 0, audited.stderr)
+        audit_result = decode_stdout(audited)
+        self.assertEqual(audit_result["measurement_validity"], "valid")
+        self.assertEqual(audit_result["verdict"], "passed")
+
+        operations = {
+            json.loads(path.read_text(encoding="utf-8"))["operation"]
+            for path in (project.artifact_root / "invocations").glob("*/request.json")
+        }
+        self.assertEqual(operations, {"baseline", "screen", "target", "final_audit"})
+
+    def test_retained_iter0_replay_recomputes_both_rejections_without_writes(self) -> None:
+        replay = Path(os.environ["CUDA_V14_HANDOFF_ROOT"])
+        files = [
+            replay / "blind-run-summary.json",
+            replay / "candidates" / "candidate-01-deferred-output" / "result.json",
+            replay / "candidates" / "candidate-02-native-warp-min" / "result.json",
+        ]
+        before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
+        summary, first, second = [
+            json.loads(path.read_text(encoding="utf-8")) for path in files
+        ]
+
+        spec = importlib.util.spec_from_file_location(
+            "sm120_v14_paired_stats", SCRIPTS / "paired_stats.py"
+        )
+        stats = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(stats)
+
+        first_pair = first["evidence"]["short_paired_complete_service"]
+        first_result = stats.classify_pairs(
+            [{
+                "baseline": first_pair["baseline_endpoint_qps"],
+                "candidate": first_pair["candidate_endpoint_qps"],
+            }],
+            direction="higher",
+            min_effect_pct=first_pair["minimum_effect_percent"],
+            min_valid_pairs=2,
+            bootstrap_samples=200,
+            seed=1,
+        )
+        second_pairs = second["evidence"]["formal_paired_complete_service"]
+        second_result = stats.classify_pairs(
+            [
                 {
-                    "id": "timeline",
-                    "kind": "timeline",
-                    "argv": [sys.executable, str(workspace / "workload_probe.py")],
-                    "timeout_seconds": 60,
+                    "baseline": pair["baseline_endpoint_qps"],
+                    "candidate": pair["candidate_endpoint_qps"],
                 }
+                for pair in second_pairs
             ],
-        }
-        run_dir = case_root / "run"
-        state = controller.start_run(control, run_dir)
-        self.assertEqual(state["next_action"], "register_change")
-        probe = json.loads((run_dir / "probes" / "timeline.json").read_text("utf-8"))
-        diagnosis = json.loads((run_dir / "diagnosis.json").read_text("utf-8"))
-        self.assertEqual(probe["schema_version"], "cuda-workload-optimizer/probe-v1")
+            direction="higher",
+            min_effect_pct=second["minimum_effect_percent"],
+            min_valid_pairs=2,
+            bootstrap_samples=1000,
+            seed=2,
+        )
+
+        self.assertEqual(first_result["status"], "inconclusive")
+        self.assertLess(first_result["estimate_pct"], first_pair["minimum_effect_percent"])
+        self.assertEqual(second_result["status"], "inconclusive")
+        self.assertAlmostEqual(
+            second_result["estimate_pct"],
+            second["formal_observed_median_gain_percent"],
+            places=6,
+        )
+        self.assertEqual(summary["terminal_decision"], "STOP")
+        self.assertEqual([first["outcome"], second["outcome"]], ["REJECT", "REJECT"])
         self.assertEqual(
-            diagnosis["schema_version"], "cuda-workload-optimizer/diagnosis-v1"
-        )
-
-        change = {
-            "schema_version": "cuda-workload-optimizer/change-v1",
-            "id": "round-1-remove-redundant-launches",
-            "hypothesis": "Two redundant launches dominate this fixture workload.",
-            "diagnosis_ids": diagnosis["diagnosis_ids"] or ["kernel:fixture"],
-            "scope": "project",
-            "risk": "low",
-            "candidate": {
-                "name": "single-launch",
-                "revision": "fixture-fast",
-                "path": str(candidate),
-                "claim_layer": "workload",
-                "cheapest_falsifier": "static_review",
-                "estimated_cost": {
-                    "static_review": {
-                        "p90_seconds": 1,
-                        "basis": "declared_upper_bound",
-                    },
-                    "build_correctness": {
-                        "p90_seconds": 10,
-                        "basis": "declared_upper_bound",
-                    },
-                    "short_paired": {
-                        "p90_seconds": 30,
-                        "basis": "declared_upper_bound",
-                    },
-                    "profiler": {
-                        "p90_seconds": 60,
-                        "basis": "declared_upper_bound",
-                    },
-                    "formal_paired": {
-                        "p90_seconds": 120,
-                        "basis": "declared_upper_bound",
-                    },
-                },
-                "minimum_effect": {"metric": "service_pct", "value": 1.0},
-                "rejection_condition": "upper_bound_below_minimum_or_gate_failed",
-                "promotion_condition": "all_required_gates_passed",
-            },
-            "paths": ["candidate.py"],
-            "commands": [],
-            "rollback": "restore_frozen_snapshot",
-            "expected_metrics": ["gpu_busy_pct", "latency_ms", "output_checksum"],
-        }
-        controller.register_change(control, run_dir, change)
-        slow_hash = _fixture_hash(candidate)
-        shutil.copy2(workspace / "triton_vector.py", candidate)
-        self.assertNotEqual(_fixture_hash(candidate), slow_hash)
-
-        decision = controller.evaluate_change(run_dir)
-
-        self.assertEqual(decision["status"], "promoted")
-        evaluation = json.loads((run_dir / "evaluation.json").read_text("utf-8"))
-        review = json.loads((run_dir / "review.json").read_text("utf-8"))
-        self.assertEqual(evaluation["primary"]["status"], "confirmed_win")
-        self.assertTrue(
-            all(item["status"] == "passed" for item in evaluation["constraints"])
-        )
-        self.assertEqual(review["status"], "skipped")
-        self.assertEqual(controller.evaluate_change(run_dir), decision)
-        self.assertEqual(controller.resume_run(run_dir)["next_action"], "done")
-        self.assertIn(
-            "No host mutation was executed",
-            (run_dir / "host_recommendations.md").read_text("utf-8"),
+            {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in files},
+            before,
         )
 
 
