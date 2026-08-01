@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -151,6 +152,15 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
             normalized = self.adapter.validate_driver_result(output, request)
             self.assertEqual(normalized["artifacts"], result["artifacts"])
 
+            collision = copy.deepcopy(result)
+            collision["artifacts"][0]["relative_path"] = "result.json"
+            collision["artifacts"][0]["sha256"] = hashlib.sha256(
+                json.dumps(collision, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            output.write_text(json.dumps(collision), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "reserved"):
+                self.adapter.validate_driver_result(output, request)
+
             escaped = copy.deepcopy(result)
             escaped["artifacts"][0]["relative_path"] = "../trace.json"
             output.write_text(json.dumps(escaped), encoding="utf-8")
@@ -252,6 +262,99 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
 class ProfileCollectionBindingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.adapter = _load_adapter()
+
+    def test_analysis_artifact_resolves_from_frozen_driver_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = V14Project(Path(temporary))
+            driver = project.driver.read_text(encoding="utf-8")
+            driver = driver.replace("import argparse\n", "import argparse\nimport hashlib\n")
+            driver = driver.replace(
+                "result = {\n",
+                "artifact_path = Path(request['output_path']).parent / 'kernel.bin'\n"
+                "artifact_path.write_bytes(b'frozen-kernel')\n"
+                "artifact_sha256 = hashlib.sha256(artifact_path.read_bytes()).hexdigest()\n"
+                "result = {\n",
+            )
+            driver = driver.replace(
+                "    'artifacts': [],\n",
+                "    'artifacts': [{'kind': 'binary', 'relative_path': 'kernel.bin', 'sha256': artifact_sha256}],\n",
+            )
+            project.driver.write_text(driver, encoding="utf-8")
+            project.check()
+            baseline = project.baseline()
+            invocation_id = baseline["result_ref"]["invocation_id"]
+            shutil.rmtree(
+                project.artifact_root / "invocations" / invocation_id / "driver"
+            )
+
+            resolved = self.adapter.resolve_analysis_artifact(
+                artifact_root=project.artifact_root,
+                target_ref=project.target_ref(),
+                artifact_ref={
+                    "source": "invocation_driver_artifact",
+                    "invocation_ref": baseline["result_ref"],
+                    "receipt_index": 0,
+                    "relative_path": "kernel.bin",
+                },
+            )
+
+            self.assertEqual(resolved["artifact"]["kind"], "binary")
+            self.assertEqual(resolved["artifact"]["relative_path"], "kernel.bin")
+            self.assertEqual(resolved["role"], "original")
+            self.assertNotIn("experiment_ref", resolved)
+            self.assertNotIn("mechanism_key", resolved)
+
+    def test_analysis_artifact_resolves_diagnostic_target_material(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "artifacts"
+            material_path = Path(temporary) / "kernel.ptx"
+            material_path.write_text(".version 8.0\n", encoding="utf-8")
+            object_ref = self.adapter.STORE.freeze_path(
+                root,
+                material_path,
+                {
+                    "max_files": 1,
+                    "max_total_bytes": 1024,
+                    "max_wall_seconds": 1.0,
+                },
+            )
+            material = {
+                "id": "material-ptx",
+                "sha256": object_ref["digest"],
+                "kind": "compiler",
+                "tool": "nvcc",
+                "tool_version": "13.0",
+                "dialect": "ptx-v1",
+                "object_ref": object_ref,
+            }
+            target = {
+                "record_type": "target",
+                "format_version": "cuda-kernel-optimizer/target-v1",
+                "id": "target-diagnostic",
+                "target_mode": "diagnostic",
+                "diagnostic_materials": [material],
+                "environment": {"host": {"tools": {}}, "runtime": {"status": "unavailable"}},
+            }
+            self.adapter.STORE.create_regular_json(root / "target.json", target)
+            target_ref = {
+                "id": target["id"],
+                "sha256": self.adapter.STORE.sha256_file(root / "target.json"),
+            }
+
+            resolved = self.adapter.resolve_analysis_artifact(
+                artifact_root=root,
+                target_ref=target_ref,
+                artifact_ref={
+                    "source": "target_material",
+                    "material_ref": {
+                        "id": material["id"],
+                        "sha256": material["sha256"],
+                    },
+                },
+            )
+
+            self.assertEqual(resolved["artifact"]["dialect"], "ptx-v1")
+            self.assertEqual(resolved["artifact"]["sha256"], hashlib.sha256(b".version 8.0\n").hexdigest())
 
     def _ready_project(self, root: Path) -> tuple[V14Project, dict]:
         project = V14Project(root)
@@ -430,6 +533,7 @@ class ProfileCollectionBindingTests(unittest.TestCase):
             )
             result = json.loads(result_path.read_text(encoding="utf-8"))
             evidence_ref = result["correctness_receipts"][0]["evidence_refs"][0]
+            old_evidence_ref = copy.deepcopy(evidence_ref)
             object_root = project.artifact_root / evidence_ref["locator"]
             manifest_path = object_root / "manifest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -441,6 +545,9 @@ class ProfileCollectionBindingTests(unittest.TestCase):
             object_root.rename(object_root.with_name(new_digest))
             evidence_ref["digest"] = new_digest
             evidence_ref["locator"] = f"objects/sha256/{new_digest}"
+            for receipt in result["command_receipts"]:
+                if receipt.get("driver_output_ref") == old_evidence_ref:
+                    receipt["driver_output_ref"] = copy.deepcopy(evidence_ref)
             write_json(result_path, result)
             screen["result_ref"]["sha256"] = sha256_file(result_path)
 
@@ -468,7 +575,7 @@ class ProfileCollectionBindingTests(unittest.TestCase):
             payload = payload_path.read_bytes()
             payload_path.write_bytes(b"x" + payload[1:])
 
-            with self.assertRaisesRegex(ValueError, "snapshot payload does not match"):
+            with self.assertRaisesRegex(ValueError, "object payload does not match"):
                 self._resolve_candidate(project, baseline, experiment_ref, screen)
 
     def test_template_never_publishes_when_cleanup_is_not_implemented(self) -> None:

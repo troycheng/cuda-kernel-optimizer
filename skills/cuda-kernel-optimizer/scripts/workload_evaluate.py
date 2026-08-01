@@ -14,9 +14,11 @@ import json
 import math
 import os
 import re
+import shutil
 import stat
 import statistics
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -98,9 +100,9 @@ _LIFECYCLE_FIELDS = {
     "invocation_id",
 }
 _OBJECT_SCAN_LIMITS = {
-    "max_files": 1,
-    "max_total_bytes": 4 * 1024 * 1024,
-    "max_wall_seconds": 2.0,
+    "max_files": 129,
+    "max_total_bytes": 8 * 1024 * 1024 * 1024 + 4 * 1024 * 1024,
+    "max_wall_seconds": 120.0,
 }
 
 
@@ -843,115 +845,161 @@ def create_experiment(value) -> dict:
         )
     reference_variant, reference_selection_ref = _current_reference(root, target)
 
+    staging_parent = root / ".staging"
     try:
-        base_manifest, _base_payloads = STORE._snapshot_source(
-            source_base["path"],
-            {
-                "max_files": 10000,
-                "max_total_bytes": 2 * 1024 * 1024 * 1024,
-                "max_wall_seconds": 30.0,
-            },
-        )
-        candidate_manifest, candidate_payloads = STORE._snapshot_source(
-            candidate["path"],
-            {
-                "max_files": 10000,
-                "max_total_bytes": 2 * 1024 * 1024 * 1024,
-                "max_wall_seconds": 30.0,
-            },
-        )
-    except (OSError, ValueError, TimeoutError) as error:
+        STORE._safe_directory(staging_parent)
+    except (OSError, ValueError) as error:
         raise EvaluatorError(
-            "candidate_invalid", "source base or candidate cannot be frozen"
+            "candidate_invalid", "private staging directory is unsafe"
         ) from error
-    if _manifest_digest(base_manifest) != target["original"]["digest"]:
-        raise EvaluatorError(
-            "source_base_changed",
-            "source_base does not match the frozen original Variant",
-        )
-    changed_paths = _changed_paths(base_manifest, candidate_manifest)
-    if not changed_paths:
-        raise EvaluatorError("candidate_unchanged", "candidate has no content change")
-    if any(
-        not any(
-            path == allowed or path.startswith(allowed.rstrip("/") + "/")
-            for allowed in change_scope
-        )
-        for path in changed_paths
-    ):
-        raise EvaluatorError(
-            "change_scope_exceeded",
-            "candidate changes paths outside change_scope",
-        )
-    candidate_object = STORE.freeze_snapshot(
-        root,
-        candidate_manifest,
-        candidate_payloads,
+    staging_root = Path(
+        tempfile.mkdtemp(prefix="experiment-", dir=staging_parent)
     )
-    candidate_variant = {
-        "role": "candidate",
-        "kind": candidate["kind"],
-        "digest": candidate_object["digest"],
-        "locator": candidate_object["locator"],
+    scan_limits = {
+        "max_files": 10000,
+        "max_total_bytes": 2 * 1024 * 1024 * 1024,
+        "max_wall_seconds": 30.0,
     }
-    core = {
-        "target_ref": request["target_ref"],
-        "baseline_ref": request["baseline_ref"],
-        "source_base": target["original"],
-        "reference_variant": reference_variant,
-        "reference_selection_ref": reference_selection_ref,
-        "candidate": candidate_variant,
-        "hypothesis": hypothesis,
-        "mechanism_key": mechanism_key,
-        "claim_layer": claim_layer,
-        "cheapest_falsifier": falsifier,
-        "screen_design": screen,
-        "estimated_cost": costs,
-        "minimum_effect": minimum,
-        "reject_if": reject_if,
-        "promote_if": promote_if,
-        "change_scope": change_scope,
-        "changed_paths": changed_paths,
-        "max_risk": request["max_risk"],
-    }
-    experiment_id = "exp-" + hashlib.sha256(_canonical_bytes(core)).hexdigest()
-    record = {
-        "record_type": "experiment",
-        "format_version": "cuda-kernel-optimizer/experiment-v1",
-        "id": experiment_id,
-        **core,
-    }
-    path = root / "experiments" / f"{experiment_id}.json"
     try:
-        STORE.create_regular_json(path, record)
-    except FileExistsError:
-        existing = STORE.read_regular_bytes(path)
-        expected = (
-            json.dumps(
-                record,
-                indent=2,
-                ensure_ascii=False,
-                allow_nan=False,
+        try:
+            base_object = STORE.freeze_path(
+                staging_root, source_base["path"], scan_limits
             )
+            candidate_object = STORE.freeze_path(
+                staging_root, candidate["path"], scan_limits
+            )
+            base_manifest = STORE._load_object_manifest(
+                staging_root, base_object, verify_payload=True
+            )
+            candidate_manifest = STORE._load_object_manifest(
+                staging_root, candidate_object, verify_payload=True
+            )
+        except (OSError, ValueError, TimeoutError) as error:
+            raise EvaluatorError(
+                "candidate_invalid", "source base or candidate cannot be frozen"
+            ) from error
+        if _manifest_digest(base_manifest) != target["original"]["digest"]:
+            raise EvaluatorError(
+                "source_base_changed",
+                "source_base does not match the frozen original Variant",
+            )
+        changed_paths = _changed_paths(base_manifest, candidate_manifest)
+        if not changed_paths:
+            raise EvaluatorError(
+                "candidate_unchanged", "candidate has no content change"
+            )
+        if any(
+            not any(
+                path == allowed or path.startswith(allowed.rstrip("/") + "/")
+                for allowed in change_scope
+            )
+            for path in changed_paths
+        ):
+            raise EvaluatorError(
+                "change_scope_exceeded",
+                "candidate changes paths outside change_scope",
+            )
+        candidate_variant = {
+            "role": "candidate",
+            "kind": candidate["kind"],
+            "digest": candidate_object["digest"],
+            "locator": candidate_object["locator"],
+        }
+        core = {
+            "target_ref": request["target_ref"],
+            "baseline_ref": request["baseline_ref"],
+            "source_base": target["original"],
+            "reference_variant": reference_variant,
+            "reference_selection_ref": reference_selection_ref,
+            "candidate": candidate_variant,
+            "hypothesis": hypothesis,
+            "mechanism_key": mechanism_key,
+            "claim_layer": claim_layer,
+            "cheapest_falsifier": falsifier,
+            "screen_design": screen,
+            "estimated_cost": costs,
+            "minimum_effect": minimum,
+            "reject_if": reject_if,
+            "promote_if": promote_if,
+            "change_scope": change_scope,
+            "changed_paths": changed_paths,
+            "max_risk": request["max_risk"],
+        }
+        experiment_id = "exp-" + hashlib.sha256(_canonical_bytes(core)).hexdigest()
+        record = {
+            "record_type": "experiment",
+            "format_version": "cuda-kernel-optimizer/experiment-v1",
+            "id": experiment_id,
+            **core,
+        }
+        path = root / "experiments" / f"{experiment_id}.json"
+        expected = (
+            json.dumps(record, indent=2, ensure_ascii=False, allow_nan=False)
             + "\n"
         ).encode("utf-8")
-        if existing != expected:
-            raise EvaluatorError(
-                "experiment_conflict",
-                "existing experiment does not match deterministic identity",
-            )
-    return {
-        "status": "created",
-        "experiment_ref": {
-            "id": experiment_id,
-            "sha256": STORE.sha256_file(path),
-        },
-        "candidate_ref": {
-            "digest": candidate_variant["digest"],
-            "locator": candidate_variant["locator"],
-        },
-        "reference_selection_ref": reference_selection_ref,
-    }
+        relative_record = Path("experiments") / f"{experiment_id}.json"
+        relative_object = Path(candidate_object["locator"])
+        with STORE._locked_reference(root, relative_record):
+            if path.exists():
+                if STORE.read_regular_bytes(path) != expected:
+                    raise EvaluatorError(
+                        "experiment_conflict",
+                        "existing experiment does not match deterministic identity",
+                    )
+                try:
+                    STORE._load_object_manifest(
+                        root, candidate_object, verify_payload=True
+                    )
+                except (OSError, ValueError):
+                    STORE._promote_staged_object(
+                        root, staging_root, candidate_object
+                    )
+            else:
+                with STORE._locked_reference(root, relative_object):
+                    destination = root / relative_object
+                    existed = os.path.lexists(destination)
+                    STORE._promote_staged_object(
+                        root, staging_root, candidate_object
+                    )
+                    try:
+                        STORE.create_regular_json(path, record)
+                    except BaseException:
+                        if not existed and not os.path.lexists(path):
+                            metadata = os.lstat(destination)
+                            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(
+                                metadata.st_mode
+                            ):
+                                raise ValueError(
+                                    "promoted candidate object became unsafe"
+                                )
+                            shutil.rmtree(destination)
+                            parent_fd = os.open(
+                                destination.parent,
+                                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                            )
+                            try:
+                                os.fsync(parent_fd)
+                            finally:
+                                os.close(parent_fd)
+                        raise
+        return {
+            "status": "created",
+            "experiment_ref": {
+                "id": experiment_id,
+                "sha256": STORE.sha256_file(path),
+            },
+            "candidate_ref": {
+                "digest": candidate_variant["digest"],
+                "locator": candidate_variant["locator"],
+            },
+            "reference_selection_ref": reference_selection_ref,
+        }
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        try:
+            staging_parent.rmdir()
+        except OSError:
+            pass
 
 
 def _validate_screen_input(value) -> tuple[dict, Path, dict, dict]:
@@ -1482,7 +1530,9 @@ def _driver_call(
 ) -> tuple[dict | None, dict, dict]:
     call_dir = invocation_dir / "driver" / f"{index:04d}-{mode}-{case_id}"
     call_dir.mkdir(parents=True)
-    output_path = call_dir / "result.json"
+    output_dir = call_dir / "output"
+    output_dir.mkdir()
+    output_path = output_dir / "result.json"
     driver_request = ADAPTER.build_driver_request(
         target_id=request["target_ref"]["id"],
         execution_id=invocation_dir.name,
@@ -1515,9 +1565,37 @@ def _driver_call(
             "command_result": command_result,
         }
     try:
+        evidence_ref = STORE.freeze_path(
+            os.environ["CKO_ARTIFACT_ROOT"],
+            output_dir,
+            _OBJECT_SCAN_LIMITS,
+        )
+        frozen_output = STORE.materialize_object(
+            os.environ["CKO_ARTIFACT_ROOT"],
+            evidence_ref,
+            call_dir / "frozen-output",
+        )
+        output_manifest = STORE._load_object_manifest(
+            os.environ["CKO_ARTIFACT_ROOT"],
+            evidence_ref,
+            verify_payload=True,
+        )
+    except (OSError, ValueError, TimeoutError) as error:
+        invalid = {
+            **command_result,
+            "status": "failed",
+            "stop_reason": "driver_output_freeze_failed",
+            "stderr": str(error)[:1024],
+        }
+        return None, invalid, {
+            "request": driver_request,
+            "command_result": invalid,
+        }
+    try:
         driver_result = ADAPTER.validate_driver_result(
-            output_path,
+            frozen_output / "result.json",
             driver_request,
+            bundle_manifest=output_manifest,
         )
     except (OSError, ValueError) as error:
         invalid = {
@@ -1541,15 +1619,11 @@ def _driver_call(
             "request": driver_request,
             "command_result": invalid,
         }
-    evidence_ref = STORE.freeze_path(
-        os.environ["CKO_ARTIFACT_ROOT"],
-        output_path,
-        _OBJECT_SCAN_LIMITS,
-    )
     return driver_result, command_result, {
         "request": driver_request,
         "command_result": command_result,
-        "driver_result_ref": evidence_ref,
+        "driver_output_ref": evidence_ref,
+        "driver_artifacts": driver_result["artifacts"],
     }
 
 
@@ -1671,7 +1745,7 @@ def _run_baseline_worker(
                     "acceptance": target["correctness"]["acceptance"],
                     "metrics": correctness["metrics"],
                     "gate": correctness_gate,
-                    "evidence_refs": [receipt["driver_result_ref"]],
+                    "evidence_refs": [receipt["driver_output_ref"]],
                 }
             )
             if not correctness_gate["passed"]:
@@ -1709,7 +1783,7 @@ def _run_baseline_worker(
                 {
                     "case_id": case_id,
                     **driver_result["measurements"],
-                    "evidence_ref": receipt["driver_result_ref"],
+                    "evidence_ref": receipt["driver_output_ref"],
                 }
             )
     else:
@@ -1748,7 +1822,7 @@ def _run_baseline_worker(
                     "acceptance": target["correctness"]["acceptance"],
                     "metrics": correctness["metrics"],
                     "gate": correctness_gate,
-                    "evidence_refs": [receipt["driver_result_ref"]],
+                    "evidence_refs": [receipt["driver_output_ref"]],
                 }
             )
             if not correctness_gate["passed"]:
@@ -1762,7 +1836,7 @@ def _run_baseline_worker(
                 {
                     "case_id": case_id,
                     **driver_result["measurements"],
-                    "evidence_ref": receipt["driver_result_ref"],
+                    "evidence_ref": receipt["driver_output_ref"],
                 }
             )
 
@@ -1999,7 +2073,7 @@ def _run_screen_worker(
                     "acceptance": target["correctness"]["acceptance"],
                     "metrics": correctness["metrics"],
                     "gate": correctness_gate,
-                    "evidence_refs": [receipt["driver_result_ref"]],
+                    "evidence_refs": [receipt["driver_output_ref"]],
                 }
             )
             if not correctness_gate["passed"]:
@@ -2073,7 +2147,7 @@ def _run_screen_worker(
                             "acceptance": target["correctness"]["acceptance"],
                             "metrics": correctness["metrics"],
                             "gate": correctness_gate,
-                            "evidence_refs": [receipt["driver_result_ref"]],
+                            "evidence_refs": [receipt["driver_output_ref"]],
                         }
                     )
                     if not correctness_gate["passed"]:
@@ -2084,7 +2158,7 @@ def _run_screen_worker(
                         result["stop_reason"] = "correctness_failed"
                         return _finish(result, started_mono=started_mono)
                 values[role] = _measurement_values(driver_result, target)
-                pair_evidence.append(receipt["driver_result_ref"])
+                pair_evidence.append(receipt["driver_output_ref"])
             pairs.append(
                 {
                     "pair_index": pair_index,
@@ -2329,7 +2403,7 @@ def _run_formal_worker(
                 case_id=case_id,
                 target=target,
                 driver_result=driver_result,
-                evidence_ref=receipt["driver_result_ref"],
+                evidence_ref=receipt["driver_output_ref"],
             )
             correctness_receipts.append(correctness)
             if not correctness["passed"]:
@@ -2430,7 +2504,7 @@ def _run_formal_worker(
                         case_id=case_id,
                         target=target,
                         driver_result=driver_result,
-                        evidence_ref=receipt["driver_result_ref"],
+                        evidence_ref=receipt["driver_output_ref"],
                     )
                     correctness_receipts.append(correctness)
                     if not correctness["passed"]:
@@ -2456,7 +2530,7 @@ def _run_formal_worker(
                             )
                         return _finish(result, started_mono=started_mono)
                 values[role] = _measurement_values(driver_result, target)
-                pair_evidence.append(receipt["driver_result_ref"])
+                pair_evidence.append(receipt["driver_output_ref"])
             pairs.append(
                 {
                     "pair_index": pair_index,

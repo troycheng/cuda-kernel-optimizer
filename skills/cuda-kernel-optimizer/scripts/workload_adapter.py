@@ -758,7 +758,7 @@ def _profile_variant(value, label: str, *, expected_role: str | None = None) -> 
     }
 
 
-def _profile_evidence_ref(root: Path, value) -> dict:
+def _profile_evidence_ref(root: Path, value, command_receipts) -> dict:
     evidence_ref = _closed(
         value,
         _PROFILE_EVIDENCE_REF_FIELDS,
@@ -773,21 +773,53 @@ def _profile_evidence_ref(root: Path, value) -> dict:
     expected_locator = f"objects/sha256/{digest}"
     if locator != expected_locator:
         raise ValueError("correctness receipt evidence_ref locator is not content-bound")
-    if evidence_ref["source_kind"] != "file":
-        raise ValueError("correctness receipt evidence_ref must reference one file")
+    if evidence_ref["source_kind"] != "directory":
+        raise ValueError("correctness receipt evidence_ref must reference one driver bundle")
     if (
         type(evidence_ref["file_count"]) is not int
-        or evidence_ref["file_count"] != 1
+        or not 1 <= evidence_ref["file_count"] <= _MAX_ARTIFACTS + 1
         or type(evidence_ref["total_bytes"]) is not int
-        or not 0 < evidence_ref["total_bytes"] <= _MAX_RESULT_BYTES
+        or not 0 < evidence_ref["total_bytes"] <= _MAX_ARTIFACT_BYTES + _MAX_RESULT_BYTES
     ):
         raise ValueError("correctness receipt evidence_ref summary is invalid")
+    if type(command_receipts) is not list:
+        raise ValueError("correctness result command_receipts must be a list")
+    matches = [
+        receipt
+        for receipt in command_receipts
+        if type(receipt) is dict
+        and receipt.get("driver_output_ref") == evidence_ref
+    ]
+    if len(matches) != 1 or set(matches[0]) != {
+        "request", "command_result", "driver_output_ref", "driver_artifacts"
+    }:
+        raise ValueError("correctness evidence is not bound to one driver receipt")
+    receipt = matches[0]
+    if (
+        type(receipt["command_result"]) is not dict
+        or receipt["command_result"].get("status") != "completed"
+    ):
+        raise ValueError("correctness driver receipt did not complete")
     with tempfile.TemporaryDirectory(prefix="cko-profile-evidence-") as temporary:
-        STORE.materialize_object(
+        manifest = STORE._load_object_manifest(
             root,
             evidence_ref,
-            Path(temporary) / "evidence",
+            verify_payload=True,
         )
+        materialized = Path(temporary) / "result.json"
+        STORE.materialize_object_member(
+            root,
+            evidence_ref,
+            "result.json",
+            materialized,
+        )
+        driver_result = validate_driver_result(
+            materialized,
+            receipt["request"],
+            bundle_manifest=manifest,
+        )
+    if driver_result["artifacts"] != receipt["driver_artifacts"]:
+        raise ValueError("correctness driver artifact receipt changed")
     return dict(evidence_ref)
 
 
@@ -867,7 +899,11 @@ def _profile_correctness(
             raise ValueError("correctness receipt gate is not a passing result")
         if type(receipt["evidence_refs"]) is not list or len(receipt["evidence_refs"]) != 1:
             raise ValueError("correctness receipt must contain one content-bound evidence_ref")
-        _profile_evidence_ref(root, receipt["evidence_refs"][0])
+        _profile_evidence_ref(
+            root,
+            receipt["evidence_refs"][0],
+            result.get("command_receipts"),
+        )
         matches.append(receipt)
     if len(matches) != 1:
         raise ValueError(
@@ -968,6 +1004,239 @@ def resolve_profile_collection(
         "correctness_ref": normalized_correctness_ref,
         "driver": driver,
     }
+
+
+def _analysis_target(root: Path, reference) -> tuple[dict, dict]:
+    normalized = _closed(reference, {"id", "sha256"}, "target_ref")
+    normalized = {
+        "id": _text(normalized["id"], "target_ref.id", maximum=128),
+        "sha256": _sha256(normalized["sha256"], "target_ref.sha256"),
+    }
+    target = _read_bound_json(
+        root / "target.json",
+        normalized["sha256"],
+        "target_ref",
+    )
+    if (
+        target.get("record_type") != "target"
+        or target.get("format_version") != "cuda-kernel-optimizer/target-v1"
+        or target.get("id") != normalized["id"]
+        or target.get("target_mode") not in {"optimization", "diagnostic"}
+    ):
+        raise ValueError("target_ref is not one frozen Target")
+    return normalized, target
+
+
+def _analysis_artifact_ref(value) -> dict:
+    if type(value) is not dict:
+        raise ValueError("artifact_ref must be an object")
+    source = value.get("source")
+    optional = {"stage"}
+    if source == "target_material":
+        required = {"source", "material_ref"}
+    elif source == "invocation_driver_artifact":
+        required = {
+            "source", "invocation_ref", "receipt_index", "relative_path"
+        }
+    else:
+        raise ValueError("artifact_ref.source is unsupported")
+    if not required.issubset(value) or set(value) - required - optional:
+        raise ValueError("artifact_ref fields are incomplete or unknown")
+    normalized = {field: value[field] for field in required}
+    if "stage" in value:
+        normalized["stage"] = _text(value["stage"], "artifact_ref.stage", maximum=64)
+    return normalized
+
+
+def resolve_analysis_artifact(*, artifact_root, target_ref, artifact_ref) -> dict:
+    """Resolve one immutable compiler/SASS input without starting a process."""
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
+    if not root.is_dir():
+        raise ValueError("artifact_root is unavailable")
+    normalized_target_ref, target = _analysis_target(root, target_ref)
+    selected = _analysis_artifact_ref(artifact_ref)
+    response = {
+        "artifact_root": str(root),
+        "target_ref": normalized_target_ref,
+        "target": target,
+        "environment": _json_copy(target.get("environment"), "Target environment"),
+    }
+    if "stage" in selected:
+        response["requested_stage"] = selected["stage"]
+
+    if selected["source"] == "target_material":
+        if target.get("target_mode") != "diagnostic":
+            raise ValueError("target_material requires a diagnostic Target")
+        material_ref = _closed(
+            selected["material_ref"], {"id", "sha256"}, "material_ref"
+        )
+        material_ref = {
+            "id": _text(material_ref["id"], "material_ref.id", maximum=128),
+            "sha256": _sha256(material_ref["sha256"], "material_ref.sha256"),
+        }
+        matches = [
+            material
+            for material in target.get("diagnostic_materials", [])
+            if type(material) is dict and material.get("id") == material_ref["id"]
+        ]
+        if (
+            len(matches) != 1
+            or matches[0].get("sha256") != material_ref["sha256"]
+            or type(matches[0].get("object_ref")) is not dict
+        ):
+            raise ValueError("material_ref is not bound to this Target")
+        material = matches[0]
+        manifest = STORE._load_object_manifest(
+            root, material["object_ref"], verify_payload=True
+        )
+        files = [entry for entry in manifest["entries"] if entry["kind"] == "file"]
+        if manifest["source_kind"] != "file" or len(files) != 1:
+            raise ValueError("target material is not one frozen file")
+        return {
+            **response,
+            "source": "target_material",
+            "material_ref": material_ref,
+            "material": _json_copy(material, "diagnostic material"),
+            "object_ref": dict(material["object_ref"]),
+            "artifact": {
+                "kind": material.get("kind"),
+                "dialect": material.get("dialect"),
+                **dict(files[0]),
+            },
+        }
+
+    invocation_ref = _invocation_reference(
+        selected["invocation_ref"], "invocation_ref", include_case=False
+    )
+    result = _read_bound_json(
+        root / "invocations" / invocation_ref["invocation_id"] / "result.json",
+        invocation_ref["sha256"],
+        "invocation_ref",
+    )
+    if (
+        result.get("record_type") != "invocation_result"
+        or result.get("format_version")
+        != "cuda-kernel-optimizer/evaluator-result-v1"
+        or result.get("operation")
+        not in {"baseline", "screen", "target", "final_audit"}
+        or result.get("target_ref") != normalized_target_ref
+        or result.get("execution_status") != "succeeded"
+        or result.get("cleanup_status") != "confirmed"
+    ):
+        raise ValueError("invocation_ref is not an accepted evaluator result")
+    receipts = result.get("command_receipts")
+    index = selected["receipt_index"]
+    if (
+        type(receipts) is not list
+        or isinstance(index, bool)
+        or not isinstance(index, int)
+        or index < 0
+        or index >= len(receipts)
+    ):
+        raise ValueError("artifact_ref.receipt_index is invalid")
+    receipt = receipts[index]
+    if type(receipt) is not dict or set(receipt) != {
+        "request", "command_result", "driver_output_ref", "driver_artifacts"
+    }:
+        raise ValueError("selected command receipt is not a closed driver receipt")
+    if (
+        type(receipt["command_result"]) is not dict
+        or receipt["command_result"].get("status") != "completed"
+    ):
+        raise ValueError("selected driver command did not complete")
+    driver_request = receipt["request"]
+    if (
+        type(driver_request) is not dict
+        or driver_request.get("execution_id") != invocation_ref["invocation_id"]
+        or driver_request.get("target_id") != normalized_target_ref["id"]
+        or driver_request.get("operation") != result["operation"]
+        or driver_request.get("role") not in {"original", "reference", "candidate"}
+    ):
+        raise ValueError("selected driver receipt is not invocation-bound")
+    relative_path = "/".join(
+        _artifact_relative_path(
+            selected["relative_path"], "artifact_ref.relative_path"
+        )
+    )
+    if relative_path == "result.json":
+        raise ValueError("artifact_ref.relative_path is reserved")
+    output_ref = _closed(
+        receipt["driver_output_ref"],
+        _PROFILE_EVIDENCE_REF_FIELDS,
+        "driver_output_ref",
+    )
+    manifest = STORE._load_object_manifest(root, output_ref, verify_payload=True)
+    with tempfile.TemporaryDirectory(prefix="cko-analysis-artifact-") as temporary:
+        STORE.materialize_object_member(
+            root, output_ref, "result.json", Path(temporary) / "result.json"
+        )
+        normalized_driver_result = validate_driver_result(
+            Path(temporary) / "result.json",
+            driver_request,
+            bundle_manifest=manifest,
+        )
+    if normalized_driver_result["artifacts"] != receipt["driver_artifacts"]:
+        raise ValueError("driver artifact receipt changed")
+    artifacts = [
+        artifact
+        for artifact in normalized_driver_result["artifacts"]
+        if artifact["relative_path"] == relative_path
+    ]
+    if len(artifacts) != 1:
+        raise ValueError("artifact_ref does not select one declared driver artifact")
+    artifact = artifacts[0]
+    variants = result.get("variant_refs")
+    role = driver_request.get("role")
+    request_variant = driver_request.get("variant")
+    matches = []
+    if type(variants) is list and type(request_variant) is dict:
+        matches = [
+            variant
+            for variant in variants
+            if type(variant) is dict
+            and variant.get("role") == role
+            and variant.get("kind") == request_variant.get("kind")
+            and variant.get("digest") == request_variant.get("digest")
+        ]
+    if len(matches) != 1:
+        raise ValueError("selected driver receipt Variant is not result-bound")
+    bound = {
+        **response,
+        "source": "invocation_driver_artifact",
+        "invocation_ref": invocation_ref,
+        "receipt_index": index,
+        "object_ref": dict(output_ref),
+        "artifact": dict(artifact),
+        "role": role,
+        "variant": dict(matches[0]),
+    }
+    if role == "candidate":
+        if result.get("operation") not in {"screen", "target"}:
+            raise ValueError("candidate artifact operation is invalid")
+        experiment_ref = result.get("experiment_ref")
+        if type(experiment_ref) is not dict or set(experiment_ref) != {"id", "sha256"}:
+            raise ValueError("candidate artifact has no Experiment binding")
+        experiment = _read_bound_json(
+            root / "experiments" / f"{experiment_ref['id']}.json",
+            experiment_ref["sha256"],
+            "experiment_ref",
+        )
+        if (
+            experiment.get("record_type") != "experiment"
+            or experiment.get("format_version")
+            != "cuda-kernel-optimizer/experiment-v1"
+            or experiment.get("id") != experiment_ref["id"]
+            or experiment.get("target_ref") != normalized_target_ref
+            or experiment.get("candidate") != matches[0]
+        ):
+            raise ValueError("candidate artifact Experiment binding is invalid")
+        bound["experiment_ref"] = dict(experiment_ref)
+        bound["mechanism_key"] = _text(
+            experiment.get("mechanism_key"),
+            "experiment mechanism_key",
+            maximum=256,
+        )
+    return bound
 
 
 def _validate_metrics(value, label: str) -> dict:
@@ -1211,7 +1480,7 @@ def _sha256_relative_regular_file(
             os.close(descriptor)
 
 
-def _validate_artifacts(value, result_path) -> list[dict]:
+def _validate_artifacts(value, result_path, manifest_files=None) -> list[dict]:
     if type(value) is not list:
         raise ValueError("driver result artifacts must be a list")
     if len(value) > _MAX_ARTIFACTS:
@@ -1237,6 +1506,8 @@ def _validate_artifacts(value, result_path) -> list[dict]:
             f"driver result artifacts[{index}].relative_path",
         )
         relative_path = "/".join(parts)
+        if relative_path == "result.json":
+            raise ValueError("driver result artifact path is reserved: result.json")
         if relative_path in relative_paths:
             raise ValueError("driver result artifact paths must be unique")
         relative_paths.add(relative_path)
@@ -1244,11 +1515,19 @@ def _validate_artifacts(value, result_path) -> list[dict]:
             artifact["sha256"],
             f"driver result artifacts[{index}].sha256",
         )
-        actual = _sha256_relative_regular_file(
-            root,
-            parts,
-            f"driver result artifacts[{index}]",
-        )
+        if manifest_files is None:
+            actual = _sha256_relative_regular_file(
+                root,
+                parts,
+                f"driver result artifacts[{index}]",
+            )
+        else:
+            entry = manifest_files.get(relative_path)
+            if type(entry) is not dict or entry.get("kind") != "file":
+                raise ValueError(
+                    f"driver result artifacts[{index}] is absent from frozen bundle"
+                )
+            actual = entry.get("sha256")
         if actual != expected:
             raise ValueError(
                 f"driver result artifacts[{index}] digest does not match"
@@ -1298,7 +1577,7 @@ def evaluate_correctness(correctness: Mapping, acceptance: Mapping) -> dict:
     }
 
 
-def validate_driver_result(path, expected_request: Mapping) -> dict:
+def validate_driver_result(path, expected_request: Mapping, *, bundle_manifest=None) -> dict:
     """Validate one driver result against the exact request that produced it."""
     request = _closed(
         dict(expected_request), _REQUEST_FIELDS, "expected driver request"
@@ -1326,7 +1605,46 @@ def validate_driver_result(path, expected_request: Mapping) -> dict:
     for field, expected in expected_echoes.items():
         if result[field] != expected:
             raise ValueError(f"driver result {field} does not match request")
-    artifacts = _validate_artifacts(result["artifacts"], path)
+    manifest_files = None
+    manifest_directories = None
+    if bundle_manifest is not None:
+        bundle_manifest = STORE._validated_manifest(bundle_manifest)
+        if (
+            bundle_manifest.get("source_kind") != "directory"
+        ):
+            raise ValueError("driver output bundle manifest is invalid")
+        manifest_files = {}
+        manifest_directories = set()
+        for entry in bundle_manifest["entries"]:
+            if type(entry) is not dict or entry.get("kind") not in {"file", "directory"}:
+                raise ValueError("driver output bundle manifest is invalid")
+            relative = "/".join(
+                _artifact_relative_path(
+                    entry.get("path"), "driver output bundle manifest path"
+                )
+            )
+            if entry["kind"] == "file":
+                if relative in manifest_files:
+                    raise ValueError("driver output bundle contains duplicate files")
+                manifest_files[relative] = entry
+            else:
+                manifest_directories.add(relative)
+    artifacts = _validate_artifacts(result["artifacts"], path, manifest_files)
+    if manifest_files is not None:
+        expected_files = {"result.json"} | {
+            artifact["relative_path"] for artifact in artifacts
+        }
+        expected_directories = set()
+        for relative in expected_files:
+            parent = PurePosixPath(relative).parent
+            while str(parent) != ".":
+                expected_directories.add(str(parent))
+                parent = parent.parent
+        if set(manifest_files) != expected_files or manifest_directories != expected_directories:
+            raise ValueError("driver output bundle contains undeclared members")
+        result_entry = manifest_files.get("result.json")
+        if type(result_entry) is not dict or result_entry.get("kind") != "file":
+            raise ValueError("driver output bundle omits result.json")
     cleanup = _closed(
         result["cleanup"], _CLEANUP_RESULT_FIELDS, "driver result cleanup"
     )
@@ -1356,6 +1674,7 @@ __all__ = [
     "evaluate_correctness",
     "materialize_target_inputs",
     "materialize_variant",
+    "resolve_analysis_artifact",
     "resolve_profile_collection",
     "validate_driver",
     "validate_driver_result",

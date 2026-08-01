@@ -47,13 +47,10 @@ _DRIVER_OUTPUT_FREEZE_LIMITS = {
     "max_total_bytes": 16 * 1024 * 1024,
     "max_wall_seconds": 5.0,
 }
-# artifact_store currently reads and materializes complete objects in memory.
-# Keep one-case Nsys collection below that non-streaming boundary; the planned
-# storage consolidation can safely raise this only after adding streaming I/O.
 _NSYS_ARTIFACT_FREEZE_LIMITS = {
     "max_files": 1,
-    "max_total_bytes": 256 * 1024 * 1024,
-    "max_wall_seconds": 30.0,
+    "max_total_bytes": 8 * 1024 * 1024 * 1024,
+    "max_wall_seconds": 120.0,
 }
 
 

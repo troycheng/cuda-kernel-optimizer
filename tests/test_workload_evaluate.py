@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.v14_support import V14Project
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts" / "workload_evaluate.py"
+
+
+def _load_evaluator():
+    spec = importlib.util.spec_from_file_location("workload_evaluate_unit", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class EvaluatorPublicSurfaceTests(unittest.TestCase):
@@ -45,6 +56,60 @@ class EvaluatorPublicSurfaceTests(unittest.TestCase):
             completed = project.run_tool("workload_evaluate.py", "baseline", request)
             self.assertNotEqual(completed.returncode, 0)
             self.assertEqual(list((project.artifact_root / "invocations").iterdir()), before)
+
+    def test_experiment_record_failure_leaves_no_candidate_object(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = V14Project(Path(directory))
+            project.check()
+            baseline_ref = project.baseline()["result_ref"]
+            evaluator = _load_evaluator()
+            object_root = project.artifact_root / "objects" / "sha256"
+            before = {path.name for path in object_root.iterdir()}
+            real_create = evaluator.STORE.create_regular_json
+
+            def fail_experiment(path, value):
+                if Path(path).parent.name == "experiments":
+                    raise OSError("simulated experiment publication failure")
+                return real_create(path, value)
+
+            with mock.patch.object(
+                evaluator.STORE,
+                "create_regular_json",
+                side_effect=fail_experiment,
+            ):
+                with self.assertRaisesRegex(OSError, "simulated experiment"):
+                    evaluator.create_experiment(
+                        project.experiment_input(baseline_ref)
+                    )
+
+            self.assertEqual(
+                {path.name for path in object_root.iterdir()},
+                before,
+            )
+
+    def test_readiness_and_evaluator_use_only_driver_output_bundle_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = V14Project(Path(directory))
+            project.check()
+            target = json.loads(
+                (project.artifact_root / "target.json").read_text(encoding="utf-8")
+            )
+            readiness = target["readiness_evidence"]
+            self.assertEqual(
+                {"driver_output_ref", "driver_artifacts"}.intersection(readiness),
+                {"driver_output_ref", "driver_artifacts"},
+            )
+            self.assertEqual(readiness["driver_output_ref"]["source_kind"], "directory")
+
+            baseline = project.baseline()
+            for receipt in baseline["command_receipts"]:
+                self.assertEqual(
+                    set(receipt),
+                    {"request", "command_result", "driver_output_ref", "driver_artifacts"},
+                )
+                self.assertEqual(receipt["driver_output_ref"]["source_kind"], "directory")
+            self.assertNotIn("driver_result_ref", json.dumps(target))
+            self.assertNotIn("driver_result_ref", json.dumps(baseline))
 
 
 if __name__ == "__main__":

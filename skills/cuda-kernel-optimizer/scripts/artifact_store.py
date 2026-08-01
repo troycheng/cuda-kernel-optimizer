@@ -37,8 +37,6 @@ def publish_directory_noreplace(source: _PathLike, destination: _PathLike) -> No
     destination_path = Path(
         os.path.abspath(os.path.expanduser(os.fspath(destination)))
     )
-    if source_path.parent != destination_path.parent:
-        raise ValueError("directory publication requires one parent directory")
     if not source_path.is_dir() or source_path.is_symlink():
         raise ValueError("published source must be a real directory")
     library = ctypes.CDLL(None, use_errno=True)
@@ -70,19 +68,60 @@ def publish_directory_noreplace(source: _PathLike, destination: _PathLike) -> No
         if code == errno.EEXIST:
             raise FileExistsError(code, os.strerror(code), destination_path)
         raise OSError(code, os.strerror(code), destination_path)
-    parent_fd = os.open(
-        source_path.parent,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-    )
-    try:
-        os.fsync(parent_fd)
-    finally:
-        os.close(parent_fd)
+    for parent in {source_path.parent, destination_path.parent}:
+        parent_fd = os.open(
+            parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
 
 
 def sha256_file(path: _PathLike) -> str:
     """Return a stable SHA-256 digest without following path symlinks."""
-    return hashlib.sha256(read_regular_bytes(path)).hexdigest()
+    try:
+        directory_fd, leaf, target = _open_parent_directory(path, create=False)
+    except FileNotFoundError as error:
+        raise ValueError(f"artifact file does not exist: {path}") from error
+    descriptor = None
+    try:
+        try:
+            descriptor = os.open(
+                leaf,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+        except OSError as error:
+            if error.errno in {errno.ELOOP, errno.ENOENT, errno.ENOTDIR}:
+                raise ValueError(
+                    f"artifact file is missing, a symlink, or unsafe: {target}"
+                ) from error
+            raise
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"artifact path is not a regular file: {target}")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, _STREAM_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
+        ) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        ) or total != before.st_size:
+            raise ValueError(f"artifact file changed while hashing: {target}")
+        return digest.hexdigest()
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory_fd)
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -743,219 +782,12 @@ def _scan_limits(value) -> tuple[int, int, float]:
     return max_files, max_total_bytes, float(max_wall_seconds)
 
 
-def _read_snapshot_file(
-    directory_fd: int,
-    name: str,
-    display_path: Path,
-    *,
-    deadline: float,
-    remaining_bytes: int,
-) -> tuple[bytes, int]:
-    if time.monotonic() >= deadline:
-        raise TimeoutError("artifact scan exceeded max_wall_seconds")
-    descriptor = None
-    try:
-        descriptor = os.open(
-            name,
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=directory_fd,
-        )
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode):
-            raise ValueError(f"snapshot input is not a regular file: {display_path}")
-        if before.st_size > remaining_bytes:
-            raise ValueError("artifact scan exceeded max_total_bytes")
-        chunks = []
-        total = 0
-        while True:
-            if time.monotonic() >= deadline:
-                raise TimeoutError("artifact scan exceeded max_wall_seconds")
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > remaining_bytes:
-                raise ValueError("artifact scan exceeded max_total_bytes")
-            chunks.append(chunk)
-        after = os.fstat(descriptor)
-        if (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-        ) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-        ):
-            raise ValueError(f"snapshot input changed while reading: {display_path}")
-        payload = b"".join(chunks)
-        if len(payload) != before.st_size:
-            raise ValueError(f"snapshot input size changed: {display_path}")
-        return payload, stat.S_IMODE(before.st_mode)
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
+_STREAM_CHUNK_BYTES = 1024 * 1024
+_MAX_OBJECT_MANIFEST_BYTES = 16 * 1024 * 1024
 
 
-def _scan_directory(
-    directory_fd: int,
-    relative: Path,
-    display_root: Path,
-    *,
-    deadline: float,
-    records: list[dict],
-    payloads: dict[str, bytes],
-    counters: dict[str, int],
-    max_files: int,
-    max_total_bytes: int,
-) -> None:
-    if time.monotonic() >= deadline:
-        raise TimeoutError("artifact scan exceeded max_wall_seconds")
-    for name in sorted(os.listdir(directory_fd)):
-        if name in {".", ".."}:
-            continue
-        child_relative = relative / name
-        display_path = display_root / child_relative
-        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if stat.S_ISLNK(metadata.st_mode):
-            raise ValueError(f"snapshot input contains a symlink: {display_path}")
-        if stat.S_ISDIR(metadata.st_mode):
-            records.append(
-                {
-                    "path": child_relative.as_posix(),
-                    "kind": "directory",
-                    "mode": stat.S_IMODE(metadata.st_mode),
-                }
-            )
-            child_fd = os.open(
-                name,
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=directory_fd,
-            )
-            try:
-                _scan_directory(
-                    child_fd,
-                    child_relative,
-                    display_root,
-                    deadline=deadline,
-                    records=records,
-                    payloads=payloads,
-                    counters=counters,
-                    max_files=max_files,
-                    max_total_bytes=max_total_bytes,
-                )
-            finally:
-                os.close(child_fd)
-            continue
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError(f"snapshot input contains an unsupported entry: {display_path}")
-        payload, mode = _read_snapshot_file(
-            directory_fd,
-            name,
-            display_path,
-            deadline=deadline,
-            remaining_bytes=max_total_bytes - counters["bytes"],
-        )
-        counters["files"] += 1
-        counters["bytes"] += len(payload)
-        if counters["files"] > max_files:
-            raise ValueError("artifact scan exceeded max_files")
-        if counters["bytes"] > max_total_bytes:
-            raise ValueError("artifact scan exceeded max_total_bytes")
-        key = child_relative.as_posix()
-        payloads[key] = payload
-        records.append(
-            {
-                "path": key,
-                "kind": "file",
-                "mode": mode,
-                "size_bytes": len(payload),
-                "sha256": hashlib.sha256(payload).hexdigest(),
-            }
-        )
-
-
-def _snapshot_source(source, scan_limits) -> tuple[dict, dict[str, bytes]]:
-    max_files, max_total_bytes, max_wall_seconds = _scan_limits(scan_limits)
-    deadline = time.monotonic() + max_wall_seconds
-    target = Path(os.path.abspath(os.path.expanduser(os.fspath(source))))
-    parent_fd, leaf, _target = _open_parent_directory(target, create=False)
-    records = []
-    payloads = {}
-    counters = {"files": 0, "bytes": 0}
-    try:
-        metadata = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-        if stat.S_ISLNK(metadata.st_mode):
-            raise ValueError(f"snapshot input is a symlink: {target}")
-        if stat.S_ISREG(metadata.st_mode):
-            payload, mode = _read_snapshot_file(
-                parent_fd,
-                leaf,
-                target,
-                deadline=deadline,
-                remaining_bytes=max_total_bytes,
-            )
-            counters = {"files": 1, "bytes": len(payload)}
-            if counters["files"] > max_files or counters["bytes"] > max_total_bytes:
-                raise ValueError("artifact scan exceeded configured limits")
-            payloads[target.name] = payload
-            records.append(
-                {
-                    "path": target.name,
-                    "kind": "file",
-                    "mode": mode,
-                    "size_bytes": len(payload),
-                    "sha256": hashlib.sha256(payload).hexdigest(),
-                }
-            )
-            source_kind = "file"
-        elif stat.S_ISDIR(metadata.st_mode):
-            source_fd = os.open(
-                leaf,
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=parent_fd,
-            )
-            try:
-                _scan_directory(
-                    source_fd,
-                    Path(),
-                    target,
-                    deadline=deadline,
-                    records=records,
-                    payloads=payloads,
-                    counters=counters,
-                    max_files=max_files,
-                    max_total_bytes=max_total_bytes,
-                )
-            finally:
-                os.close(source_fd)
-            source_kind = "directory"
-        else:
-            raise ValueError(f"snapshot input has unsupported type: {target}")
-    finally:
-        os.close(parent_fd)
-    manifest = {
-        "format_version": "cuda-kernel-optimizer/object-manifest-v1",
-        "source_kind": source_kind,
-        "entries": records,
-        "file_count": counters["files"],
-        "total_bytes": counters["bytes"],
-    }
-    return manifest, payloads
-
-
-def _validated_snapshot(manifest, payloads) -> tuple[dict, dict[str, bytes]]:
-    """Validate one self-contained snapshot before it enters the object store."""
+def _validated_manifest(manifest) -> dict:
+    """Validate canonical object metadata without loading payloads."""
     if type(manifest) is not dict or set(manifest) != {
         "format_version", "source_kind", "entries", "file_count", "total_bytes"
     }:
@@ -966,10 +798,7 @@ def _validated_snapshot(manifest, payloads) -> tuple[dict, dict[str, bytes]]:
         raise ValueError("snapshot manifest source_kind is unsupported")
     if type(manifest["entries"]) is not list:
         raise ValueError("snapshot manifest entries must be a list")
-    if not isinstance(payloads, Mapping):
-        raise ValueError("snapshot payloads must be a mapping")
-
-    files: dict[str, bytes] = {}
+    files: dict[str, dict] = {}
     directories = set()
     total_bytes = 0
     for entry in manifest["entries"]:
@@ -1006,21 +835,9 @@ def _validated_snapshot(manifest, payloads) -> tuple[dict, dict[str, bytes]]:
             or key in directories
         ):
             raise ValueError("snapshot file entry metadata is invalid")
-        try:
-            payload = payloads[key]
-        except KeyError as error:
-            raise ValueError(f"snapshot payload is missing: {key}") from error
-        if not isinstance(payload, bytes):
-            raise ValueError("snapshot payload must be bytes")
-        if len(payload) != size or hashlib.sha256(payload).hexdigest() != digest:
-            raise ValueError("snapshot payload does not match manifest")
-        files[key] = payload
+        files[key] = entry
         total_bytes += size
 
-    if set(payloads) != set(files):
-        raise ValueError("snapshot payload paths do not match manifest")
-    if any(not isinstance(key, str) for key in payloads):
-        raise ValueError("snapshot payload paths must be strings")
     if (
         isinstance(manifest["file_count"], bool)
         or not isinstance(manifest["file_count"], int)
@@ -1045,66 +862,10 @@ def _validated_snapshot(manifest, payloads) -> tuple[dict, dict[str, bytes]]:
         raise ValueError("snapshot file entry cannot contain child entries")
     if manifest["source_kind"] == "file" and (len(files) != 1 or directories):
         raise ValueError("snapshot file source must contain exactly one file")
-    return manifest, files
+    return manifest
 
 
-def freeze_snapshot(artifact_root, manifest, payloads) -> dict:
-    """Publish one already-captured snapshot without reading its source again."""
-    manifest, payloads = _validated_snapshot(manifest, payloads)
-    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
-    digest = hashlib.sha256(_canonical_json_bytes(manifest)).hexdigest()
-    object_parent = root / "objects" / "sha256"
-    object_parent.mkdir(parents=True, exist_ok=True)
-    destination = object_parent / digest
-    if destination.exists():
-        existing = read_regular_bytes(destination / "manifest.json")
-        if existing != _canonical_json_bytes(manifest) + b"\n":
-            raise ValueError("content-addressed object manifest does not match")
-    else:
-        temporary = object_parent / f".{digest}.{secrets.token_hex(8)}.tmp"
-        try:
-            temporary.mkdir(mode=0o700)
-            payload_root = temporary / "payload"
-            payload_root.mkdir(mode=0o700)
-            for record in manifest["entries"]:
-                target = payload_root / record["path"]
-                if record["kind"] == "directory":
-                    target.mkdir(mode=record["mode"], parents=True, exist_ok=True)
-                    continue
-                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                create_regular_bytes(target, payloads[record["path"]])
-                os.chmod(target, record["mode"], follow_symlinks=False)
-            create_regular_bytes(
-                temporary / "manifest.json",
-                _canonical_json_bytes(manifest) + b"\n",
-            )
-            try:
-                publish_directory_noreplace(temporary, destination)
-            except FileExistsError:
-                existing = read_regular_bytes(destination / "manifest.json")
-                if existing != _canonical_json_bytes(manifest) + b"\n":
-                    raise ValueError(
-                        "content-addressed object manifest does not match"
-                    )
-        finally:
-            shutil.rmtree(temporary, ignore_errors=True)
-    return {
-        "digest": digest,
-        "locator": str(Path("objects") / "sha256" / digest),
-        "source_kind": manifest["source_kind"],
-        "file_count": manifest["file_count"],
-        "total_bytes": manifest["total_bytes"],
-    }
-
-
-def freeze_path(artifact_root, source, scan_limits) -> dict:
-    """Capture a bounded source once, then publish that exact snapshot."""
-    manifest, payloads = _snapshot_source(source, scan_limits)
-    return freeze_snapshot(artifact_root, manifest, payloads)
-
-
-def materialize_object(artifact_root, object_ref, destination) -> Path:
-    """Verify and copy one frozen object into a new isolated path."""
+def _object_reference(object_ref) -> tuple[str, Path, dict]:
     if type(object_ref) is not dict:
         raise ValueError("object_ref must be an object")
     required = {"digest", "locator"}
@@ -1114,13 +875,256 @@ def materialize_object(artifact_root, object_ref, destination) -> Path:
     digest = object_ref["digest"]
     if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
         raise ValueError("object_ref.digest must be a lowercase SHA-256")
-    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
     locator = _relative_artifact_path(object_ref["locator"])
     expected_locator = Path("objects") / "sha256" / digest
     if locator != expected_locator:
         raise ValueError("object_ref locator does not match its digest")
+    return digest, locator, {field: object_ref[field] for field in optional if field in object_ref}
+
+
+def _safe_directory(path: Path) -> None:
+    directory_fd, _leaf, _target = _open_parent_directory(
+        path / ".directory-probe", create=True
+    )
+    try:
+        metadata = os.fstat(directory_fd)
+    finally:
+        os.close(directory_fd)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError(f"object store path is not a safe directory: {path}")
+
+
+def _copy_source_file(
+    directory_fd: int,
+    name: str,
+    destination: Path,
+    display_path: Path,
+    *,
+    deadline: float,
+    remaining_bytes: int,
+) -> dict:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("artifact scan exceeded max_wall_seconds")
+    source_fd = destination_fd = None
+    try:
+        source_fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        before = os.fstat(source_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"snapshot input is not a regular file: {display_path}")
+        if before.st_size > remaining_bytes:
+            raise ValueError("artifact scan exceeded max_total_bytes")
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("artifact scan exceeded max_wall_seconds")
+            chunk = os.read(source_fd, _STREAM_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > remaining_bytes:
+                raise ValueError("artifact scan exceeded max_total_bytes")
+            digest.update(chunk)
+            offset = 0
+            while offset < len(chunk):
+                written = os.write(destination_fd, chunk[offset:])
+                if written <= 0:
+                    raise OSError("object staging write made no progress")
+                offset += written
+        os.fsync(destination_fd)
+        after = os.fstat(source_fd)
+        if (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
+        ) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        ) or total != before.st_size:
+            raise ValueError(f"snapshot input changed while reading: {display_path}")
+        os.close(destination_fd)
+        destination_fd = None
+        os.chmod(destination, stat.S_IMODE(before.st_mode), follow_symlinks=False)
+        return {
+            "mode": stat.S_IMODE(before.st_mode),
+            "size_bytes": total,
+            "sha256": digest.hexdigest(),
+        }
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
+        if destination_fd is not None:
+            os.close(destination_fd)
+
+
+def _scan_directory_stream(
+    directory_fd: int,
+    relative: Path,
+    display_root: Path,
+    payload_root: Path,
+    *,
+    deadline: float,
+    records: list[dict],
+    counters: dict[str, int],
+    max_files: int,
+    max_total_bytes: int,
+) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("artifact scan exceeded max_wall_seconds")
+    before = os.fstat(directory_fd)
+    names = sorted(name for name in os.listdir(directory_fd) if name not in {".", ".."})
+    for name in names:
+        child_relative = relative / name
+        display_path = display_root / child_relative
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(f"snapshot input contains a symlink: {display_path}")
+        if stat.S_ISDIR(metadata.st_mode):
+            target = payload_root / child_relative
+            target.mkdir(mode=0o700, parents=True, exist_ok=True)
+            records.append({
+                "path": child_relative.as_posix(),
+                "kind": "directory",
+                "mode": stat.S_IMODE(metadata.st_mode),
+            })
+            child_fd = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            try:
+                opened = os.fstat(child_fd)
+                if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                    raise ValueError(f"snapshot directory changed while opening: {display_path}")
+                _scan_directory_stream(
+                    child_fd, child_relative, display_root, payload_root,
+                    deadline=deadline, records=records, counters=counters,
+                    max_files=max_files, max_total_bytes=max_total_bytes,
+                )
+            finally:
+                os.close(child_fd)
+            os.chmod(target, stat.S_IMODE(metadata.st_mode), follow_symlinks=False)
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"snapshot input contains an unsupported entry: {display_path}")
+        counters["files"] += 1
+        if counters["files"] > max_files:
+            raise ValueError("artifact scan exceeded max_files")
+        details = _copy_source_file(
+            directory_fd, name, payload_root / child_relative, display_path,
+            deadline=deadline,
+            remaining_bytes=max_total_bytes - counters["bytes"],
+        )
+        counters["bytes"] += details["size_bytes"]
+        records.append({
+            "path": child_relative.as_posix(), "kind": "file", **details,
+        })
+    after = os.fstat(directory_fd)
+    if (
+        before.st_dev, before.st_ino, before.st_mtime_ns, names
+    ) != (
+        after.st_dev, after.st_ino, after.st_mtime_ns,
+        sorted(name for name in os.listdir(directory_fd) if name not in {".", ".."}),
+    ):
+        raise ValueError(f"snapshot directory changed while reading: {display_root / relative}")
+
+
+def _hash_object_member(payload_root: Path, entry: dict) -> None:
+    relative = _relative_artifact_path(entry["path"])
+    parent_fd, leaf, target = _open_parent_directory(payload_root / relative, create=False)
+    descriptor = None
+    try:
+        descriptor = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size != entry["size_bytes"]:
+            raise ValueError("object payload does not match manifest")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, _STREAM_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
+        ) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        ) or total != entry["size_bytes"] or digest.hexdigest() != entry["sha256"]:
+            raise ValueError("object payload does not match manifest")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def _verify_payload_root(
+    payload_root: Path, manifest: dict, *, verify_hashes: bool = True
+) -> None:
+    expected_files = {
+        entry["path"] for entry in manifest["entries"] if entry["kind"] == "file"
+    }
+    expected_directories = {
+        entry["path"]
+        for entry in manifest["entries"]
+        if entry["kind"] == "directory"
+    }
+    actual_files = set()
+    actual_directories = set()
+    root_metadata = os.lstat(payload_root)
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        raise ValueError("object payload root is unsafe")
+    for directory, names, filenames in os.walk(payload_root, followlinks=False):
+        directory_path = Path(directory)
+        for name in names:
+            path = directory_path / name
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError("object payload contains an unsafe directory")
+            actual_directories.add(path.relative_to(payload_root).as_posix())
+        for name in filenames:
+            path = directory_path / name
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("object payload contains an unsafe file")
+            actual_files.add(path.relative_to(payload_root).as_posix())
+    if actual_files != expected_files or actual_directories != expected_directories:
+        raise ValueError("object payload paths do not match manifest")
+    if verify_hashes:
+        for entry in manifest["entries"]:
+            if entry["kind"] == "file":
+                _hash_object_member(payload_root, entry)
+
+
+def _fsync_directory_tree(root: Path) -> None:
+    directories = [Path(directory) for directory, _names, _files in os.walk(root)]
+    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _load_object_manifest(artifact_root, object_ref, *, verify_payload: bool) -> dict:
+    digest, locator, summaries = _object_reference(object_ref)
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
     object_directory = root / locator
-    manifest_payload = read_regular_bytes(object_directory / "manifest.json")
+    manifest_payload = read_regular_bytes(
+        object_directory / "manifest.json", maximum_bytes=_MAX_OBJECT_MANIFEST_BYTES
+    )
     try:
         manifest = json.loads(manifest_payload.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as error:
@@ -1130,66 +1134,248 @@ def materialize_object(artifact_root, object_ref, destination) -> Path:
     if hashlib.sha256(_canonical_json_bytes(manifest)).hexdigest() != digest:
         raise ValueError("object manifest digest does not match object_ref")
 
-    raw_entries = manifest.get("entries")
-    if type(raw_entries) is not list:
-        raise ValueError("object manifest entries must be a list")
-    payload_root = object_directory / "payload"
-    payloads = {}
-    for entry in raw_entries:
-        if type(entry) is not dict or entry.get("kind") != "file":
-            continue
-        path = _relative_artifact_path(entry.get("path"))
-        payloads[path.as_posix()] = read_regular_bytes(payload_root / path)
-    manifest, payloads = _validated_snapshot(manifest, payloads)
-    for field in optional.intersection(object_ref):
-        if (
-            type(manifest[field]) is not type(object_ref[field])
-            or manifest[field] != object_ref[field]
-        ):
+    manifest = _validated_manifest(manifest)
+    for field, expected in summaries.items():
+        if type(manifest[field]) is not type(expected) or manifest[field] != expected:
             raise ValueError("object_ref summary does not match manifest")
+    if verify_payload:
+        payload_root = object_directory / "payload"
+        _verify_payload_root(payload_root, manifest)
+    return manifest
+
+
+def freeze_path(artifact_root, source, scan_limits) -> dict:
+    """Stream one bounded source into the content-addressed object store."""
+    max_files, max_total_bytes, max_wall_seconds = _scan_limits(scan_limits)
+    deadline = time.monotonic() + max_wall_seconds
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
+    object_parent = root / "objects" / "sha256"
+    _safe_directory(object_parent)
+    temporary = object_parent / f".capture-{secrets.token_hex(8)}.tmp"
+    temporary.mkdir(mode=0o700)
+    payload_root = temporary / "payload"
+    payload_root.mkdir(mode=0o700)
+    target = Path(os.path.abspath(os.path.expanduser(os.fspath(source))))
+    records: list[dict] = []
+    counters = {"files": 0, "bytes": 0}
+    try:
+        parent_fd, leaf, _target = _open_parent_directory(target, create=False)
+        try:
+            metadata = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError(f"snapshot input is a symlink: {target}")
+            if stat.S_ISREG(metadata.st_mode):
+                details = _copy_source_file(
+                    parent_fd, leaf, payload_root / target.name, target,
+                    deadline=deadline, remaining_bytes=max_total_bytes,
+                )
+                counters = {"files": 1, "bytes": details["size_bytes"]}
+                if counters["files"] > max_files:
+                    raise ValueError("artifact scan exceeded max_files")
+                records.append({"path": target.name, "kind": "file", **details})
+                source_kind = "file"
+            elif stat.S_ISDIR(metadata.st_mode):
+                source_fd = os.open(
+                    leaf,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                try:
+                    opened = os.fstat(source_fd)
+                    if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                        raise ValueError(f"snapshot directory changed while opening: {target}")
+                    _scan_directory_stream(
+                        source_fd, Path(), target, payload_root,
+                        deadline=deadline, records=records, counters=counters,
+                        max_files=max_files, max_total_bytes=max_total_bytes,
+                    )
+                finally:
+                    os.close(source_fd)
+                source_kind = "directory"
+            else:
+                raise ValueError(f"snapshot input has unsupported type: {target}")
+        finally:
+            os.close(parent_fd)
+        manifest = _validated_manifest({
+            "format_version": "cuda-kernel-optimizer/object-manifest-v1",
+            "source_kind": source_kind,
+            "entries": records,
+            "file_count": counters["files"],
+            "total_bytes": counters["bytes"],
+        })
+        digest = hashlib.sha256(_canonical_json_bytes(manifest)).hexdigest()
+        create_regular_bytes(temporary / "manifest.json", _canonical_json_bytes(manifest) + b"\n")
+        _verify_payload_root(payload_root, manifest)
+        _fsync_directory_tree(temporary)
+        destination = object_parent / digest
+        object_ref = {
+            "digest": digest,
+            "locator": str(Path("objects") / "sha256" / digest),
+            "source_kind": source_kind,
+            "file_count": counters["files"],
+            "total_bytes": counters["bytes"],
+        }
+        try:
+            publish_directory_noreplace(temporary, destination)
+        except FileExistsError:
+            _load_object_manifest(root, object_ref, verify_payload=True)
+        return object_ref
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def _copy_frozen_member(payload_root: Path, entry: dict, destination: Path) -> None:
+    source_path = payload_root / _relative_artifact_path(entry["path"])
+    source_parent_fd, source_leaf, _ = _open_parent_directory(source_path, create=False)
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    source_fd = destination_fd = None
+    try:
+        source_fd = os.open(source_leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=source_parent_fd)
+        before = os.fstat(source_fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size != entry["size_bytes"]:
+            raise ValueError("object payload does not match manifest")
+        destination_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(source_fd, _STREAM_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+            offset = 0
+            while offset < len(chunk):
+                written = os.write(destination_fd, chunk[offset:])
+                if written <= 0:
+                    raise OSError("object materialization write made no progress")
+                offset += written
+        os.fsync(destination_fd)
+        after = os.fstat(source_fd)
+        if (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
+        ) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        ) or total != entry["size_bytes"] or digest.hexdigest() != entry["sha256"]:
+            raise ValueError("object payload does not match manifest")
+        os.close(destination_fd)
+        destination_fd = None
+        os.chmod(destination, entry["mode"], follow_symlinks=False)
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
+        if destination_fd is not None:
+            os.close(destination_fd)
+        os.close(source_parent_fd)
+
+
+def _publish_materialized_file(source: Path, target: Path) -> None:
+    target_parent_fd, target_leaf, target_path = _open_parent_directory(target, create=True)
+    source_parent_fd, source_leaf, _ = _open_parent_directory(source, create=False)
+    try:
+        try:
+            os.link(source_leaf, target_leaf, src_dir_fd=source_parent_fd, dst_dir_fd=target_parent_fd, follow_symlinks=False)
+        except FileExistsError as error:
+            raise FileExistsError(f"materialization destination exists: {target_path}") from error
+        os.fsync(target_parent_fd)
+    finally:
+        os.close(source_parent_fd)
+        os.close(target_parent_fd)
+
+
+def materialize_object(artifact_root, object_ref, destination) -> Path:
+    """Verify and stream one frozen object into a new isolated path."""
+    manifest = _load_object_manifest(artifact_root, object_ref, verify_payload=False)
+    digest, locator, _summaries = _object_reference(object_ref)
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
+    payload_root = root / locator / "payload"
     entries = manifest["entries"]
+    _verify_payload_root(payload_root, manifest, verify_hashes=False)
 
     target = Path(os.path.abspath(os.path.expanduser(os.fspath(destination))))
     if os.path.lexists(target):
         raise FileExistsError(f"materialization destination exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.parent / f".{target.name}.{secrets.token_hex(8)}.tmp"
-    replacement = None
     try:
         temporary.mkdir(mode=0o700)
         directories = [entry for entry in entries if entry["kind"] == "directory"]
         for entry in sorted(directories, key=lambda item: item["path"]):
             path = _relative_artifact_path(entry["path"])
             materialized = temporary / path
-            materialized.mkdir(mode=entry["mode"], parents=True, exist_ok=True)
-            os.chmod(materialized, entry["mode"], follow_symlinks=False)
+            materialized.mkdir(mode=0o700, parents=True, exist_ok=True)
         for entry in (entry for entry in entries if entry["kind"] == "file"):
             path = _relative_artifact_path(entry["path"])
             materialized = temporary / path
-            payload = payloads[path.as_posix()]
             materialized.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            create_regular_bytes(materialized, payload)
-            os.chmod(materialized, entry["mode"], follow_symlinks=False)
+            _copy_frozen_member(payload_root, entry, materialized)
+        for entry in sorted(
+            directories,
+            key=lambda item: len(Path(item["path"]).parts),
+            reverse=True,
+        ):
+            os.chmod(temporary / entry["path"], entry["mode"], follow_symlinks=False)
+        _fsync_directory_tree(temporary)
         if manifest["source_kind"] == "file":
             file_entries = [entry for entry in entries if entry["kind"] == "file"]
             source = temporary / file_entries[0]["path"]
-            replacement = target.parent / f".{target.name}.{secrets.token_hex(8)}.file"
-            os.rename(source, replacement)
+            _publish_materialized_file(source, target)
             shutil.rmtree(temporary)
-            os.rename(replacement, target)
         elif manifest["source_kind"] == "directory":
-            os.rename(temporary, target)
+            publish_directory_noreplace(temporary, target)
         else:
             raise ValueError("object manifest source_kind is unsupported")
         return target
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
-        if replacement is not None:
-            try:
-                os.unlink(replacement)
-            except FileNotFoundError:
-                pass
         raise
+
+
+def materialize_object_member(artifact_root, object_ref, relative_path, destination) -> dict:
+    """Stream one exact regular member from a verified frozen object."""
+    manifest = _load_object_manifest(artifact_root, object_ref, verify_payload=False)
+    relative = _relative_artifact_path(relative_path).as_posix()
+    matches = [entry for entry in manifest["entries"] if entry["kind"] == "file" and entry["path"] == relative]
+    if len(matches) != 1:
+        raise ValueError("object member is not one exact regular file")
+    _digest, locator, _summaries = _object_reference(object_ref)
+    target = Path(os.path.abspath(os.path.expanduser(os.fspath(destination))))
+    if os.path.lexists(target):
+        raise FileExistsError(f"materialization destination exists: {target}")
+    temporary = target.parent / f".{target.name}.{secrets.token_hex(8)}.tmp"
+    try:
+        _copy_frozen_member(
+            Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root)))) / locator / "payload",
+            matches[0],
+            temporary,
+        )
+        _publish_materialized_file(temporary, target)
+        return dict(matches[0])
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _promote_staged_object(artifact_root, staging_root, object_ref) -> dict:
+    """Atomically promote one verified object from an artifact-root staging area."""
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(artifact_root))))
+    staging = Path(os.path.abspath(os.path.expanduser(os.fspath(staging_root))))
+    expected_parent = root / ".staging"
+    if staging.parent != expected_parent:
+        raise ValueError("staged object root is outside the private staging area")
+    _load_object_manifest(staging, object_ref, verify_payload=True)
+    _digest, locator, _summaries = _object_reference(object_ref)
+    object_parent = root / "objects" / "sha256"
+    _safe_directory(object_parent)
+    source = staging / locator
+    destination = root / locator
+    try:
+        publish_directory_noreplace(source, destination)
+    except FileExistsError:
+        _load_object_manifest(root, object_ref, verify_payload=True)
+    return dict(object_ref)
 
 
 def create_regular_bytes(path: _PathLike, payload: bytes) -> None:

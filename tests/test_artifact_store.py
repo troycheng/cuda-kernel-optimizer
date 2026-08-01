@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -180,27 +181,6 @@ class ArtifactStoreTests(unittest.TestCase):
                 {"a.json": b"old-a", "b.json": b"old-b"},
             )
 
-    def test_freeze_snapshot_publishes_captured_payload_without_rereading_source(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp).resolve()
-            source = root / "source.txt"
-            source.write_bytes(b"captured")
-            manifest, payloads = self.artifacts._snapshot_source(
-                source,
-                {
-                    "max_files": 1,
-                    "max_total_bytes": 1024,
-                    "max_wall_seconds": 1.0,
-                },
-            )
-            source.write_bytes(b"changed-after-snapshot")
-
-            frozen = self.artifacts.freeze_snapshot(root / "artifacts", manifest, payloads)
-            target = root / "materialized.txt"
-            self.artifacts.materialize_object(root / "artifacts", frozen, target)
-
-            self.assertEqual(target.read_bytes(), b"captured")
-
     def test_snapshot_rejects_known_oversize_file_before_first_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp).resolve() / "oversize.bin"
@@ -215,7 +195,8 @@ class ArtifactStoreTests(unittest.TestCase):
 
             with mock.patch.object(self.artifacts.os, "read", side_effect=tracked_read):
                 with self.assertRaisesRegex(ValueError, "exceeded"):
-                    self.artifacts._snapshot_source(
+                    self.artifacts.freeze_path(
+                        Path(tmp).resolve() / "artifacts",
                         source,
                         {
                             "max_files": 1,
@@ -225,6 +206,53 @@ class ArtifactStoreTests(unittest.TestCase):
                     )
 
             self.assertEqual(read_calls, 0)
+
+    def test_freeze_path_rejects_source_mutation_and_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = root / "source.bin"
+            source.write_bytes(b"x" * (2 * 1024 * 1024))
+            real_read = self.artifacts.os.read
+            mutated = False
+
+            def mutate_after_first_read(*args, **kwargs):
+                nonlocal mutated
+                chunk = real_read(*args, **kwargs)
+                if chunk and not mutated:
+                    mutated = True
+                    with source.open("ab") as stream:
+                        stream.write(b"changed")
+                return chunk
+
+            with mock.patch.object(
+                self.artifacts.os, "read", side_effect=mutate_after_first_read
+            ):
+                with self.assertRaisesRegex(ValueError, "changed while reading"):
+                    self.artifacts.freeze_path(
+                        root / "artifacts",
+                        source,
+                        {
+                            "max_files": 1,
+                            "max_total_bytes": 3 * 1024 * 1024,
+                            "max_wall_seconds": 2.0,
+                        },
+                    )
+
+            linked = root / "linked.bin"
+            try:
+                linked.symlink_to(source)
+            except OSError:
+                self.skipTest("symlinks are unavailable")
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                self.artifacts.freeze_path(
+                    root / "artifacts",
+                    linked,
+                    {
+                        "max_files": 1,
+                        "max_total_bytes": 3 * 1024 * 1024,
+                        "max_wall_seconds": 2.0,
+                    },
+                )
 
     def test_materialize_object_rejects_tampered_payload_and_cleans_temporary_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -252,6 +280,39 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertFalse(destination.exists())
             self.assertEqual(
                 list(destination.parent.glob(f".{destination.name}.*.tmp")), []
+            )
+
+    def test_large_object_freeze_and_materialize_use_bounded_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = root / "large.bin"
+            chunk = b"x" * (1024 * 1024)
+            with source.open("wb") as stream:
+                for _ in range(24):
+                    stream.write(chunk)
+
+            tracemalloc.start()
+            frozen = self.artifacts.freeze_path(
+                root / "artifacts",
+                source,
+                {
+                    "max_files": 1,
+                    "max_total_bytes": 32 * 1024 * 1024,
+                    "max_wall_seconds": 5.0,
+                },
+            )
+            destination = root / "materialized.bin"
+            self.artifacts.materialize_object(
+                root / "artifacts", frozen, destination
+            )
+            destination_digest = self.artifacts.sha256_file(destination)
+            _current, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+
+            self.assertLess(peak, 12 * 1024 * 1024)
+            self.assertEqual(
+                self.artifacts.sha256_file(source),
+                destination_digest,
             )
 
     def test_atomic_json_fsyncs_parent_directory_after_replace(self) -> None:

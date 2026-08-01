@@ -622,7 +622,9 @@ def check(value) -> dict:
             correctness_object,
             inputs_root / "correctness-reference",
         )
-        driver_output = smoke_root / "driver-result.json"
+        driver_output_dir = smoke_root / "output"
+        driver_output_dir.mkdir()
+        driver_output = driver_output_dir / "result.json"
         driver_request = ADAPTER.build_driver_request(
             target_id=provisional_target_id,
             execution_id=probe_id,
@@ -680,8 +682,25 @@ def check(value) -> dict:
             raise InputError(
                 f"driver smoke did not complete: {command_result['stop_reason']}"
             )
+        smoke_result_object = STORE.freeze_path(
+            temporary,
+            driver_output_dir,
+            request["scan_limits"],
+        )
+        frozen_smoke_output = STORE.materialize_object(
+            temporary,
+            smoke_result_object,
+            smoke_root / "frozen-output",
+        )
+        smoke_output_manifest = STORE._load_object_manifest(
+            temporary,
+            smoke_result_object,
+            verify_payload=True,
+        )
         driver_result = ADAPTER.validate_driver_result(
-            driver_output, driver_request
+            frozen_smoke_output / "result.json",
+            driver_request,
+            bundle_manifest=smoke_output_manifest,
         )
         correctness = driver_result.get("correctness")
         if correctness is None:
@@ -706,11 +725,6 @@ def check(value) -> dict:
         }
         identity.pop("host_evidence")
         target_id = hashlib.sha256(_canonical_bytes(identity)).hexdigest()
-        smoke_result_object = STORE.freeze_path(
-            temporary,
-            driver_output,
-            request["scan_limits"],
-        )
         shutil.rmtree(smoke_root)
         target = {
             "record_type": "target",
@@ -722,7 +736,8 @@ def check(value) -> dict:
                 "probe_id": probe_id,
                 "command": driver_request,
                 "command_result": command_result,
-                "driver_result_ref": smoke_result_object,
+                "driver_output_ref": smoke_result_object,
+                "driver_artifacts": driver_result["artifacts"],
                 "correctness_gate": correctness_gate,
             },
         }
