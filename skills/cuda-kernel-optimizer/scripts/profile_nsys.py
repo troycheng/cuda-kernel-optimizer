@@ -47,13 +47,13 @@ _DRIVER_OUTPUT_FREEZE_LIMITS = {
     "max_total_bytes": 16 * 1024 * 1024,
     "max_wall_seconds": 5.0,
 }
-# Nsys reports are routinely much larger than NCU CSV or report artifacts.  The
-# single-case collection limit is aligned with the largest SQLite export we can
-# parse, while remaining bounded until artifact-store streaming support lands.
+# artifact_store currently reads and materializes complete objects in memory.
+# Keep one-case Nsys collection below that non-streaming boundary; the planned
+# storage consolidation can safely raise this only after adding streaming I/O.
 _NSYS_ARTIFACT_FREEZE_LIMITS = {
     "max_files": 1,
-    "max_total_bytes": _MAX_SQLITE_BYTES,
-    "max_wall_seconds": 120.0,
+    "max_total_bytes": 256 * 1024 * 1024,
+    "max_wall_seconds": 30.0,
 }
 
 
@@ -599,10 +599,13 @@ def _worker_main() -> int:
         result["execution_status"] = "invalid"
         result["measurement_validity"] = "invalid"
         result["stop_reason"] = error.code
-        result["cleanup_status"] = RUNTIME.current_cleanup_status()
+        if request["operation"] == "collect":
+            result["cleanup_status"] = RUNTIME.current_cleanup_status()
         result["diagnostic"] = {"error": str(error)[:1024]}
     except BaseException as error:
-        result.update({"execution_status": "failed", "measurement_validity": "invalid", "stop_reason": "worker_error", "cleanup_status": RUNTIME.current_cleanup_status(), "diagnostic": {"error": str(error)[:1024]}})
+        result.update({"execution_status": "failed", "measurement_validity": "invalid", "stop_reason": "worker_error", "diagnostic": {"error": str(error)[:1024]}})
+        if request["operation"] == "collect":
+            result["cleanup_status"] = RUNTIME.current_cleanup_status()
     result["finished_at_epoch"], result["elapsed_seconds"] = time.time(), time.monotonic() - started
     STORE.create_regular_json(invocation / "result.json", result)
     return 0

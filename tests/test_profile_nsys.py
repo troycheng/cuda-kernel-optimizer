@@ -414,6 +414,38 @@ class NsysAnalyzeTests(unittest.TestCase):
             )
             self.assertEqual(cancelled["query_status"], "completed")
 
+            invalid_database = Path(directory) / "unsupported-schema.sqlite"
+            _nsys_sqlite(invalid_database, schema_version="3.26.0", kernel_extra=False)
+            invalid_object = module.STORE.freeze_path(
+                root,
+                invalid_database,
+                {"max_files": 10, "max_total_bytes": 1024 * 1024, "max_wall_seconds": 1.0},
+            )
+            invalid_material = {
+                "sha256": invalid_object["digest"],
+                "kind": "report",
+                "tool": "nsys",
+                "tool_version": "2026.2.1",
+                "dialect": "nsys-sqlite-3.25-v1",
+                "object_ref": invalid_object,
+            }
+            invalid_material["id"] = _canonical_id(invalid_material)
+            target["diagnostic_materials"] = [invalid_material]
+            (root / "target.json").write_text(json.dumps(target), encoding="utf-8")
+            invalid_request = {
+                **request,
+                "target_ref": {
+                    "id": target["id"],
+                    "sha256": hashlib.sha256((root / "target.json").read_bytes()).hexdigest(),
+                },
+                "report_ref": {"id": invalid_material["id"], "sha256": invalid_object["digest"]},
+            }
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ResourceWarning)
+                invalid_result = module.analyze(invalid_request, wait_for_result=True)
+            self.assertEqual(invalid_result["execution_status"], "invalid")
+            self.assertEqual(invalid_result["cleanup_status"], "not_required")
+
 
 if __name__ == "__main__":
     unittest.main()
