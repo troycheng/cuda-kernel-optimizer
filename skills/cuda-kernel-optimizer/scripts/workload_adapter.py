@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
@@ -737,14 +738,20 @@ def _profile_experiment(
         raise ValueError("experiment_ref has no candidate Variant")
     return normalized, {
         **experiment,
-        "candidate": _profile_variant(candidate, "experiment_ref.candidate"),
+        "candidate": _profile_variant(
+            candidate,
+            "experiment_ref.candidate",
+            expected_role="candidate",
+        ),
     }
 
 
-def _profile_variant(value, label: str) -> dict:
+def _profile_variant(value, label: str, *, expected_role: str | None = None) -> dict:
     frozen = _closed(value, _VARIANT_FIELDS | {"role"}, label)
     if frozen["role"] not in {"original", "reference", "candidate"}:
         raise ValueError(f"{label}.role is unsupported")
+    if expected_role is not None and frozen["role"] != expected_role:
+        raise ValueError(f"{label}.role must be {expected_role}")
     return {
         **validate_variant({field: frozen[field] for field in _VARIANT_FIELDS}),
         "role": frozen["role"],
@@ -775,42 +782,13 @@ def _profile_evidence_ref(root: Path, value) -> dict:
         or not 0 < evidence_ref["total_bytes"] <= _MAX_RESULT_BYTES
     ):
         raise ValueError("correctness receipt evidence_ref summary is invalid")
-    manifest = _read_profile_manifest(root / locator / "manifest.json")
-    if hashlib.sha256(_canonical_bytes(manifest)).hexdigest() != digest:
-        raise ValueError("correctness receipt evidence_ref digest changed")
-    if (
-        manifest.get("source_kind") != evidence_ref["source_kind"]
-        or manifest.get("file_count") != evidence_ref["file_count"]
-        or manifest.get("total_bytes") != evidence_ref["total_bytes"]
-    ):
-        raise ValueError("correctness receipt evidence_ref summary changed")
-    return dict(evidence_ref)
-
-
-def _read_profile_manifest(path: Path) -> dict:
-    raw = STORE.read_regular_bytes(path, maximum_bytes=_MAX_RESULT_BYTES)
-
-    def pairs(items):
-        value = {}
-        for key, item in items:
-            if key in value:
-                raise ValueError("correctness receipt evidence_ref contains duplicate key")
-            value[key] = item
-        return value
-
-    try:
-        manifest = json.loads(
-            raw.decode("utf-8"),
-            object_pairs_hook=pairs,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                ValueError(f"correctness receipt evidence_ref has non-finite number: {token}")
-            ),
+    with tempfile.TemporaryDirectory(prefix="cko-profile-evidence-") as temporary:
+        STORE.materialize_object(
+            root,
+            evidence_ref,
+            Path(temporary) / "evidence",
         )
-    except (UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError("correctness receipt evidence_ref manifest is invalid JSON") from error
-    if type(manifest) is not dict:
-        raise ValueError("correctness receipt evidence_ref manifest must be an object")
-    return manifest
+    return dict(evidence_ref)
 
 
 def _profile_correctness(
@@ -948,7 +926,11 @@ def resolve_profile_collection(
         variant = target.get("original")
         if type(variant) is not dict:
             raise ValueError("Target has no original Variant")
-        variant = _profile_variant(variant, "Target original Variant")
+        variant = _profile_variant(
+            variant,
+            "Target original Variant",
+            expected_role="original",
+        )
         normalized_experiment_ref = None
         normalized_correctness_ref = None
     elif role == "candidate":

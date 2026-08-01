@@ -263,6 +263,53 @@ class ProfileCollectionBindingTests(unittest.TestCase):
         self.assertEqual(checked.returncode, 0, checked.stderr)
         return project, project.baseline()
 
+    def _screened_candidate(
+        self,
+        project: V14Project,
+        baseline: dict,
+    ) -> tuple[dict, dict, Path]:
+        created = project.run_tool(
+            "workload_evaluate.py",
+            "experiment",
+            project.experiment_input(baseline["result_ref"]),
+        )
+        self.assertEqual(created.returncode, 0, created.stderr)
+        experiment_ref = json.loads(created.stdout)["experiment_ref"]
+        screened = project.run_tool(
+            "workload_evaluate.py",
+            "screen",
+            project.screen_input(experiment_ref),
+            wait=True,
+        )
+        self.assertEqual(screened.returncode, 0, screened.stderr)
+        screen = json.loads(screened.stdout)
+        return (
+            experiment_ref,
+            screen,
+            project.artifact_root
+            / "invocations"
+            / screen["invocation_id"]
+            / "result.json",
+        )
+
+    def _resolve_candidate(
+        self,
+        project: V14Project,
+        baseline: dict,
+        experiment_ref: dict,
+        screen: dict,
+    ) -> dict:
+        return self.adapter.resolve_profile_collection(
+            artifact_root=project.artifact_root,
+            target_ref=project.target_ref(),
+            baseline_ref=baseline["result_ref"],
+            role="candidate",
+            case_id="main",
+            capability="pytorch_chrome_trace_v1",
+            experiment_ref=experiment_ref,
+            correctness_ref={**screen["result_ref"], "case_id": "main"},
+        )
+
     def test_original_collection_resolves_and_candidate_needs_correctness(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project, baseline = self._ready_project(Path(temporary))
@@ -294,42 +341,13 @@ class ProfileCollectionBindingTests(unittest.TestCase):
     def test_candidate_collection_rejects_mismatched_or_unknown_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project, baseline = self._ready_project(Path(temporary))
-            created = project.run_tool(
-                "workload_evaluate.py",
-                "experiment",
-                project.experiment_input(baseline["result_ref"]),
+            experiment_ref, screen, result_path = self._screened_candidate(
+                project, baseline
             )
-            self.assertEqual(created.returncode, 0, created.stderr)
-            experiment_ref = json.loads(created.stdout)["experiment_ref"]
-            screened = project.run_tool(
-                "workload_evaluate.py",
-                "screen",
-                project.screen_input(experiment_ref),
-                wait=True,
-            )
-            self.assertEqual(screened.returncode, 0, screened.stderr)
-            screen = json.loads(screened.stdout)
-            valid_correctness_ref = {
-                **screen["result_ref"],
-                "case_id": "main",
-            }
-            resolved = self.adapter.resolve_profile_collection(
-                artifact_root=project.artifact_root,
-                target_ref=project.target_ref(),
-                baseline_ref=baseline["result_ref"],
-                role="candidate",
-                case_id="main",
-                capability="pytorch_chrome_trace_v1",
-                experiment_ref=experiment_ref,
-                correctness_ref=valid_correctness_ref,
+            resolved = self._resolve_candidate(
+                project, baseline, experiment_ref, screen
             )
             self.assertEqual(resolved["variant"]["role"], "candidate")
-            result_path = (
-                project.artifact_root
-                / "invocations"
-                / screen["invocation_id"]
-                / "result.json"
-            )
             result = json.loads(result_path.read_text(encoding="utf-8"))
             result["correctness_receipts"][0]["variant"] = json.loads(
                 (project.artifact_root / "target.json").read_text(encoding="utf-8")
@@ -378,6 +396,80 @@ class ProfileCollectionBindingTests(unittest.TestCase):
                     experiment_ref=experiment_ref,
                     correctness_ref=correctness_ref,
                 )
+
+    def test_candidate_collection_rejects_non_candidate_experiment_role(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project, baseline = self._ready_project(Path(temporary))
+            experiment_ref, screen, result_path = self._screened_candidate(
+                project, baseline
+            )
+            experiment_path = (
+                project.artifact_root / "experiments" / f"{experiment_ref['id']}.json"
+            )
+            experiment = json.loads(experiment_path.read_text(encoding="utf-8"))
+            experiment["candidate"]["role"] = "reference"
+            write_json(experiment_path, experiment)
+            experiment_ref["sha256"] = sha256_file(experiment_path)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            for variant in result["variant_refs"]:
+                if variant["role"] == "candidate":
+                    variant["role"] = "reference"
+            result["experiment_ref"] = experiment_ref
+            result["correctness_receipts"][0]["variant"]["role"] = "reference"
+            write_json(result_path, result)
+            screen["result_ref"]["sha256"] = sha256_file(result_path)
+
+            with self.assertRaisesRegex(ValueError, "candidate.role"):
+                self._resolve_candidate(project, baseline, experiment_ref, screen)
+
+    def test_candidate_collection_rejects_unknown_evidence_manifest_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project, baseline = self._ready_project(Path(temporary))
+            experiment_ref, screen, result_path = self._screened_candidate(
+                project, baseline
+            )
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            evidence_ref = result["correctness_receipts"][0]["evidence_refs"][0]
+            object_root = project.artifact_root / evidence_ref["locator"]
+            manifest_path = object_root / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["unexpected"] = True
+            new_digest = hashlib.sha256(
+                self.adapter._canonical_bytes(manifest)
+            ).hexdigest()
+            write_json(manifest_path, manifest)
+            object_root.rename(object_root.with_name(new_digest))
+            evidence_ref["digest"] = new_digest
+            evidence_ref["locator"] = f"objects/sha256/{new_digest}"
+            write_json(result_path, result)
+            screen["result_ref"]["sha256"] = sha256_file(result_path)
+
+            with self.assertRaisesRegex(ValueError, "snapshot manifest fields"):
+                self._resolve_candidate(project, baseline, experiment_ref, screen)
+
+    def test_candidate_collection_rejects_changed_evidence_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project, baseline = self._ready_project(Path(temporary))
+            experiment_ref, screen, result_path = self._screened_candidate(
+                project, baseline
+            )
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            evidence_ref = result["correctness_receipts"][0]["evidence_refs"][0]
+            manifest_path = (
+                project.artifact_root / evidence_ref["locator"] / "manifest.json"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            payload_path = (
+                project.artifact_root
+                / evidence_ref["locator"]
+                / "payload"
+                / manifest["entries"][0]["path"]
+            )
+            payload = payload_path.read_bytes()
+            payload_path.write_bytes(b"x" + payload[1:])
+
+            with self.assertRaisesRegex(ValueError, "snapshot payload does not match"):
+                self._resolve_candidate(project, baseline, experiment_ref, screen)
 
     def test_template_never_publishes_when_cleanup_is_not_implemented(self) -> None:
         template = (TEMPLATE_DIR / "workload_driver.py").read_text("utf-8")
