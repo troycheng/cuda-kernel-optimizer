@@ -64,7 +64,6 @@ class ReadmeSyncTests(unittest.TestCase):
             "基于 CUDA、CUTLASS 和 Triton 的 GPU kernel 与算子实现",
             "PyTorch 框架以及 vLLM、TensorRT-LLM 推理系统",
             "局部 kernel 提升不等于业务提速",
-            "不承诺固定收益",
             "ChatGPT 显式选择",
         ):
             self.assertIn(marker, chinese)
@@ -74,10 +73,30 @@ class ReadmeSyncTests(unittest.TestCase):
             "GPU kernel and operator implementations built with CUDA, CUTLASS, or Triton",
             "the PyTorch framework and vLLM/TensorRT-LLM inference systems",
             "A faster kernel is not the same as a faster service",
-            "does not promise a fixed speedup",
             "only after ChatGPT explicitly selects it",
         ):
             self.assertIn(marker, english)
+
+        for marker in (
+            "要获得可靠、可落地的优化结果",
+            "代表实际业务的测试 workload",
+            "精度校验",
+            "稳定、可重复的 benchmark",
+            "端到端收益、适用范围和可复核证据",
+            "协助补齐完整验证条件",
+        ):
+            self.assertIn(marker, chinese)
+        for marker in (
+            "For a reliable, deployable optimization result",
+            "test workload that represents production behavior",
+            "correctness checks",
+            "stable, repeatable benchmark",
+            "end-to-end gain, applicability, and reviewable evidence",
+            "complete the missing validation setup",
+        ):
+            self.assertIn(marker, english)
+        self.assertNotIn("结果能达到什么程度取决于用户提供的证据", chinese)
+        self.assertNotIn("The available evidence determines the strength of the result", english)
 
     def test_design_is_explained_before_its_history_and_cost(self) -> None:
         chinese = " ".join(self.chinese.split())

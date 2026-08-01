@@ -17,7 +17,7 @@
 
 The project optimizes the complete execution path, not only a kernel. Its analysis covers GPU kernel and operator implementations built with CUDA, CUTLASS, or Triton, as well as scheduling, CPU and data processing, transfers, communication, I/O, allocation, and serving conditions in the PyTorch framework and vLLM/TensorRT-LLM inference systems. The user's complete workload metric remains the objective. A faster kernel is not the same as a faster service.
 
-The available evidence determines the strength of the result. A complete workload, correctness checks, and a stable benchmark can support an end-to-end claim. Source or local tests support only claims at those layers. The project does not promise a fixed speedup and does not create performance conclusions when the workload or correctness checks are missing.
+For a reliable, deployable optimization result, provide a test workload that represents production behavior, correctness checks that establish acceptable output, and a stable, repeatable benchmark. With these inputs, ChatGPT can compare the original and candidate variants and report the end-to-end gain, applicability, and reviewable evidence. If the setup is not yet complete, it can start with environment checks, source analysis, or local mechanism validation and help complete the missing validation setup.
 
 ## Capabilities
 
