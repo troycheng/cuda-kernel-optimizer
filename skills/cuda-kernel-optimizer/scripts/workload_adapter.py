@@ -1185,6 +1185,18 @@ def resolve_analysis_artifact(*, artifact_root, target_ref, artifact_ref) -> dic
     if len(artifacts) != 1:
         raise ValueError("artifact_ref does not select one declared driver artifact")
     artifact = artifacts[0]
+    members = [
+        entry
+        for entry in manifest["entries"]
+        if entry["kind"] == "file" and entry["path"] == relative_path
+    ]
+    if (
+        len(members) != 1
+        or members[0]["sha256"] != artifact["sha256"]
+        or members[0]["size_bytes"] < 0
+    ):
+        raise ValueError("selected driver artifact member is not manifest-bound")
+    artifact = {**artifact, "size_bytes": members[0]["size_bytes"]}
     variants = result.get("variant_refs")
     role = driver_request.get("role")
     request_variant = driver_request.get("variant")

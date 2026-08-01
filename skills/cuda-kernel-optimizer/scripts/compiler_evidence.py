@@ -1,557 +1,376 @@
 #!/usr/bin/env python3
-"""Collect durable, content-addressed compiler artifacts without fabrication."""
+"""Report bounded facts for one explicitly selected frozen compiler artifact."""
 
 from __future__ import annotations
 
+import argparse
+import codecs
 import hashlib
+import importlib.util
 import json
 import os
-import re
-import stat
-import tempfile
-from collections.abc import Mapping, Sequence
+import sys
+import time
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+INPUT_VERSION = "cuda-kernel-optimizer/compiler-input-v1"
+RESULT_VERSION = "cuda-kernel-optimizer/compiler-result-v1"
+TOOL_VERSION = "cuda-kernel-optimizer/compiler-tool-v1"
 STAGES = ("source", "ttir", "ttgir", "llvm_ir", "ptx", "sass", "binary")
-TOP_LEVEL_FIELDS = frozenset(
-    {"schema_version", "compile_command", "backend", "arch", "binary_sha256", *STAGES}
+TEXT_STAGES = frozenset(STAGES) - {"binary"}
+DIALECT_STAGES = {
+    "cuda-source-v1": "source",
+    "triton-ttir-v1": "ttir",
+    "triton-ttgir-v1": "ttgir",
+    "llvm-ir-v1": "llvm_ir",
+    "ptx-v1": "ptx",
+    "sass-text-v1": "sass",
+    "cuda-binary-v1": "binary",
+}
+STRUCTURAL_MARKERS = {
+    "ttir": ((b"module", "module"), (b"tt.func", "tt.func")),
+    "ttgir": ((b"module", "module"), (b"ttg.", "ttg.")),
+    "llvm_ir": ((b"define", "define"), (b"{", "function_body")),
+    "ptx": ((b".version", ".version"), (b".target", ".target")),
+}
+_ANALYZE_FIELDS = {
+    "format_version", "operation", "artifact_root", "target_ref", "artifact_ref",
+    "resources", "operation_timeout_seconds", "command_timeout_seconds",
+    "resource_wait_timeout_seconds", "cleanup_timeout_seconds", "launch_deadline",
+}
+_OPTIONAL_FIELDS = {"absolute_deadline", "retry_of"}
+_STATUS_FIELDS = {"format_version", "operation", "artifact_root", "invocation_id"}
+_BINDING_KEYS = (
+    "target_ref", "requested_stage", "source", "material_ref", "invocation_ref",
+    "receipt_index", "object_ref", "artifact", "role", "variant", "experiment_ref",
+    "mechanism_key", "environment",
 )
-STAGE_FIELDS = frozenset({"status", "path", "sha256", "size_bytes"})
-BACKENDS = frozenset({"cuda", "cutlass", "triton"})
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-
-_UNAVAILABLE = {
-    "status": "unavailable",
-    "path": None,
-    "sha256": None,
-    "size_bytes": None,
-}
-_CACHE_SUFFIX_STAGE = {
-    ".ttir": "ttir",
-    ".ttgir": "ttgir",
-    ".llir": "llvm_ir",
-    ".llvm": "llvm_ir",
-    ".ptx": "ptx",
-    ".cubin": "binary",
-    ".hsaco": "binary",
-}
+_SOURCE_KEYS = (
+    "source", "material_ref", "invocation_ref", "receipt_index", "role", "variant",
+    "experiment_ref", "mechanism_key",
+)
+_CHUNK_BYTES, _MAX_RECORD_BYTES = 1024 * 1024, 16 * 1024 * 1024
 
 
-def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    fd = os.open(str(path), flags)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+def _load_sibling(filename: str, name: str):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load dependency: {filename}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def _artifact_directory(path) -> Path:
-    directory = Path(path).expanduser()
-    if directory.is_symlink():
-        raise ValueError(f"compiler evidence directory must not be a symlink: {directory}")
-    directory.mkdir(parents=True, exist_ok=True)
-    if directory.is_symlink() or not directory.is_dir():
-        raise ValueError(f"compiler evidence path is not a real directory: {directory}")
-    return directory
+STORE = _load_sibling("artifact_store.py", "cuda_optimizer_compiler_store")
+RUNTIME = _load_sibling("_invocation_runtime.py", "cuda_optimizer_compiler_runtime")
+ADAPTER = _load_sibling("workload_adapter.py", "cuda_optimizer_compiler_adapter")
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
-    directory = _artifact_directory(path.parent)
-    if path.is_symlink():
-        raise ValueError(f"compiler evidence output must not be a symlink: {path}")
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(directory)
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(str(temporary), str(path))
-        _fsync_directory(directory)
-    except BaseException:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+class CompilerError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
-def atomic_write_text(path, text: str) -> Path:
-    """Atomically persist UTF-8 compiler text evidence."""
-    if type(text) is not str:
-        raise ValueError("compiler evidence text must be a string")
-    target = Path(path)
-    _atomic_write(target, text.encode("utf-8"))
-    return target
-
-
-def _read_stable_artifact(path) -> tuple[bytes, dict]:
-    """Read a real file only while its path stays bound to one stable inode."""
-    before = artifact_identity(path)
-    if before is None:
-        raise ValueError(f"compiler artifact is not a stable regular file: {path}")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(str(before["path"]), flags)
-    except OSError as error:
-        raise ValueError(f"compiler artifact could not be opened safely: {path}") from error
-    try:
-        opened = os.fstat(fd)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_dev != before["dev"]
-            or opened.st_ino != before["ino"]
-        ):
-            raise ValueError(f"compiler artifact changed before copy: {path}")
-        chunks = []
-        while True:
-            chunk = os.read(fd, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        closed = os.fstat(fd)
-        if (
-            closed.st_dev != opened.st_dev
-            or closed.st_ino != opened.st_ino
-            or closed.st_size != opened.st_size
-            or closed.st_mtime_ns != opened.st_mtime_ns
-        ):
-            raise ValueError(f"compiler artifact changed during copy: {path}")
-    finally:
-        os.close(fd)
-    data = b"".join(chunks)
-    after = artifact_identity(path)
-    if after != before or hashlib.sha256(data).hexdigest() != before["sha256"]:
-        raise ValueError(f"compiler artifact changed during copy: {path}")
-    return data, before
-
-
-def publish_triton_stages(evidence_dir, discovered) -> dict[str, Path]:
-    """Publish selected Triton cache stages into durable evidence storage."""
-    if not isinstance(discovered, Mapping):
-        raise ValueError("discovered compiler artifacts must be a mapping")
-    unknown = sorted(set(discovered) - set(STAGES))
-    if unknown:
-        raise ValueError(f"unknown compiler stage: {unknown[0]}")
-    stage_dir = _artifact_directory(Path(evidence_dir) / "stages")
-    published = {}
-    for stage in STAGES:
-        source = discovered.get(stage)
-        if source is None:
-            continue
-        data, source_identity = _read_stable_artifact(source)
-        suffix = source_identity["path"].suffix.lower()
-        target = stage_dir / f"{stage}-{source_identity['sha256']}{suffix}"
-        _atomic_write(target, data)
-        target_identity = artifact_identity(target)
-        if (
-            target_identity is None
-            or target_identity["size_bytes"] != source_identity["size_bytes"]
-            or target_identity["sha256"] != source_identity["sha256"]
-        ):
-            raise ValueError(f"published compiler stage could not be verified: {stage}")
-        published[stage] = target_identity["path"]
-    return published
-
-
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    data = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
-    _atomic_write(path, data)
-
-
-def artifact_identity(path) -> dict | None:
-    """Return a stable identity only while *path* remains bound to the open file."""
-    candidate = Path(path).expanduser().absolute()
-    try:
-        file_stat = candidate.lstat()
-        resolved_before = candidate.resolve(strict=True)
-    except (FileNotFoundError, OSError, RuntimeError):
-        return None
-    if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
-        return None
-
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(str(resolved_before), flags)
-    except OSError:
-        return None
-    digest = hashlib.sha256()
-    try:
-        opened_stat = os.fstat(fd)
-        if not stat.S_ISREG(opened_stat.st_mode):
-            return None
-        with os.fdopen(fd, "rb", closefd=False) as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        closed_stat = os.fstat(fd)
-        if (
-            opened_stat.st_dev != closed_stat.st_dev
-            or opened_stat.st_ino != closed_stat.st_ino
-            or opened_stat.st_size != closed_stat.st_size
-            or opened_stat.st_mtime_ns != closed_stat.st_mtime_ns
-        ):
-            return None
-        resolved_after = candidate.resolve(strict=True)
-        path_stat = candidate.lstat()
-        if (
-            resolved_after != resolved_before
-            or stat.S_ISLNK(path_stat.st_mode)
-            or path_stat.st_dev != opened_stat.st_dev
-            or path_stat.st_ino != opened_stat.st_ino
-        ):
-            return None
-        return {
-            "path": resolved_before,
-            "dev": opened_stat.st_dev,
-            "ino": opened_stat.st_ino,
-            "size_bytes": opened_stat.st_size,
-            "mtime_ns": opened_stat.st_mtime_ns,
-            "sha256": digest.hexdigest(),
-        }
-    except (OSError, RuntimeError):
-        return None
-    finally:
-        os.close(fd)
-
-
-def _record(path) -> dict:
-    if path is None:
-        return dict(_UNAVAILABLE)
-    identity = artifact_identity(path)
-    if identity is None:
-        return dict(_UNAVAILABLE)
-    return {
-        "status": "available",
-        "path": str(identity["path"]),
-        "sha256": identity["sha256"],
-        "size_bytes": identity["size_bytes"],
-    }
-
-
-def _command(value) -> list[str] | None:
-    if value is None:
-        return None
-    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
-        raise ValueError("compile_command must be a sequence of strings")
-    command = list(value)
-    if not command or any(type(item) is not str or not item for item in command):
-        raise ValueError("compile_command must contain non-empty strings")
-    return command
-
-
-def _backend(value) -> str | None:
-    if value is None:
-        return None
-    if type(value) is not str or value not in BACKENDS:
-        raise ValueError("backend must be cuda, cutlass, triton, or null")
-    return value
-
-
-def _arch(value) -> str | None:
-    if value is None:
-        return None
-    if type(value) is not str or not value.strip():
-        raise ValueError("arch must be a non-empty string or null")
-    return value
-
-
-def _binary_sha256(value) -> str | None:
-    if value is None:
-        return None
-    if type(value) is not str or not _SHA256.fullmatch(value):
-        raise ValueError("binary_sha256 must be a lowercase SHA-256 or null")
-    return value
-
-
-def _validate_stage(stage: str, record) -> None:
-    if not isinstance(record, Mapping) or set(record) != STAGE_FIELDS:
-        raise ValueError(f"compiler evidence stage {stage} has invalid fields")
-    status = record.get("status")
-    if status == "unavailable":
-        if any(record[name] is not None for name in ("path", "sha256", "size_bytes")):
-            raise ValueError(f"compiler evidence stage {stage} is incoherent")
-        return
-    if status != "available":
-        raise ValueError(f"compiler evidence stage {stage} has invalid status")
-    path = record.get("path")
-    digest = record.get("sha256")
-    size_bytes = record.get("size_bytes")
-    if type(path) is not str or not path or not Path(path).is_absolute():
-        raise ValueError(f"compiler evidence stage {stage} has invalid path")
-    if type(digest) is not str or not _SHA256.fullmatch(digest):
-        raise ValueError(f"compiler evidence stage {stage} has invalid sha256")
-    if type(size_bytes) is not int or size_bytes < 0:
-        raise ValueError(f"compiler evidence stage {stage} has invalid size_bytes")
-
-
-def validate_manifest(payload) -> dict:
-    """Validate the exact manifest schema without trusting stored file claims."""
-    if not isinstance(payload, Mapping) or set(payload) != TOP_LEVEL_FIELDS:
-        raise ValueError("compiler evidence manifest has invalid top-level fields")
-    if type(payload.get("schema_version")) is not int or payload["schema_version"] != SCHEMA_VERSION:
-        raise ValueError(f"compiler evidence schema_version must be {SCHEMA_VERSION}")
-    _command(payload.get("compile_command"))
-    _backend(payload.get("backend"))
-    _arch(payload.get("arch"))
-    binding = _binary_sha256(payload.get("binary_sha256"))
-    for stage in STAGES:
-        _validate_stage(stage, payload[stage])
-    if binding is not None:
-        if payload["binary"]["status"] != "available":
-            raise ValueError("binary_sha256 requires available binary evidence")
-        if payload["sass"]["status"] != "available":
-            raise ValueError("binary_sha256 requires available SASS evidence")
-        if payload["binary"]["sha256"] != binding:
-            raise ValueError("binary_sha256 does not match binary evidence")
-    elif payload["sass"]["status"] == "available":
-        raise ValueError("available SASS evidence requires binary_sha256")
-    return dict(payload)
-
-
-def collect(
-    *,
-    source=None,
-    binary=None,
-    discovered=None,
-    compile_command=None,
-    backend=None,
-    arch=None,
-    binary_sha256=None,
-) -> dict:
-    """Build a complete stage manifest from files that exist right now."""
-    discovered = {} if discovered is None else discovered
-    if not isinstance(discovered, Mapping):
-        raise ValueError("discovered compiler artifacts must be a mapping")
-    unknown = sorted(set(discovered) - set(STAGES))
-    if unknown:
-        raise ValueError(f"unknown compiler stage: {unknown[0]}")
-    command = _command(compile_command)
-    backend = _backend(backend)
-    arch = _arch(arch)
-
-    paths = dict(discovered)
-    if source is not None:
-        paths["source"] = source
-    if binary is not None:
-        paths["binary"] = binary
-
-    result = {
-        "schema_version": SCHEMA_VERSION,
-        "compile_command": command,
-        "backend": backend,
-        "arch": arch,
-        "binary_sha256": _binary_sha256(binary_sha256),
-    }
-    for stage in STAGES:
-        result[stage] = _record(paths.get(stage))
-    if result["sass"]["status"] == "available" and result["binary_sha256"] is None:
-        if result["binary"]["status"] != "available":
-            raise ValueError("SASS evidence requires an available binary")
-        result["binary_sha256"] = result["binary"]["sha256"]
-    return validate_manifest(result)
-
-
-def _load_manifest(path: Path) -> dict | None:
-    if not path.exists():
-        return None
-    if path.is_symlink() or not path.is_file():
-        raise ValueError(f"compiler evidence manifest must be a regular file: {path}")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"invalid compiler evidence manifest: {path}") from error
-    try:
-        return validate_manifest(payload)
-    except ValueError as error:
-        raise ValueError(f"invalid compiler evidence manifest {path}: {error}") from error
-
-
-def load_manifest(evidence_dir) -> dict:
-    path = Path(evidence_dir) / "manifest.json"
-    payload = _load_manifest(path)
-    if payload is None:
-        raise ValueError(f"compiler evidence manifest not found: {path}")
-    return payload
-
-
-def write_fresh_manifest(
-    evidence_dir,
-    *,
-    source=None,
-    binary=None,
-    discovered=None,
-    compile_command=None,
-    backend=None,
-    arch=None,
-    binary_sha256=None,
-) -> dict:
-    """Atomically replace prior evidence without reading stale or corrupt state."""
-    directory = _artifact_directory(evidence_dir)
-    result = collect(
-        source=source,
-        binary=binary,
-        discovered=discovered,
-        compile_command=compile_command,
-        backend=backend,
-        arch=arch,
-        binary_sha256=binary_sha256,
-    )
-    _atomic_write_json(directory / "manifest.json", result)
-    return result
-
-
-def _revalidate_record(record: Mapping) -> dict:
-    if record.get("status") != "available":
-        return dict(_UNAVAILABLE)
-    current = _record(record.get("path"))
-    if current != dict(record):
-        return dict(_UNAVAILABLE)
-    return current
-
-
-def update_manifest(
-    evidence_dir,
-    *,
-    source=None,
-    binary=None,
-    discovered=None,
-    compile_command=None,
-    backend=None,
-    arch=None,
-    binary_sha256=None,
-) -> dict:
-    """Atomically create or merge compiler evidence for a resumable run."""
-    directory = _artifact_directory(evidence_dir)
-    manifest_path = directory / "manifest.json"
-    existing = _load_manifest(manifest_path)
-    supplied = {} if discovered is None else dict(discovered)
-    if source is not None:
-        supplied["source"] = source
-    if binary is not None:
-        supplied["binary"] = binary
-
-    if existing is None:
-        return write_fresh_manifest(
-            directory,
-            discovered=supplied,
-            compile_command=compile_command,
-            backend=backend,
-            arch=arch,
-            binary_sha256=binary_sha256,
+def _closed(value, required, optional=(), label="value") -> dict:
+    if type(value) is not dict:
+        raise CompilerError("invalid_compiler_input", f"{label} must be an object")
+    missing, unknown = set(required) - set(value), set(value) - set(required) - set(optional)
+    if missing or unknown:
+        raise CompilerError(
+            "invalid_compiler_input",
+            f"{label} has missing={sorted(missing)} unknown={sorted(unknown)}",
         )
-    else:
-        unknown = sorted(set(supplied) - set(STAGES))
-        if unknown:
-            raise ValueError(f"unknown compiler stage: {unknown[0]}")
-        result = dict(existing)
-        for stage in STAGES:
-            result[stage] = _revalidate_record(existing[stage])
-        for stage, path in supplied.items():
-            result[stage] = _record(path)
-        if compile_command is not None:
-            result["compile_command"] = _command(compile_command)
-        if backend is not None:
-            result["backend"] = _backend(backend)
-        if arch is not None:
-            result["arch"] = _arch(arch)
-
-        if result["sass"]["status"] == "available" and result["binary"]["status"] == "available":
-            requested_binding = _binary_sha256(binary_sha256)
-            if "sass" in supplied:
-                result["binary_sha256"] = requested_binding or result["binary"]["sha256"]
-            elif existing.get("binary_sha256") == result["binary"]["sha256"]:
-                result["binary_sha256"] = existing["binary_sha256"]
-            else:
-                result["sass"] = dict(_UNAVAILABLE)
-                result["binary_sha256"] = None
-        else:
-            result["sass"] = dict(_UNAVAILABLE)
-            result["binary_sha256"] = None
-
-    validate_manifest(result)
-    _atomic_write_json(manifest_path, result)
-    return result
+    return value
 
 
-def same_artifact(first, second) -> bool:
-    """Return true only when two real files have identical size and SHA-256."""
-    left = artifact_identity(first)
-    right = artifact_identity(second)
-    if left is None or right is None:
-        return False
-    return (
-        left["size_bytes"], left["sha256"]
-    ) == (
-        right["size_bytes"], right["sha256"]
-    )
+def _text(value, label: str, maximum=4096) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise CompilerError("invalid_compiler_input", f"{label} must be a non-empty bounded string")
+    return value
 
 
-def _cache_files(cache_root) -> dict[str, dict]:
-    root = Path(cache_root).expanduser()
-    if root.is_symlink() or not root.is_dir():
-        return {}
-    files = {}
+def _strict_json(path) -> dict:
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise CompilerError("invalid_compiler_input", "JSON contains a duplicate key")
+            result[key] = value
+        return result
     try:
-        candidates = root.rglob("*")
-        for candidate in candidates:
-            identity = artifact_identity(candidate)
-            if identity is None:
-                continue
-            files[str(identity["path"])] = identity
-    except OSError:
-        return files
-    return files
+        payload = STORE.read_regular_bytes(path, maximum_bytes=_MAX_RECORD_BYTES)
+        value = json.loads(
+            payload.decode("utf-8"), object_pairs_hook=pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                CompilerError("invalid_compiler_input", "JSON contains a non-finite number")
+            ),
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        if isinstance(error, CompilerError):
+            raise
+        raise CompilerError("invalid_compiler_input", "request is invalid JSON") from error
+    if type(value) is not dict:
+        raise CompilerError("invalid_compiler_input", "request must be an object")
+    return value
 
 
-def _snapshot_identity(identity: Mapping) -> tuple:
-    return (
-        identity["dev"],
-        identity["ino"],
-        identity["size_bytes"],
-        identity["mtime_ns"],
-        identity["sha256"],
-    )
+def _artifact_ref(value) -> dict:
+    value = _closed(value, {"source", "stage"}, {
+        "material_ref", "invocation_ref", "receipt_index", "relative_path"
+    }, "artifact_ref")
+    stage = _text(value["stage"], "artifact_ref.stage", 64)
+    if stage not in STAGES:
+        raise CompilerError("unsupported_stage", "artifact_ref.stage is unsupported")
+    if value["source"] == "target_material":
+        expected = {"source", "stage", "material_ref"}
+    elif value["source"] == "invocation_driver_artifact":
+        expected = {"source", "stage", "invocation_ref", "receipt_index", "relative_path"}
+    else:
+        raise CompilerError("unsupported_artifact_source", "artifact_ref.source is unsupported")
+    if set(value) != expected:
+        raise CompilerError("invalid_compiler_input", "artifact_ref is not one closed source variant")
+    return dict(value)
 
 
-def snapshot_cache(cache_root) -> dict[str, tuple]:
-    """Freeze real-file identity data before a Triton kernel triggers compilation."""
-    return {
-        path: _snapshot_identity(identity)
-        for path, identity in _cache_files(cache_root).items()
+def _subset(resolved: dict, keys: tuple) -> dict:
+    return {key: resolved[key] for key in keys if key in resolved}
+
+
+def _validate_resolution(resolved: dict, stage: str) -> dict:
+    artifact = resolved.get("artifact")
+    if type(artifact) is not dict or resolved.get("requested_stage") != stage:
+        raise CompilerError("artifact_binding_invalid", "resolver did not bind the requested stage")
+    if resolved.get("source") == "target_material":
+        dialect = artifact.get("dialect")
+        if DIALECT_STAGES.get(dialect) != stage:
+            raise CompilerError("stage_dialect_mismatch", "Target material dialect does not match stage")
+        member = artifact.get("path")
+    else:
+        if artifact.get("kind") != stage:
+            raise CompilerError("stage_kind_mismatch", "driver artifact kind does not match stage")
+        member = artifact.get("relative_path")
+    if not isinstance(member, str) or not member:
+        raise CompilerError("artifact_binding_invalid", "selected object member is unavailable")
+    size = artifact.get("size_bytes")
+    digest = artifact.get("sha256")
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        raise CompilerError("empty_artifact", "selected compiler artifact is empty")
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise CompilerError("artifact_binding_invalid", "selected artifact digest is invalid")
+    return {"member": member, "size_bytes": size, "sha256": digest}
+
+
+def _resolve(root: Path, target_ref: dict, artifact_ref: dict) -> tuple[dict, dict]:
+    try:
+        resolved = ADAPTER.resolve_analysis_artifact(
+            artifact_root=root, target_ref=target_ref, artifact_ref=artifact_ref
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise CompilerError("artifact_resolution_rejected", str(error)) from error
+    return resolved, _validate_resolution(resolved, artifact_ref["stage"])
+
+
+def _tool_identity() -> dict:
+    implementations = [
+        {"name": name, "sha256": STORE.sha256_file(Path(__file__).with_name(name))}
+        for name in (
+            "compiler_evidence.py", "_invocation_runtime.py", "artifact_store.py",
+            "workload_adapter.py",
+        )
+    ]
+    identity = {
+        "version": TOOL_VERSION,
+        "result_contract": RESULT_VERSION,
+        "implementations": implementations,
     }
+    identity["digest"] = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return identity
 
 
-def discover_triton_cache(cache_root, before=None) -> dict[str, Path]:
-    """Return only recognized cache files created or changed since *before*."""
-    previous = {} if before is None else dict(before)
-    groups = {}
-    for path, identity in _cache_files(cache_root).items():
-        if previous.get(path) == _snapshot_identity(identity):
-            continue
-        resolved = identity["path"]
-        stage = _CACHE_SUFFIX_STAGE.get(resolved.suffix.lower())
-        if stage is None:
-            continue
-        unit = str(resolved.parent)
-        stage_files = groups.setdefault(unit, {})
-        current = stage_files.get(stage)
-        order_key = (identity["mtime_ns"], path)
-        if current is None or order_key > current[0]:
-            stage_files[stage] = (order_key, resolved)
-    if not groups:
-        return {}
-    selected_unit, selected = max(
-        groups.items(),
-        key=lambda item: (
-            len(item[1]),
-            max(value[0] for value in item[1].values()),
-            item[0],
-        ),
+def _validate_analyze(value) -> tuple[dict, Path, dict]:
+    request = _closed(value, _ANALYZE_FIELDS, _OPTIONAL_FIELDS, "analyze input")
+    if request["format_version"] != INPUT_VERSION or request["operation"] != "analyze":
+        raise CompilerError("invalid_compiler_input", "analyze operation is unsupported")
+    root = Path(os.path.abspath(os.path.expanduser(_text(request["artifact_root"], "artifact_root"))))
+    if not root.is_dir():
+        raise CompilerError("target_not_found", "artifact_root is unavailable")
+    artifact_ref = _artifact_ref(request["artifact_ref"])
+    resources = _closed(request["resources"], {"host_id", "gpu_uuids"}, label="resources")
+    if resources["gpu_uuids"] != []:
+        raise CompilerError("invalid_compiler_input", "read-only compiler analysis must not request GPUs")
+    normalized = dict(request)
+    normalized.update({
+        "artifact_root": str(root), "artifact_ref": artifact_ref,
+        "resources": {"host_id": _text(resources["host_id"], "resources.host_id", 256), "gpu_uuids": []},
+    })
+    resolved, _selected = _resolve(root, request["target_ref"], artifact_ref)
+    normalized["target_ref"] = resolved["target_ref"]
+    return normalized, root, _subset(resolved, _BINDING_KEYS)
+
+
+def analyze(value, *, wait_for_result: bool) -> dict:
+    request, root, binding = _validate_analyze(value)
+    frozen = {**request, "artifact_binding": binding, "tool_identity": _tool_identity()}
+    frozen["request_digest"] = RUNTIME.request_digest(frozen)
+    return RUNTIME.submit(
+        root, frozen, [sys.executable, str(Path(__file__).resolve()), "_worker"],
+        wait_for_result,
     )
-    del selected_unit
-    return {stage: value[1] for stage, value in selected.items()}
+
+
+def _facts(path: Path, stage: str, selected: dict) -> dict:
+    digest = hashlib.sha256()
+    total = newlines = 0
+    last = b""
+    decoder = codecs.getincrementaldecoder("utf-8")("strict") if stage in TEXT_STAGES else None
+    required = list(STRUCTURAL_MARKERS.get(stage, ()))
+    found = {name: False for _marker, name in required}
+    ptx_entry = False
+    tail = b""
+    try:
+        with path.open("rb") as stream:
+            while True:
+                chunk = stream.read(_CHUNK_BYTES)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                total += len(chunk)
+                last = chunk[-1:]
+                if decoder is not None:
+                    if b"\x00" in chunk:
+                        raise CompilerError("invalid_text_artifact", "text artifact contains NUL")
+                    decoder.decode(chunk, final=False)
+                    newlines += chunk.count(b"\n")
+                    searchable = tail + chunk
+                    for marker, name in required:
+                        if marker in searchable:
+                            found[name] = True
+                    ptx_entry = ptx_entry or stage == "ptx" and (
+                        b".entry" in searchable or b".func" in searchable
+                    )
+                    tail = searchable[-32:]
+        if decoder is not None:
+            decoder.decode(b"", final=True)
+    except UnicodeDecodeError as error:
+        raise CompilerError("invalid_text_artifact", "text artifact is not UTF-8") from error
+    if total != selected["size_bytes"] or digest.hexdigest() != selected["sha256"]:
+        raise CompilerError("artifact_changed", "materialized artifact does not match frozen metadata")
+    missing = [name for name, present in found.items() if not present]
+    if stage == "ptx" and not ptx_entry:
+        missing.append(".entry_or_func")
+    if missing:
+        raise CompilerError("unrecognized_dialect", f"missing structural marker: {missing[0]}")
+    observation = {
+        "kind": "compiler_artifact_facts", "declared_stage": stage,
+        "content_sha256": digest.hexdigest(), "size_bytes": total,
+    }
+    if decoder is not None:
+        markers = [name for _marker, name in required]
+        if stage == "ptx":
+            markers.append(".entry_or_func")
+        observation["text"] = {
+            "encoding": "utf-8", "line_count": newlines + (0 if last == b"\n" else 1),
+            "ends_with_newline": last == b"\n", "structural_markers": markers,
+        }
+    return observation
+
+
+def _worker_main() -> int:
+    root = Path(os.environ["CKO_ARTIFACT_ROOT"])
+    invocation = Path(os.environ["CKO_INVOCATION_DIR"])
+    request = _strict_json(invocation / "request.json")
+    started = time.monotonic()
+    result = {
+        "record_type": "compiler_result", "format_version": RESULT_VERSION,
+        "operation": "analyze", "target_ref": request["target_ref"],
+        "artifact_ref": request["artifact_ref"], "execution_status": "invalid",
+        "evidence_validity": "invalid", "stop_reason": None,
+        "cleanup_status": "not_required", "observations": [],
+        "source_binding": _subset(request["artifact_binding"], _SOURCE_KEYS),
+        "environment_binding": request["artifact_binding"]["environment"],
+        "provenance": {"tool_identity": request["tool_identity"]},
+        "started_at_epoch": time.time(),
+    }
+    try:
+        if request["tool_identity"] != _tool_identity():
+            raise CompilerError("tool_identity_changed", "implementation changed before analysis")
+        resolved, selected = _resolve(root, request["target_ref"], request["artifact_ref"])
+        if _subset(resolved, _BINDING_KEYS) != request["artifact_binding"]:
+            raise CompilerError("artifact_binding_changed", "frozen artifact bindings changed")
+        workspace = invocation / "workspace"
+        STORE.create_regular_directory(workspace)
+        STORE.materialize_object_member(
+            root, resolved["object_ref"], selected["member"], workspace / "selected-artifact"
+        )
+        observation = _facts(workspace / "selected-artifact", request["artifact_ref"]["stage"], selected)
+        if request["tool_identity"] != _tool_identity():
+            raise CompilerError("tool_identity_changed", "implementation changed during analysis")
+        result.update({
+            "execution_status": "succeeded", "evidence_validity": "valid",
+            "stop_reason": "completed", "observations": [observation],
+        })
+        result["provenance"].update({
+            "object_ref": resolved["object_ref"], "selected_member": selected["member"],
+        })
+    except CompilerError as error:
+        result["stop_reason"] = error.code
+        result["diagnostic"] = {"error": str(error)[:1024]}
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        result["stop_reason"] = "artifact_analysis_invalid"
+        result["diagnostic"] = {"error": str(error)[:1024]}
+    except BaseException as error:
+        result.update({
+            "execution_status": "failed", "stop_reason": "worker_error",
+            "diagnostic": {"error": str(error)[:1024]},
+        })
+    result["finished_at_epoch"], result["elapsed_seconds"] = time.time(), time.monotonic() - started
+    STORE.create_regular_json(invocation / "result.json", result)
+    return 0
+
+
+def _status_or_cancel(value, operation: str) -> dict:
+    request = _closed(value, _STATUS_FIELDS, label=f"{operation} input")
+    if request["format_version"] != INPUT_VERSION or request["operation"] != operation:
+        raise CompilerError("invalid_compiler_input", f"{operation} input is unsupported")
+    return (
+        RUNTIME.status(request["artifact_root"], request["invocation_id"])
+        if operation == "status"
+        else RUNTIME.cancel(request["artifact_root"], request["invocation_id"])
+    )
+
+
+def main(argv=None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["_worker"]:
+        return _worker_main()
+    parser = argparse.ArgumentParser(description="Analyze one frozen compiler artifact.")
+    parser.add_argument("operation", choices=("analyze", "status", "cancel"))
+    parser.add_argument("--request", required=True)
+    parser.add_argument("--wait", action="store_true")
+    args = parser.parse_args(arguments)
+    try:
+        request = _strict_json(args.request)
+        if request.get("operation") != args.operation:
+            raise CompilerError("invalid_compiler_input", "CLI operation does not match request")
+        if args.operation == "analyze":
+            result = analyze(request, wait_for_result=args.wait)
+        else:
+            if args.wait:
+                raise CompilerError("invalid_compiler_input", "--wait is only valid for analyze")
+            result = _status_or_cancel(request, args.operation)
+    except (CompilerError, OSError, TimeoutError, ValueError) as error:
+        print(json.dumps({
+            "status": "rejected", "error_code": getattr(error, "code", "compiler_error"),
+            "error": str(error)[:1024],
+        }, sort_keys=True), file=sys.stderr)
+        return 2
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
