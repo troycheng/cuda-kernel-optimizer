@@ -44,6 +44,7 @@ SASS = (
     "compile_size = 64bit\n"
     "code for sm_120\n"
     ".target\tsm_120\n"
+    "\t\t..........\n"
     "Function : kernel\n"
     ".headerflags @\"EF_CUDA_SM120 EF_CUDA_VIRTUAL_SM(EF_CUDA_SM120)\"\n"
     "/*0000*/ MOV R1, c[0x0][0x28]; /* 0x00000a0000017a02 */\n"
@@ -263,6 +264,14 @@ class SassCheckTests(unittest.TestCase):
             root = Path(temporary)
             path = root / "sass.txt"
             path.write_text(SASS, encoding="utf-8")
+            for separator in (".........", "..........."):
+                unsupported = root / f"separator-{len(separator)}.txt"
+                unsupported.write_text(
+                    SASS.replace("..........", separator), encoding="utf-8"
+                )
+                with self.subTest(separator=separator), self.assertRaises(module.SassError) as separator_error:
+                    module._sass_facts(unsupported)
+                self.assertEqual(separator_error.exception.code, "unrecognized_sass_dialect")
             observed = module._signature_facts(path, "compute.fma_and_fast_math")
             self.assertEqual(observed["mechanism_key"], "compute.fma_and_fast_math")
             self.assertIn("FFMA", observed["patterns_found"])

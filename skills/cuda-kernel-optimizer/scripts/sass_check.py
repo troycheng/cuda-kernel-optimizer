@@ -59,7 +59,7 @@ _INSTRUCTION_RE = re.compile(
 _HEX_RE = re.compile(r"\s*/\*\s*0x[0-9a-fA-F ]+\s*\*/\s*\Z")
 _METADATA_RE = re.compile(
     r"(?:=+|Fatbin elf code:|(?:code version|host|compile_size|identifier|producer)\s*=.*|"
-    r"\.target\s+sm_[0-9]+|\.headerflags.*|Section:.*)\Z"
+    r"\.{10}|\.target\s+sm_[0-9]+|\.headerflags.*|Section:.*)\Z"
 )
 
 
