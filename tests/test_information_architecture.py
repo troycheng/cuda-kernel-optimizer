@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import importlib.util
 import subprocess
@@ -13,6 +14,59 @@ SKILL = ROOT / "skills" / "cuda-kernel-optimizer"
 
 
 class InformationArchitectureTests(unittest.TestCase):
+    def test_v14_production_surface_is_exact_and_smaller_than_task5_baseline(self) -> None:
+        checker_path = SKILL / "scripts" / "self_check.py"
+        spec = importlib.util.spec_from_file_location("v14_surface_check", checker_path)
+        checker = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(checker)
+
+        scripts = SKILL / "scripts"
+        actual = {
+            path.name
+            for path in scripts.iterdir()
+            if path.is_file() and not path.is_symlink() and path.suffix == ".py"
+        }
+        self.assertEqual(actual, set(checker.PRODUCTION_MODULES))
+        self.assertEqual(len(actual), 17)
+        line_count = sum(
+            (scripts / name).read_text(encoding="utf-8").count("\n")
+            for name in checker.PRODUCTION_MODULES
+        )
+        self.assertLess(line_count, 14_671)
+
+        store = (scripts / "artifact_store.py").read_text(encoding="utf-8")
+        for legacy_symbol in (
+            "read_regular_with_optional_sibling",
+            "read_regular_bundle",
+            "publish_regular_bundle",
+            "atomic_write_json",
+            "atomic_write_jsonl",
+            "write_paired_samples",
+            "class ArtifactStore",
+        ):
+            self.assertNotIn(legacy_symbol, store)
+
+        for name in checker.PRODUCTION_MODULES:
+            if name == "_invocation_runtime.py":
+                continue
+            tree = ast.parse(
+                (scripts / name).read_text(encoding="utf-8"),
+                filename=name,
+            )
+            imported = {
+                alias.name.split(".", 1)[0]
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Import)
+                for alias in node.names
+            }
+            imported.update(
+                node.module.split(".", 1)[0]
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module
+            )
+            self.assertNotIn("subprocess", imported, name)
+
     def test_workload_evaluator_does_not_import_the_champion_tool(self) -> None:
         evaluator = (
             SKILL / "scripts" / "workload_evaluate.py"
