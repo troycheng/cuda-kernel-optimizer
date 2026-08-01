@@ -356,6 +356,22 @@ class ProfileCollectionBindingTests(unittest.TestCase):
             self.assertEqual(resolved["artifact"]["dialect"], "ptx-v1")
             self.assertEqual(resolved["artifact"]["sha256"], hashlib.sha256(b".version 8.0\n").hexdigest())
 
+            target["diagnostic_materials"][0]["sha256"] = "0" * 64
+            write_json(root / "target.json", target)
+            target_ref["sha256"] = self.adapter.STORE.sha256_file(root / "target.json")
+            with self.assertRaisesRegex(ValueError, "material_ref"):
+                self.adapter.resolve_analysis_artifact(
+                    artifact_root=root,
+                    target_ref=target_ref,
+                    artifact_ref={
+                        "source": "target_material",
+                        "material_ref": {
+                            "id": material["id"],
+                            "sha256": "0" * 64,
+                        },
+                    },
+                )
+
     def _ready_project(self, root: Path) -> tuple[V14Project, dict]:
         project = V14Project(root)
         request = project.readiness_input()

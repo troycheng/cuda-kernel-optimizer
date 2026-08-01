@@ -1083,6 +1083,7 @@ def resolve_analysis_artifact(*, artifact_root, target_ref, artifact_ref) -> dic
             len(matches) != 1
             or matches[0].get("sha256") != material_ref["sha256"]
             or type(matches[0].get("object_ref")) is not dict
+            or matches[0]["object_ref"].get("digest") != material_ref["sha256"]
         ):
             raise ValueError("material_ref is not bound to this Target")
         material = matches[0]
