@@ -19,7 +19,7 @@ INPUT_VERSION = "cuda-kernel-optimizer/pytorch-input-v1"
 RESULT_VERSION = "cuda-kernel-optimizer/profiler-result-v1"
 PARSER_VERSION = "chrome-trace-v1"
 _DIALECT = "chrome-trace-v1"
-_VERSION = re.compile(r"2\.13(?:\.\d+)*\Z")
+_VERSION = re.compile(r"2\.13(?:\.\d+)*(?:\+[a-z0-9]+(?:[._-][a-z0-9]+)*)?\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _INPUT = {
     "format_version", "operation", "artifact_root", "target_ref", "report_ref",
@@ -27,6 +27,13 @@ _INPUT = {
     "resource_wait_timeout_seconds", "cleanup_timeout_seconds", "launch_deadline",
 }
 _OPTIONAL = {"absolute_deadline", "retry_of"}
+_COLLECT = {
+    "format_version", "operation", "artifact_root", "target_ref", "baseline_ref",
+    "role", "case_id", "resources", "operation_timeout_seconds",
+    "command_timeout_seconds", "resource_wait_timeout_seconds",
+    "cleanup_timeout_seconds", "launch_deadline",
+}
+_COLLECT_OPTIONAL = {"experiment_ref", "correctness_ref", "absolute_deadline", "retry_of"}
 _MATERIAL = {"id", "sha256", "kind", "tool", "tool_version", "dialect", "object_ref"}
 _OBJECT_REF = {"digest", "locator", "source_kind", "file_count", "total_bytes"}
 _COMPLETE_FIELDS = {"name", "cat", "ph", "pid", "tid", "ts", "dur"}
@@ -38,6 +45,11 @@ _MAX_EVENT_FIELDS = 32
 _MAX_TEXT = 512
 _MAX_OUTPUT = 10_000
 _MAX_UNMODELED = 128
+_DRIVER_OUTPUT_FREEZE_LIMITS = {
+    "max_files": 16,
+    "max_total_bytes": 256 * 1024 * 1024,
+    "max_wall_seconds": 30.0,
+}
 
 
 def _load_sibling(filename: str, name: str):
@@ -51,6 +63,7 @@ def _load_sibling(filename: str, name: str):
 
 STORE = _load_sibling("artifact_store.py", "cuda_optimizer_pytorch_store")
 RUNTIME = _load_sibling("_invocation_runtime.py", "cuda_optimizer_pytorch_runtime")
+ADAPTER = _load_sibling("workload_adapter.py", "cuda_optimizer_pytorch_adapter")
 
 
 class PyTorchError(ValueError):
@@ -88,6 +101,13 @@ def _finite(value, label: str, positive=False) -> float:
     if positive and value <= 0:
         raise PyTorchError("invalid_pytorch_input", f"{label} must be positive")
     return float(value)
+
+
+def _torch_version(value, label: str) -> str:
+    value = _text(value, label, 128)
+    if _VERSION.fullmatch(value) is None:
+        raise PyTorchError("unsupported_tool_version", "PyTorch version is not supported")
+    return value
 
 
 def _strict_json_bytes(
@@ -171,8 +191,7 @@ def _material(target: dict, reference) -> dict:
         raise PyTorchError("unsupported_report", "material is not the requested PyTorch profiler report")
     if material["dialect"] != _DIALECT:
         raise PyTorchError("unsupported_report", "material is not the accepted Chrome trace dialect")
-    if not isinstance(material["tool_version"], str) or _VERSION.fullmatch(material["tool_version"]) is None:
-        raise PyTorchError("unsupported_tool_version", "PyTorch version is not supported")
+    _torch_version(material["tool_version"], "diagnostic material.tool_version")
     object_ref = material["object_ref"]
     expected_locator = str(Path("objects") / "sha256" / digest)
     if type(object_ref) is not dict or set(object_ref) - _OBJECT_REF or object_ref.get("digest") != digest or object_ref.get("locator") != expected_locator:
@@ -204,8 +223,7 @@ def _trace_number(value, label: str) -> float:
 
 def parse_chrome_trace(trace: dict, tool_version: str) -> dict:
     """Return one exact observation per complete event in a Chrome Trace v1 object."""
-    if _VERSION.fullmatch(tool_version) is None:
-        raise PyTorchError("unsupported_tool_version", "PyTorch version is not supported")
+    tool_version = _torch_version(tool_version, "PyTorch version")
     if (
         type(trace) is not dict
         or len(trace) > _MAX_TOP_LEVEL_FIELDS
@@ -301,7 +319,7 @@ def parse_chrome_trace(trace: dict, tool_version: str) -> dict:
 
 
 def _tool_identity() -> dict:
-    implementations = [{"name": name, "sha256": STORE.sha256_file(Path(__file__).with_name(name))} for name in ("profile_pytorch.py", "_invocation_runtime.py", "artifact_store.py")]
+    implementations = [{"name": name, "sha256": STORE.sha256_file(Path(__file__).with_name(name))} for name in ("profile_pytorch.py", "_invocation_runtime.py", "artifact_store.py", "workload_adapter.py")]
     identity = {"version": "cuda-kernel-optimizer/pytorch-tool-v1", "result_contract": RESULT_VERSION, "implementations": implementations}
     identity["digest"] = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return identity
@@ -326,6 +344,61 @@ def _validate_analyze(value) -> tuple[dict, Path, dict]:
     return normalized, root, _material(_target(root, request["target_ref"]), request["report_ref"])
 
 
+def _resources(value) -> dict:
+    value = _closed(value, {"host_id", "gpu_uuids"}, label="resources")
+    gpu_uuids = value["gpu_uuids"]
+    if type(gpu_uuids) is not list or any(not isinstance(item, str) or not item for item in gpu_uuids):
+        raise PyTorchError("invalid_pytorch_input", "resources.gpu_uuids must be a string list")
+    if len(gpu_uuids) != len(set(gpu_uuids)):
+        raise PyTorchError("invalid_pytorch_input", "resources.gpu_uuids must not contain duplicates")
+    return {"host_id": _text(value["host_id"], "resources.host_id", 256), "gpu_uuids": sorted(gpu_uuids)}
+
+
+def _resolve_collect(request: dict) -> dict:
+    try:
+        resolved = ADAPTER.resolve_profile_collection(
+            artifact_root=request["artifact_root"], target_ref=request["target_ref"],
+            baseline_ref=request["baseline_ref"], role=request["role"], case_id=request["case_id"],
+            capability="pytorch_chrome_trace_v1", experiment_ref=request.get("experiment_ref"),
+            correctness_ref=request.get("correctness_ref"),
+        )
+        host = resolved["target"]["environment"]["host"]
+        expected = {"host_id": _text(host["host_id"], "Target host_id", 256), "gpu_uuids": sorted(host["gpu_uuids"])}
+        if request["resources"] != expected:
+            raise PyTorchError("resource_mismatch", "collect resources do not equal Target host and GPUs")
+        torch_version = _torch_version(resolved["target"]["environment"]["runtime"]["frameworks"]["torch"], "Target torch version")
+    except PyTorchError:
+        raise
+    except (KeyError, TypeError, ValueError) as error:
+        raise PyTorchError("collection_rejected", str(error)) from error
+    if any(not isinstance(item, str) or not item for item in expected["gpu_uuids"]) or len(expected["gpu_uuids"]) != len(set(expected["gpu_uuids"])):
+        raise PyTorchError("target_invalid", "Target GPU identities are invalid")
+    return {**resolved, "resources": expected, "torch_version": torch_version}
+
+
+def _validate_collect(value) -> tuple[dict, dict]:
+    request = _closed(value, _COLLECT, _COLLECT_OPTIONAL, "collect input")
+    if request["format_version"] != INPUT_VERSION or request["operation"] != "collect":
+        raise PyTorchError("invalid_pytorch_input", "collect operation is unsupported")
+    root = Path(os.path.abspath(os.path.expanduser(_text(request["artifact_root"], "artifact_root", 4096))))
+    normalized = {**request, "artifact_root": str(root), "resources": _resources(request["resources"]), "role": _text(request["role"], "role", 32), "case_id": _text(request["case_id"], "case_id", 128)}
+    for field in ("operation_timeout_seconds", "command_timeout_seconds", "resource_wait_timeout_seconds", "cleanup_timeout_seconds"):
+        normalized[field] = _finite(request[field], field, True)
+    normalized["launch_deadline"] = _finite(request["launch_deadline"], "launch_deadline")
+    if "absolute_deadline" in request:
+        normalized["absolute_deadline"] = _finite(request["absolute_deadline"], "absolute_deadline")
+    return normalized, _resolve_collect(normalized)
+
+
+def _frozen_collect_request(request: dict, resolved: dict) -> dict:
+    frozen = {"operation": "collect", "target_ref": resolved["target_ref"], "baseline_ref": resolved["baseline_ref"], "role": resolved["role"], "case_id": resolved["case_id"], "variant": resolved["variant"], "experiment_ref": resolved["experiment_ref"], "correctness_ref": resolved["correctness_ref"], "driver": resolved["driver"], "resources": resolved["resources"], "torch_version": resolved["torch_version"], "tool_identity": _tool_identity(), "operation_timeout_seconds": request["operation_timeout_seconds"], "command_timeout_seconds": request["command_timeout_seconds"], "resource_wait_timeout_seconds": request["resource_wait_timeout_seconds"], "cleanup_timeout_seconds": request["cleanup_timeout_seconds"], "launch_deadline": request["launch_deadline"]}
+    for field in ("absolute_deadline", "retry_of"):
+        if field in request:
+            frozen[field] = request[field]
+    frozen["request_digest"] = RUNTIME.request_digest(frozen)
+    return frozen
+
+
 def analyze(value, *, wait_for_result: bool) -> dict:
     request, root, material = _validate_analyze(value)
     frozen = {**request, "report_material": material, "tool_identity": _tool_identity()}
@@ -333,33 +406,100 @@ def analyze(value, *, wait_for_result: bool) -> dict:
     return RUNTIME.submit(root, frozen, [sys.executable, str(Path(__file__).resolve()), "_worker"], wait_for_result)
 
 
+def collect(value, *, wait_for_result: bool) -> dict:
+    request, resolved = _validate_collect(value)
+    return RUNTIME.submit(resolved["artifact_root"], _frozen_collect_request(request, resolved), [sys.executable, str(Path(__file__).resolve()), "_worker"], wait_for_result)
+
+
+def _command_spec(argv: list[str], workspace: Path, gpu_uuids: list[str]) -> dict:
+    return {"argv": argv, "cwd": str(workspace), "env": {}, "output_limit_bytes": 64 * 1024, "required_gpu_uuids": gpu_uuids}
+
+
+def _revalidate_collect_worker(request: dict, root: Path) -> dict:
+    resolved = _resolve_collect({**request, "artifact_root": str(root)})
+    keys = ("target_ref", "baseline_ref", "role", "case_id", "variant", "experiment_ref", "correctness_ref", "driver", "resources", "torch_version")
+    if {key: resolved[key] for key in keys} != {key: request[key] for key in keys}:
+        raise PyTorchError("collection_changed", "frozen collection bindings changed")
+    return resolved
+
+
+def _collect_worker(request: dict, root: Path, invocation: Path, result: dict) -> None:
+    acquired = RUNTIME.acquire_resources(request["resources"]["gpu_uuids"])
+    if acquired.get("status") != "acquired":
+        result.update({"execution_status": acquired.get("status", "failed"), "stop_reason": acquired.get("stop_reason", "resource_acquisition_failed"), "cleanup_status": acquired.get("cleanup_status", "unknown")})
+        return
+    resolved = _revalidate_collect_worker(request, root)
+    workspace = invocation / "workspace"
+    workspace.mkdir()
+    variant = ADAPTER.materialize_variant(root, workspace, resolved["variant"], "variant")
+    inputs = ADAPTER.materialize_target_inputs(root, workspace, resolved["target"])
+    driver_output = workspace / "driver-output"
+    driver_output.mkdir()
+    driver_request = ADAPTER.build_driver_request(
+        target_id=resolved["target"]["id"], execution_id=os.environ["CKO_INVOCATION_ID"], operation="profile_pytorch_collect",
+        driver=resolved["driver"], variant=variant, test_suite=inputs["test_suite"], correctness=inputs["correctness"], objective=inputs["objective"],
+        role=resolved["role"], mode="measure" if resolved["driver"]["execution_mode"] == "separate" else "combined", case={"id": resolved["case_id"]},
+        sampling={"kind": "pytorch_chrome_trace_v1"}, output_path=driver_output / "result.json",
+    )
+    request_path = workspace / "driver-request.json"
+    STORE.create_regular_bytes(request_path, json.dumps(driver_request, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n")
+    argv = ADAPTER.build_argv(resolved["driver"], request_path)
+    receipt = RUNTIME.run_child(_command_spec(argv, workspace, request["resources"]["gpu_uuids"]))
+    result["provenance"] = {"tool_identity": request["tool_identity"], "parser_version": PARSER_VERSION, "command_receipts": [{"argv": argv, "result": receipt}]}
+    if receipt.get("status") != "completed":
+        result.update({"execution_status": receipt.get("status", "failed"), "stop_reason": receipt.get("stop_reason", "driver_command_failed"), "cleanup_status": receipt.get("cleanup_status", "unknown"), "diagnostic": {"error": (receipt.get("stderr", "") + "\n" + receipt.get("stdout", ""))[:1024]}})
+        return
+    driver_object = STORE.freeze_path(root, driver_output, _DRIVER_OUTPUT_FREEZE_LIMITS)
+    result["provenance"]["driver_output"] = driver_object
+    frozen = STORE.materialize_object(root, driver_object, workspace / "frozen-driver-output")
+    try:
+        driver_result = ADAPTER.validate_driver_result(frozen / "result.json", driver_request)
+    except ValueError as error:
+        raise PyTorchError("driver_result_invalid", str(error)) from error
+    if driver_result["environment"] != resolved["target"]["environment"]["runtime"]:
+        raise PyTorchError("environment_changed", "driver runtime identity changed during collection")
+    version = _torch_version(driver_result["environment"]["frameworks"].get("torch"), "driver torch version")
+    if version != request["torch_version"]:
+        raise PyTorchError("environment_changed", "driver torch version changed during collection")
+    artifacts = driver_result["artifacts"]
+    if len(artifacts) != 1 or artifacts[0].get("kind") != "pytorch_chrome_trace":
+        raise PyTorchError("invalid_trace_artifact", "driver result must contain exactly one PyTorch Chrome trace")
+    artifact = artifacts[0]
+    trace = frozen / artifact["relative_path"]
+    facts = parse_chrome_trace(_strict_json_bytes(STORE.read_regular_bytes(trace, maximum_bytes=_MAX_TRACE_BYTES), "Chrome trace"), version)
+    result.update({"execution_status": "succeeded", "measurement_validity": "valid", "stop_reason": "completed", "cleanup_status": RUNTIME.current_cleanup_status(), "observations": facts["observations"], "unmodeled": facts["unmodeled"]})
+    result["provenance"].update({"trace_artifact": artifact, "tool": {"name": "pytorch_profiler", "version": version}, "dialect": _DIALECT, "timestamp_unit": "us"})
+
+
 def _worker_main() -> int:
     root, invocation = Path(os.environ["CKO_ARTIFACT_ROOT"]), Path(os.environ["CKO_INVOCATION_DIR"])
     request, started = _strict_json(invocation / "request.json"), time.monotonic()
-    result = {"record_type": "profiler_result", "format_version": RESULT_VERSION, "operation": "analyze", "target_ref": request["target_ref"], "report_ref": request["report_ref"], "execution_status": "invalid", "measurement_validity": "invalid", "stop_reason": None, "cleanup_status": "not_required", "observations": [], "unmodeled": [], "provenance": {}, "started_at_epoch": time.time()}
+    result = {"record_type": "profiler_result", "format_version": RESULT_VERSION, "operation": request["operation"], "target_ref": request["target_ref"], "execution_status": "invalid", "measurement_validity": "invalid", "stop_reason": None, "cleanup_status": "not_required", "observations": [], "unmodeled": [], "provenance": {}, "started_at_epoch": time.time()}
+    if request["operation"] == "analyze":
+        result["report_ref"] = request["report_ref"]
+    else:
+        result.update({"baseline_ref": request["baseline_ref"], "role": request["role"], "case_id": request["case_id"], "experiment_ref": request["experiment_ref"], "correctness_ref": request["correctness_ref"]})
     try:
         if request.get("tool_identity") != _tool_identity():
             raise PyTorchError("tool_identity_changed", "implementation changed before analysis")
-        material = _material(_target(root, request["target_ref"]), request["report_ref"])
-        if material != request.get("report_material"):
-            raise PyTorchError("report_changed", "frozen report material changed")
-        report = STORE.materialize_object(root, material["object_ref"], invocation / "workspace" / "trace.json")
-        facts = parse_chrome_trace(
-            _strict_json_bytes(
-                STORE.read_regular_bytes(
-                    report,
-                    maximum_bytes=_MAX_TRACE_BYTES,
-                ),
-                "Chrome trace",
-            ),
-            material["tool_version"],
-        )
-        result.update({"execution_status": "succeeded", "measurement_validity": "valid", "stop_reason": "completed", "observations": facts["observations"], "unmodeled": facts["unmodeled"], "provenance": {"report_ref": request["report_ref"], "report_object_ref": material["object_ref"], "tool": {"name": "pytorch_profiler", "version": material["tool_version"]}, "dialect": material["dialect"], "parser_version": PARSER_VERSION, "timestamp_unit": "us", "tool_identity": request["tool_identity"]}})
+        if request["operation"] == "collect":
+            _collect_worker(request, root, invocation, result)
+        else:
+            material = _material(_target(root, request["target_ref"]), request["report_ref"])
+            if material != request.get("report_material"):
+                raise PyTorchError("report_changed", "frozen report material changed")
+            report = STORE.materialize_object(root, material["object_ref"], invocation / "workspace" / "trace.json")
+            facts = parse_chrome_trace(_strict_json_bytes(STORE.read_regular_bytes(report, maximum_bytes=_MAX_TRACE_BYTES), "Chrome trace"), material["tool_version"])
+            result.update({"execution_status": "succeeded", "measurement_validity": "valid", "stop_reason": "completed", "observations": facts["observations"], "unmodeled": facts["unmodeled"], "provenance": {"report_ref": request["report_ref"], "report_object_ref": material["object_ref"], "tool": {"name": "pytorch_profiler", "version": material["tool_version"]}, "dialect": material["dialect"], "parser_version": PARSER_VERSION, "timestamp_unit": "us", "tool_identity": request["tool_identity"]}})
     except PyTorchError as error:
         result["stop_reason"] = error.code
         result["diagnostic"] = {"error": str(error)[:1024]}
+        if request["operation"] == "collect":
+            result["cleanup_status"] = RUNTIME.current_cleanup_status()
     except BaseException as error:
         result.update({"execution_status": "failed", "stop_reason": "worker_error", "diagnostic": {"error": str(error)[:1024]}})
+        if request["operation"] == "collect":
+            result["cleanup_status"] = RUNTIME.current_cleanup_status()
     result["finished_at_epoch"], result["elapsed_seconds"] = time.time(), time.monotonic() - started
     STORE.create_regular_json(invocation / "result.json", result)
     return 0
@@ -377,7 +517,7 @@ def main(argv=None) -> int:
     if arguments == ["_worker"]:
         return _worker_main()
     parser = argparse.ArgumentParser(description="Analyze one frozen V1.4 PyTorch Chrome trace.")
-    parser.add_argument("operation", choices=("analyze", "status", "cancel"))
+    parser.add_argument("operation", choices=("analyze", "collect", "status", "cancel"))
     parser.add_argument("--request", required=True)
     parser.add_argument("--wait", action="store_true")
     args = parser.parse_args(arguments)
@@ -387,9 +527,11 @@ def main(argv=None) -> int:
             raise PyTorchError("invalid_pytorch_input", "CLI operation does not match request")
         if args.operation == "analyze":
             result = analyze(request, wait_for_result=args.wait)
+        elif args.operation == "collect":
+            result = collect(request, wait_for_result=args.wait)
         else:
             if args.wait:
-                raise PyTorchError("invalid_pytorch_input", "--wait is only valid for analyze")
+                raise PyTorchError("invalid_pytorch_input", "--wait is only valid for analyze or collect")
             result = _status_or_cancel(request, args.operation)
     except (PyTorchError, OSError, ValueError, TimeoutError) as error:
         print(json.dumps({"status": "rejected", "error_code": getattr(error, "code", "pytorch_error"), "error": str(error)[:1024]}, sort_keys=True), file=sys.stderr)
