@@ -254,6 +254,47 @@ class ArtifactStoreTests(unittest.TestCase):
                     },
                 )
 
+            durable_source = root / "durable.bin"
+            durable_source.write_bytes(b"durable")
+            events = []
+            real_fchmod = self.artifacts.os.fchmod
+            real_fsync = self.artifacts.os.fsync
+
+            def tracked_fchmod(fd, mode):
+                events.append(("fchmod", fd))
+                return real_fchmod(fd, mode)
+
+            def tracked_fsync(fd):
+                events.append(("fsync", fd))
+                return real_fsync(fd)
+
+            with mock.patch.object(
+                self.artifacts.os, "fchmod", side_effect=tracked_fchmod
+            ), mock.patch.object(
+                self.artifacts.os, "fsync", side_effect=tracked_fsync
+            ):
+                self.artifacts.freeze_path(
+                    root / "durable-artifacts",
+                    durable_source,
+                    {
+                        "max_files": 1,
+                        "max_total_bytes": 1024,
+                        "max_wall_seconds": 1.0,
+                    },
+                )
+
+            fchmod_index, destination_fd = next(
+                (index, fd)
+                for index, (event, fd) in enumerate(events)
+                if event == "fchmod"
+            )
+            self.assertTrue(
+                any(
+                    event == "fsync" and fd == destination_fd
+                    for event, fd in events[fchmod_index + 1 :]
+                )
+            )
+
     def test_materialize_object_rejects_tampered_payload_and_cleans_temporary_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

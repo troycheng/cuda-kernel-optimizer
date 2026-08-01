@@ -988,9 +988,10 @@ def _copy_source_file(
             after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
         ) or total != before.st_size:
             raise ValueError(f"snapshot input changed while reading: {display_path}")
+        os.fchmod(destination_fd, stat.S_IMODE(before.st_mode))
+        os.fsync(destination_fd)
         os.close(destination_fd)
         destination_fd = None
-        os.chmod(destination, stat.S_IMODE(before.st_mode), follow_symlinks=False)
         return {
             "mode": stat.S_IMODE(before.st_mode),
             "size_bytes": total,
@@ -1327,6 +1328,7 @@ def _same_open_directory(parent_fd: int, leaf: str, directory_fd: int) -> bool:
 
 def _clear_open_directory(directory_fd: int) -> None:
     """Remove children through a stable directory descriptor without following links."""
+    os.fchmod(directory_fd, 0o700)
     flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -1338,6 +1340,15 @@ def _clear_open_directory(directory_fd: int) -> None:
         if stat.S_ISDIR(metadata.st_mode):
             child_fd = os.open(leaf, flags, dir_fd=directory_fd)
             try:
+                opened = os.fstat(child_fd)
+                if (metadata.st_dev, metadata.st_ino) != (
+                    opened.st_dev,
+                    opened.st_ino,
+                ):
+                    raise ValueError(
+                        "materialization directory changed during cleanup"
+                    )
+                os.fchmod(child_fd, 0o700)
                 _clear_open_directory(child_fd)
                 if _same_open_directory(directory_fd, leaf, child_fd):
                     os.rmdir(leaf, dir_fd=directory_fd)
@@ -1407,7 +1418,6 @@ def _copy_frozen_member(
                 if written <= 0:
                     raise OSError("object materialization write made no progress")
                 offset += written
-        os.fsync(destination_fd)
         after = os.fstat(source_fd)
         if (
             before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
