@@ -923,12 +923,54 @@ def _has_reusable_result(current: dict) -> bool:
     return result.get("measurement_validity", "valid") == "valid"
 
 
+def _latest_event(invocation_dir: Path, event_name: str) -> dict | None:
+    events_path = invocation_dir / "events.jsonl"
+    if not _regular_file_or_absent(events_path):
+        return None
+    try:
+        records = STORE.read_regular_bytes(
+            events_path, maximum_bytes=_MAX_RECORD_BYTES
+        ).splitlines()
+        for record in reversed(records):
+            if not record:
+                continue
+            event = json.loads(record.decode("utf-8"))
+            if type(event) is dict and event.get("event") == event_name:
+                return event
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+    return None
+
+
 def _status_from_dir(invocation_dir: Path) -> dict:
     request = _read_json(invocation_dir / "request.json")
     invocation_id = invocation_dir.name
     result_path = invocation_dir / "result.json"
     created = float(request["created_at_epoch"])
     if _regular_file_or_absent(result_path):
+        guardian_finished = _latest_event(invocation_dir, "guardian_finished")
+        if guardian_finished is None or guardian_finished.get("result_published") is not True:
+            worker_path = invocation_dir / "worker.json"
+            if _regular_file_or_absent(worker_path):
+                worker = _read_json(worker_path)
+                if _process_matches(
+                    worker.get("worker_pid"), worker.get("worker_start_token")
+                ) or _process_matches(
+                    worker.get("guardian_pid"), worker.get("guardian_start_token")
+                ):
+                    return {
+                        "query_status": "running",
+                        "invocation_id": invocation_id,
+                        "elapsed_seconds": max(0.0, time.time() - created),
+                        "cleanup_status": "pending",
+                    }
+            return {
+                "query_status": "worker_lost",
+                "invocation_id": invocation_id,
+                "elapsed_seconds": max(0.0, time.time() - created),
+                "cleanup_status": "unknown",
+                "stop_reason": "worker_lost",
+            }
         result = _read_json(result_path)
         active = invocation_dir / "active-child.json"
         cleanup_status = result.get("cleanup_status", "unknown")
@@ -980,18 +1022,8 @@ def _status_from_dir(invocation_dir: Path) -> dict:
             "stop_reason": "worker_lost",
         }
 
-    events_path = invocation_dir / "events.jsonl"
-    if _regular_file_or_absent(events_path):
-        try:
-            records = STORE.read_regular_bytes(
-                events_path, maximum_bytes=_MAX_RECORD_BYTES
-            ).splitlines()
-            rejection = next((event for event in (
-                json.loads(record.decode("utf-8"))
-                for record in reversed(records) if record
-            ) if type(event) is dict and event.get("event") == "worker_launch_rejected"), None)
-        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-            rejection = None
+    rejection = _latest_event(invocation_dir, "worker_launch_rejected")
+    if rejection is not None:
         if (
             type(rejection) is dict
             and rejection.get("stop_reason") == "worker_launch_identity_changed"

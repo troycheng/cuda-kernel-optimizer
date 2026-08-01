@@ -276,6 +276,50 @@ class InvocationProbeTests(unittest.TestCase):
                 self.assertEqual(
                     {key: observed[key] for key in expected}, expected
                 )
+
+    def test_result_is_not_completed_until_guardian_records_its_terminal_event(self) -> None:
+        runtime = _load_runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invocation_id = "inv-" + "a" * 32
+            invocation = root / "invocations" / invocation_id
+            invocation.mkdir(parents=True)
+            now = time.time()
+            runtime._create_json(
+                invocation / "request.json",
+                {
+                    "created_at_epoch": now,
+                    "launch_deadline": now + 10.0,
+                },
+            )
+            runtime._create_json(
+                invocation / "result.json",
+                {
+                    "execution_status": "succeeded",
+                    "cleanup_status": "confirmed",
+                    "finished_at_epoch": now,
+                },
+            )
+            runtime._create_json(
+                invocation / "worker.json",
+                {
+                    "guardian_pid": os.getpid(),
+                    "guardian_start_token": runtime._process_start_token(os.getpid()),
+                    "worker_pid": 99999999,
+                    "worker_start_token": "missing",
+                },
+            )
+
+            self.assertEqual(runtime.status(root, invocation_id)["query_status"], "running")
+
+            runtime._append_event(
+                invocation,
+                "guardian_finished",
+                worker_returncode=0,
+                result_published=True,
+            )
+            self.assertEqual(runtime.status(root, invocation_id)["query_status"], "completed")
+
     def test_worker_launch_source_drift_is_rejected_before_exec(self) -> None:
         runtime = _load_runtime()
         with tempfile.TemporaryDirectory() as directory:
