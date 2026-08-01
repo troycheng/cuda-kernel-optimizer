@@ -1,76 +1,36 @@
-# External research and independent challenge
+# 外部检索与质证
 
-External research expands the candidate set; it never replaces local evidence.
-The optimization loop must remain usable with no network access.
+外部资料用于补充当前版本信息、扩大候选空间和挑战既有判断。它不属于确定性执行工具，也不能替代本地精度与性能证据。
 
-## Modes
+## 适合使用的时机
 
-| Mode | Behavior |
-|---|---|
-| `off` | Use local evidence and bundled knowledge only |
-| `search` | Check current primary documentation |
-| `challenge` | Add independent external model critiques |
-| `auto` | Use search or challenge only at the triggers below |
+- 核实 GPU、CUDA、Triton、框架或 profiler 的最新行为；
+- 两个方向都有合理解释，现有证据不足以取舍；
+- 连续候选没有收益，需要检查遗漏的机制；
+- 准备发布或形成高影响结论，需要独立审查。
 
-Use `auto` by default when network and policy permit it. Trigger research for:
+普通候选不必逐一进行多方质证。优先并行查询，设置总等待上限；不可用或超时只记录，不阻塞本地工作。
 
-- a version-specific or architecture-specific uncertainty;
-- initial selection among materially different optimization directions;
-- two failed candidates based on the same mechanism;
-- a plateau where the current profiler evidence does not explain the limit;
-- pre-release review of a major new method or compatibility claim.
+## 来源顺序
 
-## Search protocol
+1. 当前版本的官方文档、release note、源码和研究论文；
+2. 维护活跃的参考实现与公开问题记录；
+3. 外部 AI，用于提出反例、遗漏方向和检索线索。
 
-Search official vendor documentation, source repositories, specifications, and
-research papers first. Record the query, URL, document version, access date,
-claim, and the local observation it is meant to explain. Do not copy large
-manuals into the repository.
+外部 AI 可优先使用 Google AI Mode，其次是智谱清言、Kimi、DeepSeek、GitHub Copilot，最后是 Gemini。实际可用性取决于用户会话和网络环境；不要将“已发送问题”记录为“已完成审查”。
 
-## Independent challenge protocol
+## 提问内容
 
-1. Build a small evidence packet: objective, constraints, environment identity,
-   profiler summary, attempted mechanisms, and unresolved questions.
-2. Remove proprietary source, inputs, credentials, hostnames, and raw logs
-   unless the user explicitly approves sharing them.
-3. Ask heterogeneous models or roles for independent proposals before exposing
-   other answers.
-4. Require each critique to identify assumptions, contradicting evidence, and a
-   test that could falsify its preferred explanation.
-5. Preserve disagreements. Do not force consensus or use model votes as a
-   promotion rule.
+发送最小充分材料：目标身份、已确认事实、竞争性假设、主要不确定性、候选机制、最低有效收益和已有反例。私有代码、数据、地址、账号和未公开业务指标必须去除或抽象化。
 
-External models are advisory. They do not execute the target, mutate the
-repository, change the host, or decide which candidate wins. Local correctness,
-paired measurements, constraints, and evidence integrity remain authoritative.
+要求对方分别给出：
 
-Record unavailable providers and continue locally. Never turn network failure
-into a blocked optimization when the required local foundation exists.
+- 支持与反对该方向的理由；
+- 最低成本证伪；
+- 可能混淆测量的因素；
+- 需要核实的一手来源；
+- 在什么证据下应停止。
 
-## Reviewer metadata and provider priority
+保留完整回答、失败来源和总等待时间。ChatGPT 对意见去重，明确哪些内容是来源事实、哪些只是推断。最终候选是否成立，以当前 Target 上的本地精度和测量为准。
 
-When named reviewer CLIs are configured, use this priority: Google AI Mode,
-GitHub Copilot, GLM, Kimi, DeepSeek, then Gemini. GitHub Copilot is especially
-useful for repository and code-review questions; it remains an advisory input.
-
-Each review record keeps the provider surface separate from its optional
-`underlying_model`. Omitted models are recorded as `unknown`; `auto` is allowed
-when the surface does not disclose a concrete model. A run deduplicates the
-same request digest, canonical provider, and underlying model. Two provider
-surfaces that report the same concrete underlying model contribute one entry to
-the heterogeneous-model record, not two independent models.
-
-Retain each normalized response, completed and failed providers, and aggregate
-wait time. Reviewer outputs cannot change local verdicts, benefit bounds, or
-evidence requirements.
-
-## Design basis
-
-- [Multiagent Debate](https://arxiv.org/abs/2305.14325) motivates independent
-  proposals and critique.
-- [Critical evaluation of multi-agent debate](https://arxiv.org/abs/2502.08788)
-  shows that debate can lose to strong single-agent baselines and that model
-  heterogeneity and evaluation design matter.
-- [Self-Knowledge Guided Retrieval](https://arxiv.org/abs/2310.05002) supports
-  retrieving external material when uncertainty warrants it rather than on
-  every step.
+外网不可用时，使用内置知识、源码、已有 profiler 事实和可重复实验继续工作，并在结论中说明知识时效边界。

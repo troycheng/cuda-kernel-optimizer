@@ -121,7 +121,7 @@ def _validate_guardrails(value) -> None:
 
 
 def validate_frozen_design(value) -> dict:
-    """Validate and detach a complete V2.5 formal experiment design."""
+    """Validate and detach one complete formal experiment design."""
     design = _closed_mapping(value, field="experiment_design", keys=_DESIGN_KEYS)
     if design["schema_version"] != "cuda-evidence/experiment-design-v1":
         raise ValueError("experiment_design.schema_version is unsupported")

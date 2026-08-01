@@ -15751,8 +15751,7 @@
           "correctness"
         ],
         "conflicts": [],
-        "context_cost_bytes": 2774,
-        "contract_binding_required": true,
+        "context_cost_bytes": 2738,
         "counter_signals_any": [
           "attention_not_material",
           "correctness_reference_missing",
@@ -15764,18 +15763,6 @@
             "min_inclusive": "3.0.0"
           }
         },
-        "gate_requirements": {
-          "pre_execution": [
-            "correctness_reference",
-            "dispatch_identity",
-            "target_compile_probe"
-          ],
-          "promotion": [
-            "candidate_correctness",
-            "paired_measurement",
-            "workload_replay"
-          ]
-        },
         "id": "triton.decode-attention-gqa",
         "last_reviewed": "2026-07-19",
         "layer": "kernel",
@@ -15784,12 +15771,18 @@
           "memory.async_copy",
           "latency.cuda_graphs"
         ],
-        "playbook": "triton-decode-attention-gqa.md",
-        "playbook_sha256": "b36a049b02211b564c062d8baca7b7d209a46bba9b8375845bf263c744cfdc59",
+        "playbook": "playbooks/triton-decode-attention-gqa.md",
+        "playbook_sha256": "e2652f47e9430f76f31a705eeacc3c8d8b0e5f33c3243f4d3750ad141021ec65",
         "required_features": [],
         "requires_evidence": [
           "nsys_timeline",
-          "pytorch_profile"
+          "pytorch_profile",
+          "correctness_reference",
+          "dispatch_identity",
+          "target_compile_probe",
+          "candidate_correctness",
+          "paired_measurement",
+          "workload_replay"
         ],
         "risk": "high",
         "signal_groups": [
@@ -15850,7 +15843,13 @@
       "priority": 10,
       "required_evidence": [
         "nsys_timeline",
-        "pytorch_profile"
+        "pytorch_profile",
+        "correctness_reference",
+        "dispatch_identity",
+        "target_compile_probe",
+        "candidate_correctness",
+        "paired_measurement",
+        "workload_replay"
       ],
       "source_ids": [
         "tensormux.kernel-skills",

@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -1308,7 +1309,7 @@ def submit(artifact_root, frozen_request, worker_argv, wait_for_result: bool):
             "--artifact-root",
             str(root),
         ]
-        subprocess.Popen(
+        guardian = subprocess.Popen(
             guardian_argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -1316,6 +1317,11 @@ def submit(artifact_root, frozen_request, worker_argv, wait_for_result: bool):
             start_new_session=True,
             close_fds=True,
         )
+        threading.Thread(
+            target=guardian.wait,
+            name=f"cuda-optimizer-reap-{invocation_id}",
+            daemon=True,
+        ).start()
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)

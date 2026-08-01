@@ -50,62 +50,36 @@ class SkillMetadataTests(unittest.TestCase):
 
     def test_skill_is_a_compact_v14_router(self) -> None:
         self.assertLessEqual(len(self.text.split()), 1800)
-        self.assertIn("Route", self.text)
+        self.assertIn("## 按需读取", self.text)
         self.assertIn("ChatGPT", self.text)
 
     def test_chatgpt_is_the_only_optimization_decision_maker(self) -> None:
-        self.assertRegex(
-            self.prose,
-            r"ChatGPT.{0,80}(only|sole).{0,80}(optimization )?decision",
-        )
-        for responsibility in (
-            "bottleneck",
-            "direction",
-            "candidate",
-            "ROI",
-            "next step",
-        ):
-            self.assertRegex(
-                self.prose,
-                rf"ChatGPT.{{0,260}}{re.escape(responsibility)}",
-            )
-        self.assertRegex(
-            self.lower,
-            r"tools?.{0,100}(do not|cannot).{0,120}(direction|roi|next step)",
-        )
+        self.assertIn("ChatGPT 负责优化判断", self.prose)
+        for responsibility in ("瓶颈", "候选", "投入产出", "下一步"):
+            self.assertIn(responsibility, self.prose)
+        self.assertIn("工具不选择方向，不判断 ROI，也不生成下一步计划", self.prose)
 
     def test_router_mentions_only_v14_public_tools(self) -> None:
         routed = set(re.findall(r"(?:<skill>/)?scripts/([a-z_]+\.py)", self.text))
         self.assertEqual(routed, _PUBLIC_TOOLS)
 
     def test_original_tests_and_precision_validation_precede_measurement(self) -> None:
-        self.assertRegex(
-            self.lower,
-            r"original test.{0,120}(precision|correctness).{0,120}before.{0,120}"
-            r"(benchmark|profil|measur)",
-        )
+        self.assertIn("修改代码前先测原始业务基线", self.prose)
+        self.assertIn("精度未通过时，不解释性能样本", self.prose)
 
     def test_no_legacy_control_plane_terms_remain(self) -> None:
         for pattern in _LEGACY_CONTROL_WORDS:
             self.assertNotRegex(self.lower, pattern)
 
     def test_profiler_and_knowledge_only_return_facts_and_empty_knowledge_does_not_block(self) -> None:
-        self.assertRegex(
-            self.lower,
-            r"profiler.{0,160}(facts|observations).{0,180}(not|never).{0,100}(direction|roi|next step)",
-        )
-        self.assertRegex(
-            self.lower,
-            r"knowledge.{0,180}(facts|results).{0,180}(not|never).{0,100}(direction|roi|next step)",
-        )
-        self.assertRegex(
-            self.lower,
-            r"(empty|no) knowledge.{0,160}(does not|cannot|never).{0,80}block",
-        )
+        self.assertIn("profiler 只返回观测事实", self.prose)
+        self.assertIn("它不返回优化方向、ROI 或下一步", self.prose)
+        self.assertIn("知识查询只返回匹配材料或空结果", self.prose)
+        self.assertIn("空结果不会阻止源码分析", self.prose)
 
     def test_external_search_and_ai_are_optional_and_local_evidence_decides(self) -> None:
-        self.assertRegex(self.lower, r"(external )?(search|ai).{0,120}optional")
-        self.assertRegex(self.lower, r"local evidence.{0,100}(decisive|decides|authoritative)")
+        self.assertIn("外部搜索和第三方 AI 质证是可选的研究手段", self.prose)
+        self.assertIn("本地精度与测量证据决定", self.prose)
 
     def test_every_referenced_skill_path_exists(self) -> None:
         paths = set(

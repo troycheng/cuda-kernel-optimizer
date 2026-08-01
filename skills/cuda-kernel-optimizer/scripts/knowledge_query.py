@@ -10,7 +10,7 @@ import os
 import re
 import stat
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 INPUT_VERSION = "cuda-kernel-optimizer/knowledge-input-v1"
@@ -129,6 +129,64 @@ def _knowledge_json(filename: str) -> tuple[dict, str]:
     if type(value) is not dict:
         raise KnowledgeError(f"knowledge source must contain an object: {filename}")
     return value, hashlib.sha256(payload).hexdigest()
+
+
+def _validated_playbook(card: dict) -> dict | None:
+    details = card.get("details")
+    if type(details) is not dict:
+        return None
+    relative = details.get("playbook")
+    expected = details.get("playbook_sha256")
+    if relative is None and expected is None:
+        return None
+    reference = PurePosixPath(str(relative))
+    if (
+        reference.is_absolute()
+        or len(reference.parts) != 2
+        or reference.parts[0] != "playbooks"
+        or reference.suffix != ".md"
+        or any(part in {"", ".", ".."} for part in reference.parts)
+        or _SHA256.fullmatch(str(expected)) is None
+    ):
+        raise KnowledgeError(f"knowledge playbook reference is invalid: {card.get('id')}")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    root_fd = playbooks_fd = file_fd = None
+    try:
+        root_fd = os.open(KNOWLEDGE_DIR, directory_flags)
+        playbooks_fd = os.open(
+            "playbooks", directory_flags | nofollow, dir_fd=root_fd
+        )
+        file_fd = os.open(reference.name, os.O_RDONLY | nofollow, dir_fd=playbooks_fd)
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 1024 * 1024:
+            raise KnowledgeError(f"knowledge playbook is unsafe: {relative}")
+        payload = b""
+        while len(payload) <= 1024 * 1024:
+            chunk = os.read(file_fd, 64 * 1024)
+            if not chunk:
+                break
+            payload += chunk
+        after = os.fstat(file_fd)
+    except OSError as error:
+        raise KnowledgeError(f"knowledge playbook is unavailable: {relative}") from error
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if playbooks_fd is not None:
+            os.close(playbooks_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise KnowledgeError(f"knowledge playbook changed while reading: {relative}")
+    if hashlib.sha256(payload).hexdigest() != expected:
+        raise KnowledgeError(f"knowledge playbook digest does not match: {relative}")
+    return {"path": str(reference), "sha256": expected}
 
 
 def _canonical_bytes(value) -> bytes:
@@ -378,7 +436,7 @@ def _phenomena_match(card: dict, phenomena: list[str]) -> bool:
 
 
 def _projection(card: dict, sources: dict[str, dict]) -> dict:
-    return {
+    projected = {
         "id": card["id"],
         "mechanism_key": card["mechanism_key"],
         "status": card.get("status"),
@@ -401,6 +459,10 @@ def _projection(card: dict, sources: dict[str, dict]) -> dict:
             for source_id in card["source_ids"]
         ],
     }
+    playbook = _validated_playbook(card)
+    if playbook is not None:
+        projected["playbook"] = playbook
+    return projected
 
 
 def query(value) -> dict:

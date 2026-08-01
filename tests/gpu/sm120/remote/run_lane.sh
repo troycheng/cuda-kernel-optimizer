@@ -15,13 +15,12 @@ case "$lane" in
     ;;
 esac
 
-readonly expected_cutlass_version="4.6.1"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd -- "$script_dir/../../../.." && pwd -P)"
 
 : "${CUDA_E2E_ROOT:?set CUDA_E2E_ROOT to the isolated lane root}"
 : "${CUDA_E2E_ARTIFACTS:?set CUDA_E2E_ARTIFACTS below CUDA_E2E_ROOT/artifacts}"
-: "${CUTLASS_PATH:?set CUTLASS_PATH to a dedicated CUTLASS 4.6.1 checkout}"
+: "${CUDA_V14_HANDOFF_ROOT:?set CUDA_V14_HANDOFF_ROOT to the retained read-only replay root}"
 e2e_root="$(cd -- "$CUDA_E2E_ROOT" && pwd -P)"
 case "$repo_root/" in
   "$e2e_root/"*) ;;
@@ -81,57 +80,23 @@ for entry in "$artifacts"/*; do
 done
 shopt -u nullglob dotglob
 
-case "$CUTLASS_PATH" in
-  *vllm-opt*)
-    echo "refusing CUTLASS path overlapping vllm-opt: $CUTLASS_PATH" >&2
-    exit 2
-    ;;
-esac
-cutlass_path="$(cd -- "$CUTLASS_PATH" && pwd -P)"
-case "$cutlass_path/" in
-  "$repo_root/"*)
-    echo "CUTLASS checkout must not overlap the test repository" >&2
-    exit 2
-    ;;
-esac
-case "$repo_root/" in
-  "$cutlass_path/"*)
-    echo "test repository must not overlap the CUTLASS checkout" >&2
-    exit 2
-    ;;
-esac
-for required in \
-  "$cutlass_path/include/cutlass/cutlass.h" \
-  "$cutlass_path/include/cutlass/version.h"; do
-  if [[ ! -f "$required" || -L "$required" ]]; then
-    echo "required CUTLASS file is missing or a symlink: $required" >&2
-    exit 2
-  fi
-done
-cutlass_version="$(python3 - "$cutlass_path/include/cutlass/version.h" <<'PY'
-import pathlib
-import re
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-components = []
-for name in ("MAJOR", "MINOR", "PATCH"):
-    matches = re.findall(
-        rf"^\s*#\s*define\s+CUTLASS_{name}\s+(\d+)\s*(?://.*)?$",
-        source,
-        flags=re.MULTILINE,
-    )
-    if len(matches) != 1:
-        raise SystemExit(f"CUTLASS_{name} must have one numeric definition")
-    components.append(matches[0])
-print(".".join(components))
-PY
-)"
-if [[ "$cutlass_version" != "$expected_cutlass_version" ]]; then
-  echo "CUTLASS version must be $expected_cutlass_version: $cutlass_version" >&2
+handoff_root="$(cd -- "$CUDA_V14_HANDOFF_ROOT" && pwd -P)"
+if [[ ! -f "$handoff_root/blind-run-summary.json" ]]; then
+  echo "retained replay summary is missing: $handoff_root" >&2
   exit 2
 fi
-
+case "$handoff_root/" in
+  "$artifacts/"*)
+    echo "retained replay root must not overlap writable artifacts: $handoff_root" >&2
+    exit 2
+    ;;
+esac
+case "$artifacts/" in
+  "$handoff_root/"*)
+    echo "retained replay root must not overlap writable artifacts: $artifacts" >&2
+    exit 2
+    ;;
+esac
 gpu="${CUDA_E2E_GPU:-1}"
 if [[ ! "$gpu" =~ ^[0-9]+$ ]]; then
   echo "CUDA_E2E_GPU must be a non-negative GPU index" >&2
@@ -208,13 +173,14 @@ exec docker run --rm \
   -e CUDA_VISIBLE_DEVICES=0 \
   -e CUDA_SM120_E2E=1 \
   -e CUDA_E2E_ARTIFACTS="$artifacts" \
-  -e CUTLASS_PATH="$cutlass_path" \
+  -e CUDA_E2E_IMAGE_ID="$resolved_image_id" \
+  -e CUDA_V14_HANDOFF_ROOT="$handoff_root" \
   -e HOME="$artifacts/home" \
   -e TRITON_CACHE_DIR="$artifacts/triton-cache" \
   -e PYTHONPYCACHEPREFIX="$artifacts/pycache" \
   -v "$repo_root:$repo_root:ro" \
   -v "$artifacts:$artifacts:rw" \
-  -v "$cutlass_path:$cutlass_path:ro" \
+  -v "$handoff_root:$handoff_root:ro" \
   -w "$repo_root" \
   "$resolved_image_id" \
   python3 -m unittest tests.gpu.sm120.test_sm120_acceptance -v

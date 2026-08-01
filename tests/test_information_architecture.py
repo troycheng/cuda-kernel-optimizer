@@ -11,9 +11,56 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "cuda-kernel-optimizer"
+FINAL_REFERENCES = {
+    "compatibility.md",
+    "environment_readiness.md",
+    "knowledge",
+    "ncu_metrics_guide.md",
+    "nonstationary_serving_evidence.md",
+    "optimizer_limits.md",
+    "performance_iteration.md",
+    "research_augmentation.md",
+    "sass_signatures.json",
+    "serving_evidence_protocol.md",
+    "systems_and_ir_coverage.md",
+    "version_stack_audit.md",
+}
 
 
 class InformationArchitectureTests(unittest.TestCase):
+    def test_installed_skill_has_one_final_reference_and_example_surface(self) -> None:
+        references = SKILL / "references"
+        self.assertEqual({path.name for path in references.iterdir()}, FINAL_REFERENCES)
+        self.assertEqual(
+            {path.name for path in (SKILL / "examples").iterdir()},
+            {"walkthrough.md"},
+        )
+        installed_prose = [SKILL / "SKILL.md", SKILL / "examples" / "walkthrough.md"]
+        installed_prose.extend(
+            path for path in references.iterdir() if path.is_file() and path.suffix == ".md"
+        )
+        for path in installed_prose:
+            text = path.read_text(encoding="utf-8").lower()
+            for legacy in (
+                "controller",
+                "orchestrator",
+                "checkpoint",
+                "direction admission",
+                "evidence automation",
+            ):
+                self.assertNotIn(legacy, text, path)
+
+    def test_current_installation_self_check_passes(self) -> None:
+        checker_path = SKILL / "scripts" / "self_check.py"
+        spec = importlib.util.spec_from_file_location("v14_current_self_check", checker_path)
+        checker = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(checker)
+        result = checker.check_installation(SKILL)
+        self.assertEqual(result["status"], "passed")
+        self.assertFalse(result["gpu_checks_run"])
+        self.assertFalse(result["network_checks_run"])
+
     def test_v14_production_surface_is_exact_and_smaller_than_task5_baseline(self) -> None:
         checker_path = SKILL / "scripts" / "self_check.py"
         spec = importlib.util.spec_from_file_location("v14_surface_check", checker_path)
@@ -74,6 +121,28 @@ class InformationArchitectureTests(unittest.TestCase):
         self.assertNotIn('_load_sibling("champion.py"', evaluator)
         self.assertNotIn('"champion.py",', evaluator)
 
+    def test_self_check_rejects_an_illegal_internal_dependency(self) -> None:
+        checker_path = SKILL / "scripts" / "self_check.py"
+        spec = importlib.util.spec_from_file_location("v14_dependency_check", checker_path)
+        checker = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(checker)
+
+        with tempfile.TemporaryDirectory() as directory:
+            scripts = Path(directory)
+            for name in checker.PRODUCTION_MODULES:
+                (scripts / name).write_text("pass\n", encoding="utf-8")
+            (scripts / "artifact_store.py").write_text(
+                "import paired_stats\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "unexpected production dependency: artifact_store -> paired_stats",
+            ):
+                checker._validate_dependency_graph(scripts)
+
     def test_v14_self_check_rejects_an_extra_production_script(self) -> None:
         checker_path = SKILL / "scripts" / "self_check.py"
         spec = importlib.util.spec_from_file_location("v14_self_check", checker_path)
@@ -84,12 +153,24 @@ class InformationArchitectureTests(unittest.TestCase):
             fixture = Path(directory) / "skill"
             scripts = fixture / "scripts"
             templates = fixture / "templates"
+            agents = fixture / "agents"
+            examples = fixture / "examples"
+            references = fixture / "references"
             knowledge = fixture / "references" / "knowledge"
             playbooks = knowledge / "playbooks"
             scripts.mkdir(parents=True)
             templates.mkdir()
+            agents.mkdir()
+            examples.mkdir()
             playbooks.mkdir(parents=True)
-            (fixture / "SKILL.md").write_text("---\nname: fixture\n---\n", encoding="utf-8")
+            for name in checker.ROOT_FILES:
+                (fixture / name).write_text("fixture\n", encoding="utf-8")
+            for name in checker.AGENT_FILES:
+                (agents / name).write_text("fixture\n", encoding="utf-8")
+            for name in checker.EXAMPLE_FILES:
+                (examples / name).write_text("fixture\n", encoding="utf-8")
+            for name in checker.REFERENCE_FILES:
+                (references / name).write_text("fixture\n", encoding="utf-8")
             for name in checker.PRODUCTION_MODULES:
                 source = (
                     "from pathlib import Path\n"
@@ -104,16 +185,53 @@ class InformationArchitectureTests(unittest.TestCase):
             for name in checker.DRIVER_TEMPLATES:
                 (templates / name).write_text("{}\n", encoding="utf-8")
             (knowledge / "sources.json").write_text(
-                '{"sources":[{"id":"source-a"}]}\n', encoding="utf-8"
+                '{"sources":[{"id":"source-a","status":"verified",'
+                '"summary_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}\n',
+                encoding="utf-8",
             )
             (knowledge / "cards.json").write_text(
-                '{"cards":[{"id":"card-a","source_ids":["source-a"],"playbook":"playbooks/a.md"}]}\n',
+                '{"cards":[{"id":"card-a","source_ids":["source-a"],'
+                '"playbook":"playbooks/a.md",'
+                '"playbook_sha256":"87ae67dd711f2cf45b790fe2515e80dcf3d301265c6c016bd580d04aeba0fa52"}]}\n',
                 encoding="utf-8",
             )
             (playbooks / "a.md").write_text("# playbook\n", encoding="utf-8")
             (scripts / "unexpected.py").write_text("pass\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "unexpected production scripts"):
                 checker.check_installation(fixture)
+
+    def test_self_check_rejects_symlinked_knowledge_manifests(self) -> None:
+        checker_path = SKILL / "scripts" / "self_check.py"
+        spec = importlib.util.spec_from_file_location("v14_knowledge_check", checker_path)
+        checker = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(checker)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            knowledge = root / "references" / "knowledge"
+            playbooks = knowledge / "playbooks"
+            playbooks.mkdir(parents=True)
+            playbook = playbooks / "a.md"
+            playbook.write_text("# playbook\n", encoding="utf-8")
+            (knowledge / "sources.json").write_text(
+                '{"sources":[{"id":"source-a","status":"verified",'
+                '"summary_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}\n',
+                encoding="utf-8",
+            )
+            outside = root / "outside-cards.json"
+            outside.write_text(
+                '{"cards":[{"source_ids":["source-a"],'
+                '"playbook":"playbooks/a.md",'
+                '"playbook_sha256":"87ae67dd711f2cf45b790fe2515e80dcf3d301265c6c016bd580d04aeba0fa52"}]}\n',
+                encoding="utf-8",
+            )
+            try:
+                (knowledge / "cards.json").symlink_to(outside)
+            except OSError:
+                self.skipTest("symlinks are unavailable")
+
+            with self.assertRaisesRegex(ValueError, "unsafe knowledge manifest"):
+                checker._validate_knowledge(root)
 
     def test_docs_are_user_facing_and_history_is_not_shipped(self) -> None:
         self.assertFalse((ROOT / "docs" / "superpowers").exists())
@@ -173,11 +291,11 @@ class InformationArchitectureTests(unittest.TestCase):
 
         readme = texts[ROOT / "README.en.md"]
         self.assertIn(
-            "test workload (dataset, representative requests, or replay)",
+            "Test workload (dataset, representative requests, or replay)",
             readme,
         )
         self.assertIn(
-            "correctness checks (expected outputs, tolerances, or accuracy criteria)",
+            "Correctness checks (expected outputs, tolerances, or accuracy criteria)",
             readme,
         )
 

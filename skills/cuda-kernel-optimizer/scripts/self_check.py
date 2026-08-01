@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Read-only installation audit for the frozen V1.4 skill surface."""
+"""CPU/static installation audit for the frozen V1.4 skill surface."""
 
 from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import importlib.util
 import json
 import os
 import secrets
 import stat
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 PRODUCTION_MODULES = (
@@ -38,20 +39,80 @@ DRIVER_TEMPLATES = (
     "workload_driver_request.schema.json",
     "workload_driver_result.schema.json",
 )
-PUBLIC_TOOLS = frozenset(
-    {
-        "champion",
-        "compiler_evidence",
-        "knowledge_query",
-        "profile_ncu",
-        "profile_nsys",
-        "profile_pytorch",
-        "readiness",
-        "sass_check",
-        "workload_evaluate",
-    }
+ROOT_FILES = ("LICENSE", "NOTICE", "SKILL.md")
+ROOT_DIRECTORIES = ("agents", "examples", "references", "scripts", "templates")
+AGENT_FILES = ("openai.yaml",)
+EXAMPLE_FILES = ("walkthrough.md",)
+REFERENCE_FILES = (
+    "compatibility.md",
+    "environment_readiness.md",
+    "ncu_metrics_guide.md",
+    "nonstationary_serving_evidence.md",
+    "optimizer_limits.md",
+    "performance_iteration.md",
+    "research_augmentation.md",
+    "sass_signatures.json",
+    "serving_evidence_protocol.md",
+    "systems_and_ir_coverage.md",
+    "version_stack_audit.md",
 )
-ALLOWED_PUBLIC_DEPENDENCIES = {}
+ALLOWED_PRODUCTION_DEPENDENCIES = {
+    "_invocation_runtime": frozenset({"artifact_store"}),
+    "artifact_store": frozenset(),
+    "champion": frozenset({"artifact_store"}),
+    "compiler_evidence": frozenset(
+        {"_invocation_runtime", "artifact_store", "workload_adapter"}
+    ),
+    "execution_map": frozenset(),
+    "experiment_design": frozenset(),
+    "knowledge_query": frozenset(),
+    "paired_stats": frozenset(),
+    "profile_ncu": frozenset(
+        {
+            "_invocation_runtime",
+            "artifact_store",
+            "execution_map",
+            "version_audit",
+            "workload_adapter",
+        }
+    ),
+    "profile_nsys": frozenset(
+        {
+            "_invocation_runtime",
+            "artifact_store",
+            "execution_map",
+            "version_audit",
+            "workload_adapter",
+        }
+    ),
+    "profile_pytorch": frozenset(
+        {
+            "_invocation_runtime",
+            "artifact_store",
+            "execution_map",
+            "version_audit",
+            "workload_adapter",
+        }
+    ),
+    "readiness": frozenset(
+        {"_invocation_runtime", "artifact_store", "version_audit", "workload_adapter"}
+    ),
+    "sass_check": frozenset(
+        {"_invocation_runtime", "artifact_store", "workload_adapter"}
+    ),
+    "self_check": frozenset({"version_audit"}),
+    "version_audit": frozenset(),
+    "workload_adapter": frozenset({"artifact_store"}),
+    "workload_evaluate": frozenset(
+        {
+            "_invocation_runtime",
+            "artifact_store",
+            "experiment_design",
+            "paired_stats",
+            "workload_adapter",
+        }
+    ),
+}
 LEGACY_ENTRIES = frozenset(
     {
         "orchestrate.py", "workload_controller.py", "run_control.py", "run_iteration.py",
@@ -85,6 +146,32 @@ def _exact_files(directory: Path, expected: tuple[str, ...], label: str) -> None
         raise ValueError(f"{label} differs; missing={missing}, extra={extra}")
 
 
+def _exact_mixed_entries(
+    directory: Path,
+    *,
+    files: tuple[str, ...],
+    directories: tuple[str, ...],
+    label: str,
+) -> None:
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError(f"missing or unsafe directory: {directory}")
+    expected = set(files) | set(directories)
+    actual = {path.name for path in directory.iterdir()}
+    if actual != expected:
+        raise ValueError(
+            f"{label} differs; missing={sorted(expected - actual)}, "
+            f"extra={sorted(actual - expected)}"
+        )
+    for name in files:
+        path = directory / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"unsafe {label} file: {path}")
+    for name in directories:
+        path = directory / name
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError(f"unsafe {label} directory: {path}")
+
+
 def _imports(source: str, filename: Path) -> set[str]:
     try:
         tree = ast.parse(source, filename=str(filename))
@@ -111,17 +198,23 @@ def _imports(source: str, filename: Path) -> set[str]:
 
 def _validate_dependency_graph(scripts: Path) -> None:
     known = {Path(name).stem for name in PRODUCTION_MODULES}
+    if set(ALLOWED_PRODUCTION_DEPENDENCIES) != known:
+        raise ValueError("production dependency policy does not cover the exact surface")
     graph = {}
     for name in PRODUCTION_MODULES:
         module = Path(name).stem
         source = (scripts / name).read_text(encoding="utf-8")
-        graph[module] = _imports(source, scripts / name).intersection(known)
-    for source in PUBLIC_TOOLS:
-        allowed = ALLOWED_PUBLIC_DEPENDENCIES.get(source, frozenset())
-        forbidden = graph[source].intersection(PUBLIC_TOOLS - {source}) - allowed
-        if forbidden:
+        imports = _imports(source, scripts / name)
+        if module != "_invocation_runtime" and "subprocess" in imports:
             raise ValueError(
-                f"unexpected public tool dependency: {source} -> {sorted(forbidden)[0]}"
+                f"subprocess ownership must remain in _invocation_runtime: {name}"
+            )
+        graph[module] = imports.intersection(known)
+    for source, dependencies in graph.items():
+        unexpected = dependencies - ALLOWED_PRODUCTION_DEPENDENCIES[source]
+        if unexpected:
+            raise ValueError(
+                f"unexpected production dependency: {source} -> {sorted(unexpected)[0]}"
             )
     visiting, visited = set(), set()
 
@@ -160,14 +253,25 @@ def _validate_knowledge(root: Path) -> None:
     actual = {path.name for path in knowledge.iterdir()} if knowledge.is_dir() else set()
     if actual != expected or (knowledge / "playbooks").is_symlink():
         raise ValueError("knowledge directory must contain only cards, sources, and playbooks")
-    cards = json.loads((knowledge / "cards.json").read_text(encoding="utf-8"))
-    sources = json.loads((knowledge / "sources.json").read_text(encoding="utf-8"))
+    manifests = (knowledge / "cards.json", knowledge / "sources.json")
+    if any(path.is_symlink() or not path.is_file() for path in manifests):
+        raise ValueError("unsafe knowledge manifest")
+    cards = json.loads(manifests[0].read_text(encoding="utf-8"))
+    sources = json.loads(manifests[1].read_text(encoding="utf-8"))
     source_items = sources.get("sources", sources) if isinstance(sources, dict) else sources
     if not isinstance(source_items, list):
         raise ValueError("knowledge sources must be a list")
     source_ids = {item.get("id") for item in source_items if isinstance(item, dict)}
     if not source_ids or None in source_ids or len(source_ids) != len(source_items):
         raise ValueError("knowledge sources must have unique ids")
+    for item in source_items:
+        if (
+            item.get("status") != "verified"
+            or not isinstance(item.get("summary_sha256"), str)
+            or len(item["summary_sha256"]) != 64
+            or any(character not in "0123456789abcdef" for character in item["summary_sha256"])
+        ):
+            raise ValueError("knowledge source status or digest is invalid")
     referenced = set()
     _collect_source_ids(cards, referenced)
     if not referenced.issubset(source_ids):
@@ -178,13 +282,30 @@ def _validate_knowledge(root: Path) -> None:
     for path in playbooks.iterdir():
         if path.is_symlink() or not path.is_file() or path.suffix != ".md":
             raise ValueError("knowledge playbooks contain an unsafe entry")
-    referenced_playbooks = set()
+    referenced_playbooks = {}
 
     def collect_playbooks(value) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
                 if key == "playbook" and isinstance(item, str):
-                    referenced_playbooks.add(item)
+                    reference = PurePosixPath(item)
+                    digest = value.get("playbook_sha256")
+                    if (
+                        reference.is_absolute()
+                        or len(reference.parts) != 2
+                        or reference.parts[0] != "playbooks"
+                        or reference.suffix != ".md"
+                        or any(part in {"", ".", ".."} for part in reference.parts)
+                        or not isinstance(digest, str)
+                        or len(digest) != 64
+                        or any(character not in "0123456789abcdef" for character in digest)
+                    ):
+                        raise ValueError("knowledge playbook reference is invalid")
+                    previous = referenced_playbooks.setdefault(item, digest)
+                    if previous != digest:
+                        raise ValueError("knowledge playbook digest is inconsistent")
+                elif key == "playbook_sha256" and "playbook" not in value:
+                    raise ValueError("knowledge playbook digest has no reference")
                 else:
                     collect_playbooks(item)
         elif isinstance(value, list):
@@ -195,8 +316,12 @@ def _validate_knowledge(root: Path) -> None:
     available_playbooks = {
         f"playbooks/{path.name}" for path in playbooks.iterdir() if path.is_file()
     }
-    if not referenced_playbooks.issubset(available_playbooks):
-        raise ValueError("knowledge cards reference an unknown playbook")
+    if set(referenced_playbooks) != available_playbooks:
+        raise ValueError("knowledge cards and playbooks are not a closed set")
+    for relative, expected_digest in referenced_playbooks.items():
+        path = knowledge / relative
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected_digest:
+            raise ValueError("knowledge playbook digest does not match")
 
 
 def _probe_runtime_lock(scripts: Path) -> None:
@@ -225,9 +350,20 @@ def check_installation(skill_dir: Path | str) -> dict:
     root = Path(skill_dir)
     if root.is_symlink() or not root.is_dir():
         raise ValueError(f"missing or unsafe skill directory: {root}")
-    skill = root / "SKILL.md"
-    if skill.is_symlink() or not skill.is_file():
-        raise ValueError("missing SKILL.md")
+    _exact_mixed_entries(
+        root,
+        files=ROOT_FILES,
+        directories=ROOT_DIRECTORIES,
+        label="skill root",
+    )
+    _exact_files(root / "agents", AGENT_FILES, "agent metadata")
+    _exact_files(root / "examples", EXAMPLE_FILES, "examples")
+    _exact_mixed_entries(
+        root / "references",
+        files=REFERENCE_FILES,
+        directories=("knowledge",),
+        label="references",
+    )
     scripts = root / "scripts"
     actual_scripts = _regular_names(scripts, ".py")
     expected_scripts = set(PRODUCTION_MODULES)
@@ -238,6 +374,12 @@ def check_installation(skill_dir: Path | str) -> dict:
         )
     if actual_scripts.intersection(LEGACY_ENTRIES):
         raise ValueError("legacy Controller, state, or entrypoint remains installed")
+    production_lines = sum(
+        (scripts / name).read_text(encoding="utf-8").count("\n")
+        for name in PRODUCTION_MODULES
+    )
+    if production_lines >= 14_671:
+        raise ValueError("production Python exceeds the frozen V1.4 size boundary")
     _validate_dependency_graph(scripts)
     _exact_files(root / "templates", DRIVER_TEMPLATES, "driver templates")
     _validate_knowledge(root)
@@ -246,8 +388,9 @@ def check_installation(skill_dir: Path | str) -> dict:
         "schema_version": "cuda-kernel-optimizer/self-check-v1",
         "status": "passed",
         "checks": [
-            "production_surface", "dependency_graph", "driver_templates",
-            "knowledge_closure", "runtime_lock_root", "legacy_removal",
+            "installation_surface", "production_surface", "dependency_graph",
+            "driver_templates", "knowledge_closure", "runtime_lock_root",
+            "legacy_removal",
         ],
         "gpu_checks_run": False,
         "network_checks_run": False,

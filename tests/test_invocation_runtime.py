@@ -1,3 +1,4 @@
+import gc
 import importlib.util
 import json
 import os
@@ -6,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -104,8 +106,15 @@ class InvocationProbeTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = _submit_command(
-                runtime, root, _capture_command(root, program, maximum=len(payload))
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ResourceWarning)
+                result = _submit_command(
+                    runtime, root, _capture_command(root, program, maximum=len(payload))
+                )
+                gc.collect()
+            self.assertEqual(
+                [item for item in caught if item.category is ResourceWarning],
+                [],
             )
 
             child = result["child"]

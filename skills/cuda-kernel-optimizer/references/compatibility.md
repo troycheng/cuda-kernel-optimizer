@@ -1,97 +1,37 @@
-# CUDA Ecosystem Compatibility
+# 兼容性判断
 
-Validated on **2026-07-17**. These are validation targets, not hard minimums.
-Probe the installed environment before selecting an optimization path.
+GPU 优化结论必须绑定实际硬件、驱动、CUDA、编译器、框架和 workload 身份。架构名称相近不代表代码生成、特性支持或性能行为相同。
 
-| Component | Validation target | Runtime rule |
-|---|---|---|
-| CUDA Toolkit | CUDA Toolkit 13.3 Update 1 | Use `nvcc --version` and compile a minimal target-specific kernel. |
-| Nsight Compute | Nsight Compute 2026.2.1 | This release line supports CUDA 13.3. Query metric metadata, then run a real target profile to establish counter access. |
-| Triton | Triton 3.7.1 | Inspect callable signatures before using optional or experimental arguments. |
-| CUTLASS | CUTLASS 4.6.1 | Read `cutlass/version.h` or `cutlass.version`; compile the selected C++ or CuTe DSL example for the exact target. |
+## 精确身份
 
-## Observed RTX 5090 lanes
+至少记录：
 
-Both isolated lanes passed the same pre-V1 SM120 acceptance matrix on 2026-07-17:
-seven safety/helper tests and four real-GPU tests for Triton, native CUDA,
-CUTLASS, randomized identical paired timing, the production outer-workload
-evaluator, and target-bounded NCU.
+- GPU 型号、compute capability 和 UUID；
+- 驱动版本、CUDA Runtime 与 Toolkit 来源；
+- PyTorch、Triton、CUTLASS、vLLM 或 TensorRT-LLM 等实际版本；
+- 容器镜像或环境摘要；
+- 编译目标与关键编译参数；
+- 测试集、精度校验和 workload driver 摘要。
 
-| Lane | Immutable image ID | nvcc | PyTorch | Triton | CUTLASS headers | ncu | Tests | Counter verdict |
-|---|---|---:|---:|---:|---:|---:|---:|---|
-| Current | `sha256:a2d9d89b...8252a0e5` | 13.3.73 | 2.11.0+cu130 | 3.7.1 | 4.6.1 | 2026.2.1 | 11/11 | `ERR_NVGPUCTRPERM` |
-| Compatibility | `sha256:b810841f...37188a2` | 13.0.88 | 2.11.0+cu130 | 3.6.0 | 4.6.1 | 2025.3.1 | 11/11 | `ERR_NVGPUCTRPERM` |
+`sm_120`、`sm_100`、`sm_90` 等必须按精确目标处理。不要因为都属于某一代产品就复用能力结论，也不要把其他架构上的收益数字直接当成当前目标的预测。
 
-The counter verdict is a host-policy result, not a toolchain compatibility
-failure. A successful `ncu --query-metrics` is not counter-access proof. These
-runs did not add `SYS_ADMIN`, run privileged containers, or change the driver.
-The acceptance runner bound each lane to the recorded immutable image ID,
-required a dedicated read-only CUTLASS 4.6.1 checkout, failed closed when GPU
-occupancy could not be queried, and started from fresh artifact directories.
+## 能力确认
 
-## Architecture capability rules
+优先级从高到低：
 
-Architecture capabilities are explicit sets. **Never infer** TMA, WGMMA,
-TCGen05, TMEM, block scaling, cluster, or CLC support from numeric SM ordering.
-The `arch_feature_map` in `method_registry.json` is the machine-readable source
-used by validation.
+1. 当前环境中的最小 compile probe；
+2. 当前版本的官方文档和 release note；
+3. `knowledge_query.py` 返回的身份匹配知识卡；
+4. 相邻版本或相邻架构资料，仅用于形成待验证假设。
 
-| Target | Important routing notes |
-|---|---|
-| `sm_90` | Hopper path: TMA, WGMMA, mbarrier, clusters, and warp-specialized schedules. |
-| `sm_100` | Datacenter Blackwell path: TMA, TCGen05, TMEM, block scaling, and CLC. Do not inherit Hopper WGMMA. |
-| `sm_103` | B300 Blackwell path: target explicitly and probe CUTLASS builders; TCGen05/TMEM and block-scaled paths are distinct from SM120. |
-| `sm_110` | Thor target name for CUDA 13.0+; older toolkits used SM101. Probe the installed toolkit and CUTLASS version before compiling. |
-| `sm_120` | GeForce Blackwell path: current CUTLASS has TMA warp-specialized and native block-scaled MMA schedules, but not SM100 TCGen05/TMEM or Hopper WGMMA. |
-| `sm_121` | DGX Spark path shares major CUTLASS code with SM120, including current SM120/SM121 TMA collectives; do not inherit SM100 features. |
+compile probe 只能证明某个特性在当前工具链可编译，不能证明它正确、会被实际 dispatch，或一定更快。
 
-Use the exact compiler target (`sm_100a`, `sm_103a`, `sm_110a`, `sm_120a`,
-or `sm_121a`) only when the selected implementation requires
-architecture-specific features. For CUTLASS builds, set `CUTLASS_NVCC_ARCHS`
-to the exact target and run `cutlass_profiler` or the corresponding unit test.
+## Profiler 限制
 
-## Triton 3.7 guidance
+NCU、Nsys 和 PyTorch Profiler 报告都按已知版本与字段解析。版本、schema、字段或单位未知时拒绝输出语义观测，并保留原始报告与来源信息。
 
-- Use `tl.dot(..., input_precision="tf32")`; `allow_tf32` is deprecated.
-- Use `tl.make_tensor_descriptor` or a host tensor descriptor for descriptor
-  loads/stores and TMA-backed lowering. `tl.make_block_ptr` is a block-pointer
-  abstraction and is not, by itself, proof that TMA was selected.
-- Upstream `tl.range(..., warp_specialize=True)` is currently constrained to
-  supported Blackwell GPUs and simple matmul loops. Treat Gluon warp
-  specialization as experimental and validate generated code.
-- `acc_promote_cycles` is fork-specific, not part of the upstream `tl.dot`
-  signature. Check the callable signature before using it and keep an upstream
-  fallback.
+`ERR_NVGPUCTRPERM` 表示宿主机不允许读取硬件 counter，不表示 NCU 缺失，也不表示 kernel 有问题。skill 不自动修改驱动权限；可以继续使用 timing、Nsys、PyTorch Profiler、编译产物或 SASS 等适合当前问题的证据。
 
-## CUTLASS 4.6 routing
+## 迁移与复用
 
-- Prefer the CUTLASS 3.x C++ API when integrating into an existing C++/CUDA
-  codebase or when a stable collective builder already covers the operation.
-- Prefer CuTe DSL for Python-first kernel work, rapid layout experimentation,
-  and current DSL examples. Treat experimental APIs such as `cute.compile_to`
-  according to the release notes.
-- Do not reuse an SM100 schedule on SM120/SM121. Select the explicit SM120
-  dispatch policies and compile for the exact device target.
-- The legacy Python code-generation package is named `cutlass_cppgen`; it is
-  different from the CuTe DSL package.
-
-## Nsight Compute probing
-
-1. `ncu --query-metrics` establishes only that metric metadata can be queried.
-2. Build a target-bounded report and inspect its return code and log to establish
-   actual performance-counter access.
-3. Query or collect only metrics supported by the installed GPU and NCU build;
-   newer Blackwell SKUs can expose reduced metric sets.
-
-## Primary references
-
-- [CUDA 13.3 compiler targets](https://docs.nvidia.com/cuda/archive/13.3.0/cuda-compiler-driver-nvcc/index.html)
-- [PTX ISA target-family feature table](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#ptx-isa-version-history)
-- [Nsight Compute 2026.2.1 release notes](https://docs.nvidia.com/nsight-compute/ReleaseNotes/index.html)
-- [Triton 3.7.1 release](https://github.com/triton-lang/triton/releases/tag/v3.7.1)
-- [`tl.dot` API](https://triton-lang.org/main/python-api/generated/triton.language.dot.html)
-- [`tl.make_tensor_descriptor` API](https://triton-lang.org/main/python-api/generated/triton.language.make_tensor_descriptor.html)
-- [`tl.range` warp-specialization constraints](https://triton-lang.org/main/python-api/generated/triton.language.range.html)
-- [CUTLASS 4.6.1 release](https://github.com/NVIDIA/cutlass/releases/tag/v4.6.1)
-- [CUTLASS changelog](https://github.com/NVIDIA/cutlass/blob/main/CHANGELOG.md)
-- [CUTLASS SM120 TMA dispatch policies](https://github.com/NVIDIA/cutlass/blob/main/include/cutlass/gemm/dispatch_policy.hpp)
+旧结果只有在 Target 身份、代码对象、测试集和测量设计仍一致时才可直接比较。任何一项变化都应建立新的 Target 或 Experiment。旧结果仍可用于提出假设，但不能冒充新环境中的测量证据。

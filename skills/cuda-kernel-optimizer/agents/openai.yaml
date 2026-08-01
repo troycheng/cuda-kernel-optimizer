@@ -1,4 +1,4 @@
 interface:
   display_name: "CUDA Kernel Optimizer"
-  short_description: "Evidence-driven GPU kernel and workload optimization"
-  default_prompt: "Use $cuda-kernel-optimizer to optimize or diagnose this CUDA, CUTLASS, Triton, framework, or serving workload. Establish the readiness and claim ceiling, freeze the real objective and allowed scope, calibrate measurement stability, and load only architecture-compatible, evidence-matched capability cards. For long runs, keep planning separate from deterministic Controller state and ledger replay. Require user-provided workload evidence for end-to-end claims and keep host changes recommend-only. Primary-source search and external research are optional; local correctness and measurement remain authoritative."
+  short_description: "以真实 workload 和可复核证据优化 GPU 性能"
+  default_prompt: "使用 $cuda-kernel-optimizer 优化或诊断这个 CUDA、CUTLASS、Triton、框架或服务 workload。先确认真实测试集、精度校验、目标环境和授权范围，再冻结 Target 并测量原始业务基线。由 ChatGPT 分析瓶颈、选择可证伪候选和判断投入产出；工具每次只执行一个明确操作并记录事实。profiler 和离线知识均不替代优化判断。完整 workload 结论必须由用户提供的真实测试与精度证据支持，宿主机改动默认只给建议。"

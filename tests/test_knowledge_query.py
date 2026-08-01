@@ -82,6 +82,22 @@ class KnowledgeQueryTests(unittest.TestCase):
         self.assertFalse(any(item["id"] == "workload.framework.launch-gaps" for item in kernel["matches"]))
         self.assertTrue(any(item["id"] == "workload.framework.launch-gaps" for item in workload["matches"]))
 
+    def test_matching_card_exposes_only_a_digest_bound_playbook_reference(self):
+        result = load_module().query(
+            request(phenomena=["triton.decode-attention-gqa"])
+        )
+        match = next(
+            item
+            for item in result["matches"]
+            if item["id"] == "capability.triton.decode-attention-gqa"
+        )
+        self.assertEqual(
+            match["playbook"]["path"],
+            "playbooks/triton-decode-attention-gqa.md",
+        )
+        self.assertRegex(match["playbook"]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("content", match["playbook"])
+
     def test_cli_only_reads_request_and_returns_json(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "request.json"

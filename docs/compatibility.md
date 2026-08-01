@@ -1,46 +1,16 @@
 # Compatibility
 
-The CPU/static suite is tested with Python 3.10 and 3.12 on Linux CI. Core
-Controller scripts use POSIX facilities such as file locks, resource limits,
-signals, and process groups. Linux is the supported GPU execution environment;
-macOS can run CPU/static checks, while native Windows is not supported. Windows
-users should use a Linux or WSL environment.
+The CPU/static suite targets Python 3.10 and 3.12. GPU execution uses Linux facilities for process groups, signals, resource locking, and tool supervision. macOS can run static checks; native Windows GPU execution is not supported.
 
-Kernel optimization also needs a working CUDA GPU and driver and the toolchain
-required by the target implementation.
-
-| Path | Requirement | Boundary |
+| Path | Requirement | Evidence boundary |
 |---|---|---|
-| CUDA C++ | `nvcc`, compatible driver/toolkit, target architecture | Generated binary and compiler evidence must be bound to the tested source |
-| CUTLASS / CuTe | Compatible CUTLASS checkout and architecture support | Public APIs and target-specific routing take precedence over version labels alone |
-| Triton | Compatible Python, PyTorch, Triton, and GPU target | Autotune, IR, launch configuration, and generated binary identity may all matter |
-| Nsight Compute | Compatible `ncu` for profiling or report import | Counter access is optional; unavailable access must be reported explicitly |
+| CUDA C++ | Compatible driver, Toolkit, compiler, and exact target architecture | Generated binary must remain bound to source and build identity |
+| CUTLASS / CuTe | A checkout and APIs that support the exact target | Version labels do not replace compile probes |
+| Triton | Compatible Python, framework, Triton, and GPU target | IR, launch, dispatch, and generated binary identity may all matter |
+| Nsight Compute | Supported NCU export or collection tool | Counter permission is optional and reported explicitly |
+| Nsight Systems | Supported exported SQLite dialect or collection tool | Private `.nsys-rep` bytes are not reverse-engineered |
+| PyTorch Profiler | Supported Chrome trace dialect | Unknown events, fields, or units fail closed |
 
-## RTX 5090 and SM120
+Architecture-specific claims require an exact compute capability match. A numerically adjacent SM does not inherit another target's features. Use a local compile probe and current official documentation for capability questions.
 
-The repository includes an opt-in physical RTX 5090 lane. It is not run by the
-default CPU/static test command. Historical target-side profiling returned
-`ERR_NVGPUCTRPERM`; the workflow recorded that degradation without changing
-permissions or driver policy.
-
-## NCU report import
-
-Read-only report analysis needs a compatible Nsight Compute executable and an
-existing report file. It does not launch the profiled program and cannot prove
-that the current host can collect counters.
-
-Exact observed versions, architecture capability rules, Triton and CUTLASS
-routing, and primary upstream sources are maintained in the
-[canonical compatibility reference](https://github.com/troycheng/cuda-kernel-optimizer/blob/main/skills/cuda-kernel-optimizer/references/compatibility.md).
-
-The physical GPU fixture and opt-in commands are documented in the
-[RTX 5090 test guide](https://github.com/troycheng/cuda-kernel-optimizer/blob/main/tests/gpu/sm120/README.md).
-
-## Schema identities
-
-New unversioned schemas use the standalone repository namespace. Existing
-versioned pre-V1 schema IDs under the archived `cuda-optimized-skill/schema/v*` and
-`cuda-optimized-skill/schemas/v*` namespaces remain unchanged because they are
-stable protocol identifiers, not installation URLs. Future incompatible schemas
-must use a new versioned namespace in this repository instead of rewriting those
-legacy IDs.
+The repository includes opt-in physical RTX 5090 tests. They are separate from the default CPU/static suite. See the [RTX 5090 test guide](../tests/gpu/sm120/README.md) and the installed [compatibility reference](../skills/cuda-kernel-optimizer/references/compatibility.md).

@@ -6,82 +6,70 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-NEW_REPOSITORY = "github.com/troycheng/cuda-kernel-optimizer"
-OLD_PUBLIC_REPOSITORY = "github.com/troycheng/cuda-optimized-skill"
+REPOSITORY = "github.com/troycheng/cuda-kernel-optimizer"
 
 
 class StandaloneProjectTests(unittest.TestCase):
-    def test_public_version_is_v1_3(self) -> None:
-        self.assertEqual((ROOT / "VERSION").read_text("utf-8").strip(), "1.3.0")
-        headings = {
-            "README.md": "### V1.3.0",
-            "README.en.md": "### V1.3.0",
-        }
-        for name, heading in headings.items():
+    def test_public_version_and_release_notes_are_v1_4(self) -> None:
+        self.assertEqual((ROOT / "VERSION").read_text("utf-8").strip(), "1.4.0")
+        for name in ("README.md", "README.en.md"):
             text = (ROOT / name).read_text("utf-8")
-            self.assertIn(heading, text)
+            self.assertEqual(text.count("### V1.4.0"), 1)
             self.assertNotIn("开发中", text)
             self.assertNotIn("in development", text.lower())
-            self.assertIn("### V1.2.0", text)
-            self.assertIn("### V1.1.0", text)
-            self.assertIn("### V1.0.1", text)
-            self.assertIn("### V1.0.0", text)
-            self.assertNotRegex(text, r"(?m)^### V(?:2|3)\.")
 
     def test_readmes_install_from_the_standalone_repository(self) -> None:
         for name in ("README.md", "README.en.md"):
-            text = (ROOT / name).read_text("utf-8")
-            self.assertIn(NEW_REPOSITORY, text)
-            self.assertNotIn(OLD_PUBLIC_REPOSITORY, text)
+            self.assertIn(REPOSITORY, (ROOT / name).read_text("utf-8"))
 
     def test_origin_notice_preserves_provenance(self) -> None:
         notice = (ROOT / "NOTICE").read_text("utf-8")
-        self.assertIn("KernelFlow-ops/cuda-optimized-skill", notice)
-        self.assertIn("git.yukework.com/mlsys/cuda-optimized-skill", notice)
-        self.assertIn("github.com/troycheng/cuda-optimized-skill", notice)
-        self.assertIn("MIT", notice)
-        self.assertIn("Acknowledgements", notice)
-        self.assertIn("https://github.com/KernelFlow-ops", notice)
-        self.assertIn("Mark Liu", notice)
-        self.assertIn("https://github.com/mark-liu", notice)
+        for marker in (
+            "KernelFlow-ops/cuda-optimized-skill",
+            "git.yukework.com/mlsys/cuda-optimized-skill",
+            "github.com/troycheng/cuda-optimized-skill",
+            "Acknowledgements",
+            "Mark Liu",
+            "MIT",
+        ):
+            self.assertIn(marker, notice)
 
     def test_installed_skill_carries_license_and_notice(self) -> None:
         skill = ROOT / "skills" / "cuda-kernel-optimizer"
         for name in ("LICENSE", "NOTICE"):
-            distributed = skill / name
-            self.assertTrue(distributed.is_file(), name)
             self.assertEqual(
-                distributed.read_text("utf-8"),
+                (skill / name).read_text("utf-8"),
                 (ROOT / name).read_text("utf-8"),
             )
 
-    def test_public_files_do_not_expose_maintainer_storage_paths(self) -> None:
-        paths = (
-            ROOT / "skills" / "cuda-kernel-optimizer" / "references" / "compatibility.md",
-            ROOT / "tests" / "gpu" / "sm120" / "README.md",
-            ROOT / "tests" / "gpu" / "sm120" / "remote" / "run_lane.sh",
-        )
+    def test_public_files_do_not_expose_private_storage_paths(self) -> None:
+        private_path = "/data/" + "tcheng"
+        paths = [ROOT / name for name in ("README.md", "README.en.md", "CONTRIBUTING.md")]
+        paths.extend((ROOT / "docs").rglob("*.md"))
+        paths.extend((ROOT / "skills" / "cuda-kernel-optimizer").rglob("*"))
         for path in paths:
-            self.assertNotIn("/data/tcheng", path.read_text("utf-8"), str(path))
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text("utf-8")
+            except UnicodeDecodeError:
+                continue
+            self.assertNotIn(private_path, text, str(path))
 
-    def test_schema_identity_policy_keeps_only_versioned_legacy_ids(self) -> None:
+    def test_templates_use_no_archived_repository_schema_identity(self) -> None:
         old_prefix = "https://github.com/troycheng/cuda-optimized-skill/"
-        versioned_prefixes = (old_prefix + "schema/v", old_prefix + "schemas/v")
-        legacy_ids = []
-        for path in sorted((ROOT / "skills/cuda-kernel-optimizer/templates").glob("*.schema.json")):
-            schema_id = json.loads(path.read_text("utf-8")).get("$id", "")
-            if schema_id.startswith(old_prefix):
-                self.assertTrue(schema_id.startswith(versioned_prefixes), path.name)
-                legacy_ids.append(schema_id)
-        self.assertTrue(legacy_ids)
-        compatibility = (ROOT / "docs" / "compatibility.md").read_text("utf-8")
-        self.assertIn("Schema identities", compatibility)
-        self.assertIn("versioned pre-V1", compatibility)
+        for path in (ROOT / "skills/cuda-kernel-optimizer/templates").glob("*.json"):
+            value = json.loads(path.read_text("utf-8"))
+            self.assertFalse(str(value.get("$id", "")).startswith(old_prefix), path.name)
 
-    def test_public_tree_excludes_maintainer_history_and_dual_publisher(self) -> None:
-        self.assertFalse((ROOT / "maintainers").exists())
-        self.assertFalse((ROOT / "tools" / "publish_dual_remote.py").exists())
-        self.assertFalse((ROOT / "tests" / "test_publish_dual_remote.py").exists())
+    def test_public_tree_excludes_old_maintenance_tools(self) -> None:
+        for path in (
+            ROOT / "maintainers",
+            ROOT / "tools" / "publish_dual_remote.py",
+            ROOT / "tools" / "run_skill_eval.py",
+            ROOT / "tests" / "evals",
+        ):
+            self.assertFalse(path.exists(), str(path))
 
     def test_community_files_are_present(self) -> None:
         for relative in (
@@ -92,59 +80,25 @@ class StandaloneProjectTests(unittest.TestCase):
             ".github/pull_request_template.md",
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
-        contributing = (ROOT / "CONTRIBUTING.md").read_text("utf-8")
-        self.assertIn("python3 -m unittest discover -s tests", contributing)
-        security = (ROOT / "SECURITY.md").read_text("utf-8")
-        self.assertIn("private vulnerability reporting", security.lower())
+        self.assertIn(
+            "python3 -m unittest discover -s tests",
+            (ROOT / "CONTRIBUTING.md").read_text("utf-8"),
+        )
 
-    def test_ci_runs_static_suite_on_supported_python_versions(self) -> None:
+    def test_ci_runs_current_release_gate_on_supported_python(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text("utf-8")
         for marker in (
             '"3.10"',
             '"3.12"',
             "python -m unittest discover -s tests -p 'test_*.py'",
-            "python -m unittest discover -s skills/cuda-kernel-optimizer/tests",
             "python -m compileall -q skills/cuda-kernel-optimizer/scripts tests",
             "python skills/cuda-kernel-optimizer/scripts/self_check.py",
             "timeout-minutes:",
             "contents: read",
         ):
             self.assertIn(marker, workflow)
-
-    def test_validation_count_matches_the_release_gate(self) -> None:
-        validation = (ROOT / "docs" / "validation.md").read_text("utf-8")
-        suite = unittest.defaultTestLoader.discover(
-            str(ROOT / "tests"), pattern="test_*.py", top_level_dir=str(ROOT)
-        )
-
-        def iter_cases(node):
-            for item in node:
-                if isinstance(item, unittest.TestSuite):
-                    yield from iter_cases(item)
-                else:
-                    yield item
-
-        cases = list(iter_cases(suite))
-        skipped = sum(
-            bool(getattr(case.__class__, "__unittest_skip__", False))
-            or bool(
-                getattr(
-                    getattr(case, case._testMethodName), "__unittest_skip__", False
-                )
-            )
-            for case in cases
-        )
-        passed = len(cases) - skipped
-        self.assertIn(f"{len(cases):,} tests", validation)
-        self.assertIn(f"{passed:,} passed", validation)
-        self.assertIn(
-            f"{skipped:,} physical RTX 5090 opt-in tests were skipped", validation
-        )
-        self.assertIn("post-adapter semantic routing contracts", validation)
-        self.assertNotIn(
-            "checks all 12 mechanisms against six pinned public code paths",
-            validation,
-        )
+        self.assertNotIn("skills/cuda-kernel-optimizer/tests", workflow)
+        self.assertNotIn("fetch-depth: 0", workflow)
 
 
 if __name__ == "__main__":

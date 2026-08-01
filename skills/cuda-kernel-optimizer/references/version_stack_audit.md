@@ -1,46 +1,27 @@
-# Single-variable software-stack audit
+# 版本栈审计
 
-Use this protocol to test whether a Triton, TensorRT, CUDA, PyTorch, vLLM, or
-container-stack upgrade improves the same workload. A comparison is confounded
-if source lineage, backend binaries, server mode, model graph, build intent,
-inputs, clocks, or measurement design also change.
+性能变化可能来自代码，也可能来自驱动、CUDA、编译器、框架或容器变化。只有版本栈稳定，候选比较才可解释。
 
-## Freeze and vary
+## 记录范围
 
-Freeze the source and model digests, build recipe, request corpus, correctness
-contract, benchmark design, model configuration, custom backend, GPU, driver,
-and clock policy. Vary only the declared software-stack identity.
+- GPU 型号、compute capability、UUID；
+- NVIDIA driver；
+- CUDA Runtime、Toolkit、NVCC 和相关库；
+- PyTorch、Triton、CUTLASS、vLLM、TensorRT-LLM 等实际组件；
+- NCU、Nsys、`cuobjdump` 等分析工具及来源；
+- 容器镜像、Python 环境和关键编译参数。
 
-Plugins, engines, timing caches, tactics, and compiled kernels are derived
-artifacts. Rebuild them separately inside each stack, starting with empty
-stack-local timing caches. A cross-version deserialization error is
-compatibility evidence, not a performance result.
+版本字符串不足以证明工具身份。可执行文件的规范路径、摘要和来源也应绑定到调用记录。等待 GPU 锁或任务运行期间若工具身份发生变化，本次结果必须标为无效，不得静默改用新版本。
 
-Validate the design before timing:
+## 单变量升级
 
-```bash
-python3 <skill>/scripts/version_audit.py --input version-audit.json --out version-audit-report.json
-```
+需要评估某个版本变化时：
 
-## Gate order
+1. 冻结相同代码、测试集、精度规则和测量设计；
+2. 只改变一个明确组件；
+3. 分别建立可追溯的 Target 或环境身份；
+4. 先验证精度和实际 dispatch；
+5. 再进行成对性能比较；
+6. 报告适用版本范围，不将结果外推到未测组合。
 
-1. Build the same source independently in both stacks.
-2. Confirm each stack is self-repeat stable on representative real inputs.
-3. Check both stacks against the frozen semantic and tolerance envelope.
-4. Stop before timing if correctness fails.
-5. Collect alternating standalone pairs before serving screens.
-6. Attribute only what the design identifies. A joint image upgrade measures a
-   stack effect, not a pure Triton or TensorRT effect.
-
-## Invalid evidence
-
-Maintain an append-only `invalid_evidence_ids` list. Anything on the list is
-unusable in summaries, priors, baselines, plots, external review, and promotion.
-A corrected run receives a new ID; it does not rehabilitate the invalid record.
-
-## Stop conditions
-
-Stop when a frozen field differs, derived artifacts are reused across stacks,
-correctness or self-repeat stability fails, the candidate loses the declared
-screen, or the environment is not comparable. Keep identities, build logs,
-correctness artifacts, raw alternating samples, and the terminal decision.
+readiness 和具体 profiler 会复用 `version_audit.py` 的只读校验能力。一次调用因版本或来源不明而失败时，保留该调用的 result 和 terminal reason；不要维护另一份全局失效名单。
