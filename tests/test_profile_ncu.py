@@ -137,7 +137,7 @@ def _collection_fixture(temporary: str, *, counter_denied: bool = False) -> tupl
                 "        print('ERR_NVGPUCTRPERM', file=sys.stderr)",
                 "        raise SystemExit(1)",
                 "    Path(args[args.index('--export') + 1]).write_bytes(b'fixture-ncu-report')",
-                "    subprocess.run(args[12:], check=True)",
+                f"    subprocess.run(args[args.index({str(driver)!r}) - 1:], check=True)",
             ]
         )
         + "\n",
@@ -242,7 +242,7 @@ class ProfileNcuTests(unittest.TestCase):
             provenance = result["provenance"]
             self.assertEqual(provenance["tool"]["version"], "2026.2.1")
             self.assertEqual(provenance["metrics"], list(profile_ncu._METRICS))
-            self.assertIn("driver_result", provenance)
+            self.assertIn("driver_output", provenance)
             self.assertIn("report", provenance)
             self.assertIn("csv", provenance)
             self.assertTrue((root / provenance["report"]["locator"]).is_dir())
@@ -253,19 +253,27 @@ class ProfileNcuTests(unittest.TestCase):
             ]
             self.assertEqual(ncu_events[0], ["--version"])
             self.assertEqual(
-                ncu_events[1][0:11],
+                ncu_events[1][0:7],
                 [
                     "--config-file", "off", "--metrics", ",".join(profile_ncu._METRICS),
-                    "--print-units", "base", "--print-metric-name", "name",
                     "--target-processes", "all", "--export",
                 ],
             )
-            self.assertEqual(ncu_events[1][12:-2], fixture["driver"]["command"])
+            self.assertEqual(ncu_events[1][8:-2], fixture["driver"]["command"])
             self.assertEqual(ncu_events[1][-2], fixture["driver"]["request_argument"])
             self.assertTrue(Path(ncu_events[1][-1]).is_absolute())
-            self.assertEqual(ncu_events[2][0:6], ["--config-file", "off", "--import", ncu_events[1][ncu_events[1].index("--export") + 1], "--csv", "--page"])
-            self.assertEqual(ncu_events[2][6:8], ["raw", "--log-file"])
-            self.assertTrue(Path(ncu_events[2][8]).is_absolute())
+            self.assertEqual(ncu_events[2][0:3], ["--config-file", "off", "--import"])
+            self.assertTrue(Path(ncu_events[2][3]).is_absolute())
+            self.assertEqual(ncu_events[2][4:6], ["--csv", "--page"])
+            self.assertEqual(
+                ncu_events[2][6:12],
+                ["raw", "--print-units", "base", "--print-metric-name", "name", "--log-file"],
+            )
+            self.assertTrue(Path(ncu_events[2][12]).is_absolute())
+            self.assertNotEqual(
+                Path(ncu_events[2][3]),
+                Path(ncu_events[1][ncu_events[1].index("--export") + 1]),
+            )
 
     def test_candidate_collect_missing_correctness_rejects_before_invocation_or_ncu(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -319,10 +327,12 @@ class ProfileNcuTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             result = json.loads(completed.stdout)
+            self.assertEqual(result["execution_status"], "failed")
             self.assertEqual(result["measurement_validity"], "invalid")
             self.assertEqual(result["stop_reason"], "ncu_counter_access_denied")
             self.assertEqual(result["observations"], [])
             self.assertIn("ERR_NVGPUCTRPERM", result["diagnostic"]["error"])
+            self.assertEqual(result["provenance"]["tool"]["version"], "2026.2.1")
             self.assertEqual(
                 [receipt["argv"][1] for receipt in result["provenance"]["command_receipts"]],
                 ["--version", "--config-file"],

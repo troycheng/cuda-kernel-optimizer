@@ -69,8 +69,8 @@ _NUMBER = re.compile(
 _MAX_CSV_BYTES = 16 * 1024 * 1024
 _MAX_CSV_ROWS = 100_000
 _MAX_UNMODELED = 128
-_FREEZE_LIMITS = {
-    "max_files": 8,
+_COLLECTION_FREEZE_LIMITS = {
+    "max_files": 16,
     "max_total_bytes": 16 * 1024 * 1024,
     "max_wall_seconds": 5.0,
 }
@@ -289,7 +289,10 @@ def _hints(value) -> list[str]:
 
 def _tool_identity() -> dict:
     implementations = []
-    for name in ("profile_ncu.py", "_invocation_runtime.py", "artifact_store.py"):
+    for name in (
+        "profile_ncu.py", "_invocation_runtime.py", "artifact_store.py",
+        "workload_adapter.py",
+    ):
         path = Path(__file__).with_name(name)
         implementations.append({"name": name, "sha256": STORE.sha256_file(path)})
     identity = {
@@ -570,16 +573,25 @@ def _command_spec(argv: list[str], workspace: Path, gpu_uuids: list[str]) -> dic
     }
 
 
-def _completed_child(result: dict, label: str) -> None:
-    if result.get("status") == "completed":
-        return
-    diagnostic = (result.get("stderr", "") + "\n" + result.get("stdout", ""))[:1024]
+def _record_child_failure(result: dict, child: dict, label: str) -> bool:
+    """Publish a failed child fact without discarding its runtime outcome."""
+    if child.get("status") == "completed":
+        return False
+    diagnostic = (child.get("stderr", "") + "\n" + child.get("stdout", ""))[:1024]
+    status = child.get("status")
     if "ERR_NVGPUCTRPERM" in diagnostic:
-        raise NcuError(
-            "ncu_counter_access_denied",
-            "ERR_NVGPUCTRPERM: NVIDIA GPU performance counters are unavailable",
-        )
-    raise NcuError("ncu_command_failed", f"{label} failed: {diagnostic}")
+        result["execution_status"] = "failed"
+        result["stop_reason"] = "ncu_counter_access_denied"
+    elif status in {"timed_out", "cancelled"}:
+        result["execution_status"] = status
+        result["stop_reason"] = child.get("stop_reason", status)
+    else:
+        result["execution_status"] = "failed"
+        result["stop_reason"] = "ncu_command_failed"
+    result["measurement_validity"] = "invalid"
+    result["cleanup_status"] = child.get("cleanup_status", "unknown")
+    result["diagnostic"] = {"error": f"{label} failed: {diagnostic}"[:1024]}
+    return True
 
 
 def _ncu_version(stdout: str) -> str:
@@ -668,15 +680,18 @@ def _collect_worker(request: dict, artifact_root: Path, invocation_dir: Path, re
         _command_spec(version_argv, workspace, [])
     )
     receipts.append({"argv": version_argv, "result": version_result})
-    _completed_child(version_result, "NCU version query")
+    if _record_child_failure(result, version_result, "NCU version query"):
+        return
     version = _ncu_version(version_result["stdout"])
+    result["provenance"]["tool"]["version"] = version
     variant = ADAPTER.materialize_variant(
         artifact_root, workspace, resolved["variant"], "variant"
     )
     target_inputs = ADAPTER.materialize_target_inputs(
         artifact_root, workspace, resolved["target"]
     )
-    driver_output = workspace / "driver-result.json"
+    driver_output = workspace / "driver-output"
+    driver_output.mkdir()
     driver_request = ADAPTER.build_driver_request(
         target_id=resolved["target"]["id"],
         execution_id=os.environ["CKO_INVOCATION_ID"],
@@ -690,7 +705,7 @@ def _collect_worker(request: dict, artifact_root: Path, invocation_dir: Path, re
         mode="measure" if resolved["driver"]["execution_mode"] == "separate" else "combined",
         case={"id": resolved["case_id"]},
         sampling={"kind": "ncu_collect"},
-        output_path=driver_output,
+        output_path=driver_output / "result.json",
     )
     driver_request_path = workspace / "driver-request.json"
     STORE.create_regular_bytes(
@@ -701,7 +716,6 @@ def _collect_worker(request: dict, artifact_root: Path, invocation_dir: Path, re
     report_path = workspace / "collection.ncu-rep"
     collect_argv = [
         tool["path"], "--config-file", "off", "--metrics", ",".join(_METRICS),
-        "--print-units", "base", "--print-metric-name", "name",
         "--target-processes", "all", "--export", str(report_path), *driver_argv,
     ]
     tool = _ncu_tool(resolved["target"])
@@ -711,26 +725,51 @@ def _collect_worker(request: dict, artifact_root: Path, invocation_dir: Path, re
         _command_spec(collect_argv, workspace, request["resources"]["gpu_uuids"])
     )
     receipts.append({"argv": collect_argv, "result": collect_result})
-    _completed_child(collect_result, "NCU collection")
-    driver_result = ADAPTER.validate_driver_result(driver_output, driver_request)
+    if _record_child_failure(result, collect_result, "NCU collection"):
+        return
+    driver_object = STORE.freeze_path(
+        artifact_root, driver_output, _COLLECTION_FREEZE_LIMITS
+    )
+    result["provenance"]["driver_output"] = driver_object
+    frozen_driver_output = STORE.materialize_object(
+        artifact_root, driver_object, workspace / "frozen-driver-output"
+    )
+    try:
+        driver_result = ADAPTER.validate_driver_result(
+            frozen_driver_output / "result.json", driver_request
+        )
+    except ValueError as error:
+        raise NcuError("driver_result_invalid", str(error)) from error
     if driver_result["environment"] != resolved["target"]["environment"]["runtime"]:
         raise NcuError("environment_changed", "driver runtime identity changed during collection")
-    driver_object = STORE.freeze_path(artifact_root, driver_output, _FREEZE_LIMITS)
-    STORE.read_regular_bytes(report_path, maximum_bytes=_FREEZE_LIMITS["max_total_bytes"])
-    report_object = STORE.freeze_path(artifact_root, report_path, _FREEZE_LIMITS)
+    report_object = STORE.freeze_path(
+        artifact_root, report_path, _COLLECTION_FREEZE_LIMITS
+    )
+    result["provenance"]["report"] = report_object
+    frozen_report = STORE.materialize_object(
+        artifact_root, report_object, workspace / "frozen-report"
+    )
     csv_path = workspace / "collection.csv"
     import_argv = [
-        tool["path"], "--config-file", "off", "--import", str(report_path),
-        "--csv", "--page", "raw", "--log-file", str(csv_path),
+        tool["path"], "--config-file", "off", "--import", str(frozen_report),
+        "--csv", "--page", "raw", "--print-units", "base",
+        "--print-metric-name", "name", "--log-file", str(csv_path),
     ]
     tool = _ncu_tool(resolved["target"])
     if tool != request["ncu_tool"]:
         raise NcuError("ncu_changed", "frozen NCU executable changed before import")
     import_result = RUNTIME.run_child(_command_spec(import_argv, workspace, []))
     receipts.append({"argv": import_argv, "result": import_result})
-    _completed_child(import_result, "NCU CSV import")
-    csv_bytes = STORE.read_regular_bytes(csv_path, maximum_bytes=_MAX_CSV_BYTES)
-    csv_object = STORE.freeze_path(artifact_root, csv_path, _FREEZE_LIMITS)
+    if _record_child_failure(result, import_result, "NCU CSV import"):
+        return
+    csv_object = STORE.freeze_path(
+        artifact_root, csv_path, _COLLECTION_FREEZE_LIMITS
+    )
+    result["provenance"]["csv"] = csv_object
+    frozen_csv = STORE.materialize_object(
+        artifact_root, csv_object, workspace / "frozen-csv"
+    )
+    csv_bytes = STORE.read_regular_bytes(frozen_csv, maximum_bytes=_MAX_CSV_BYTES)
     try:
         csv_text = csv_bytes.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -745,9 +784,6 @@ def _collect_worker(request: dict, artifact_root: Path, invocation_dir: Path, re
     result["provenance"].update(
         {
             "tool": {"name": "ncu", "version": version, "path": tool["path"], "sha256": tool["sha256"]},
-            "driver_result": driver_object,
-            "report": report_object,
-            "csv": csv_object,
         }
     )
 
@@ -804,6 +840,7 @@ def _worker_main() -> int:
         result["execution_status"] = "failed"
         result["measurement_validity"] = "invalid"
         result["stop_reason"] = "worker_error"
+        result["cleanup_status"] = RUNTIME.current_cleanup_status()
         result["diagnostic"] = {"error": str(error)[:1024]}
     STORE.create_regular_json(invocation_dir / "result.json", _finish(result, started_mono))
     return 0
