@@ -58,6 +58,19 @@ class EvaluatorPublicSurfaceTests(unittest.TestCase):
             self.assertNotEqual(completed.returncode, 0)
             self.assertEqual(list((project.artifact_root / "invocations").iterdir()), before)
 
+    def test_experiment_rejects_an_unexecutable_falsifier_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = V14Project(Path(directory))
+            project.check()
+            request = project.experiment_input(project.baseline()["result_ref"])
+            request["cheapest_falsifier"] = {
+                "kind": "command",
+                "reason": "no command contract exists in this record",
+            }
+
+            with self.assertRaisesRegex(ValueError, "must be none"):
+                _load_evaluator().create_experiment(request)
+
     def test_experiment_record_failure_leaves_no_candidate_object(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = V14Project(Path(directory))

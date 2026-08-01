@@ -29,7 +29,7 @@ For a reliable, deployable optimization result, provide a test workload that rep
 | Report analysis | Parse exported NCU CSV, Nsys SQLite, PyTorch Chrome traces, compiler artifacts, and SASS | Observed facts bound to the current environment identity |
 | Long-running work | Retain experiments, samples, the current best variant, and handoff notes | Handoff-ready, reviewable optimization history and a durable terminal reason |
 
-Bundled knowledge provides offline leads. External search and third-party AI can suggest directions or challenge a judgment. They cannot replace correctness and performance data from the current project. Unknown profiler versions, fields, units, or identities are rejected rather than guessed.
+Bundled knowledge provides offline leads. External search and third-party AI can suggest directions or challenge a judgment. They cannot replace correctness and performance data from the current project. Unknown profiler versions, interpretation-critical fields, units, or identities are rejected rather than guessed. Non-critical extensions in a known format are retained as unmodeled material and never enter semantic calculations.
 
 ## Prerequisites
 
@@ -50,7 +50,7 @@ If these inputs are incomplete, ChatGPT reports the gaps and helps establish the
 
 ChatGPT's coding environment performs the installation. Users do not need to run the repository's Python scripts manually. Send:
 
-> Install `skills/cuda-kernel-optimizer` from the latest published release of [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer). Install only that skill into the active skills directory, run its CPU/static self-check, and report the installed tag, commit, and destination. Do not use `main` unless I ask.
+> Install `skills/cuda-kernel-optimizer` from the latest published release of [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer). Install only that skill into the active skills directory. When replacing an existing version, keep its backup outside the active skills directory so only one skill with this name is loaded. Run the CPU/static self-check and report the installed tag, commit, and destination. Do not use `main` unless I ask.
 
 Start a new session after installation so the skill instructions reload. The self-check verifies the package structure only; it does not prove that the target GPU, workload, or profiler is ready.
 

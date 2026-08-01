@@ -29,7 +29,7 @@
 | 报告分析 | 解析已导出的 NCU CSV、Nsys SQLite、PyTorch Chrome trace、编译产物和 SASS | 与当前环境身份绑定的观测事实 |
 | 长时间任务 | 保存实验、样本、当前最佳版本和交接记录 | 可交接、可审查的优化历史与终止原因 |
 
-知识库、外部搜索与第三方 AI 用于补充方向和质疑判断。它们不能替代当前项目上的精度与性能数据；未知 profiler 版本、字段、单位或身份会被拒绝，而不是猜测。
+知识库、外部搜索与第三方 AI 用于补充方向和质疑判断。它们不能替代当前项目上的精度与性能数据；未知 profiler 版本、关键字段、单位或身份会被拒绝，而不是猜测。已知格式中的非关键扩展内容只会保留为未建模材料，不参与语义计算。
 
 ## 使用准备
 
@@ -50,7 +50,7 @@
 
 安装由 ChatGPT 的编程环境完成，用户不需要手工运行仓库内的 Python 脚本。可以直接发送：
 
-> 从 [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer) 的最新正式版本安装 `skills/cuda-kernel-optimizer`。只安装到当前 skills 目录，执行 CPU/static self-check，并报告安装标签、commit 和目标目录。除非我明确要求，否则不要使用 `main`。
+> 从 [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer) 的最新正式版本安装 `skills/cuda-kernel-optimizer`。只安装到当前 skills 目录；如需替换已有版本，先把旧目录备份到当前 skills 目录之外，避免加载两个同名 skill。执行 CPU/static self-check，并报告安装标签、commit 和目标目录。除非我明确要求，否则不要使用 `main`。
 
 安装完成后开启新会话，使 skill 指令重新加载。self-check 只验证安装包结构，不代表目标 GPU、workload 或 profiler 已经可用。
 

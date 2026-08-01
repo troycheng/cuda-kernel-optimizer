@@ -389,6 +389,23 @@ class ProfileNcuTests(unittest.TestCase):
         with self.assertRaisesRegex(profile_ncu.NcuError, "unexpected_unit"):
             profile_ncu.parse_ncu_csv(_csv(bad_unit=True), "2026.2", [])
 
+    def test_unknown_csv_column_is_retained_as_unmodeled(self) -> None:
+        profile_ncu = _load("profile_ncu")
+        csv_text = _csv().replace(
+            '"Kernel Name","Metric Name","Metric Unit","Metric Value"',
+            '"Kernel Name","Metric Name","Metric Unit","Metric Value","Future Field"',
+            1,
+        )
+        csv_text = "\n".join(
+            line + ',"x"' if index else line
+            for index, line in enumerate(csv_text.splitlines())
+        ) + "\n"
+
+        self.assertIn(
+            {"column_name": "Future Field", "reason": "unmodeled_column"},
+            profile_ncu.parse_ncu_csv(csv_text, "2026.2", [])["unmodeled"],
+        )
+
     def test_public_analyze_materializes_the_frozen_report_and_writes_facts(self) -> None:
         profile_ncu = _load("profile_ncu")
         store = _load("artifact_store")

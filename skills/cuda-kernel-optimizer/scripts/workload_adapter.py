@@ -304,12 +304,13 @@ def validate_driver(value) -> dict:
         _CLEANUP_CONTRACT_FIELDS,
         "driver.cleanup_contract",
     )
-    if cleanup["kind"] not in {"process_group_only", "external_cleanup"}:
-        raise ValueError("driver.cleanup_contract.kind is unsupported")
     if type(cleanup["external_tasks"]) is not bool:
         raise ValueError("driver.cleanup_contract.external_tasks must be boolean")
-    if cleanup["kind"] == "process_group_only" and cleanup["external_tasks"]:
-        raise ValueError("process_group_only driver cannot declare external tasks")
+    if cleanup != {"kind": "process_group_only", "external_tasks": False}:
+        raise ValueError(
+            "driver external tasks are unsupported; commands must remain in the "
+            "invocation process group"
+        )
     normalized = {
         "command": command,
         "request_argument": request_argument,

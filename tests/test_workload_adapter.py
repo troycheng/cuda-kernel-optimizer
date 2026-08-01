@@ -134,6 +134,21 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
                 }
             )
 
+        external = {
+            "command": [sys.executable],
+            "request_argument": "--request",
+            "execution_mode": "combined",
+            "protocol_version": self.adapter.DRIVER_PROTOCOL,
+            "profiler_capabilities": ["pytorch_chrome_trace_v1"],
+            "side_effects": [],
+        }
+        external["cleanup_contract"] = {
+            "kind": "external_cleanup",
+            "external_tasks": True,
+        }
+        with self.assertRaisesRegex(ValueError, "external tasks are unsupported"):
+            self.adapter.validate_driver(external)
+
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = root / "result.json"

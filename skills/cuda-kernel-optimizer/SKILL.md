@@ -25,8 +25,10 @@ ChatGPT 负责优化判断：识别瓶颈、提出候选、评估投入产出并
 | 查看、选择或恢复当前最佳版本 | `scripts/champion.py` |
 | 判断服务测试是否可信 | `references/serving_evidence_protocol.md`；`references/nonstationary_serving_evidence.md` |
 | 查阅最新的一手资料或进行外部质证 | `references/research_augmentation.md` |
+| 构造各公开操作的封闭 JSON request | `references/request_protocol.md` |
 
-构造封闭 JSON request 前，先运行对应脚本的 `--help`。不要为确认参数而通读脚本源码。
+先用对应脚本的 `--help` 确认 operation 和命令行参数，再按 `references/request_protocol.md`
+构造封闭 JSON request。不要为确认输入格式而通读脚本源码。
 
 ## 优化流程
 
@@ -34,7 +36,7 @@ ChatGPT 负责优化判断：识别瓶颈、提出候选、评估投入产出并
 2. 执行 readiness。优化 Target 必须冻结原始版本、真实测试集、精度规则、command driver、性能目标、环境身份和统计要求；诊断 Target 可以只绑定已有报告，但不能假装具备 workload。
 3. 修改代码前先测原始业务基线。精度未通过时，不解释性能样本。
 4. 结合源码与已有观测分析 kernel、launch、框架、CPU/数据、传输、通信、I/O、服务和环境因素。ChatGPT 保留竞争性假设，优先选择能以最低成本证伪主要假设的观测。
-5. 执行候选前将其冻结为 Experiment。依次完成声明的最低成本证伪、精度校验和短版成对初筛。只有 profiler 能回答一个明确且尚未解决的问题时才运行它；前序证据仍有效时才进入正式成对测试。
+5. 创建 Experiment 前完成源码静态审查或独立的最低成本证伪；已经证伪时不执行候选。随后冻结 Experiment，再依次完成精度校验和短版成对初筛。只有 profiler 能回答一个明确且尚未解决的问题时才运行它；前序证据仍有效时才进入正式成对测试。
 6. 将实测收益与不确定性同用户的最低有效收益、下一步时间和 GPU 成本比较。继续是否值得由 ChatGPT 判断，命令超时只负责防止工具卡死。
 7. 正式结果有效后，ChatGPT 可以显式选择候选。需要 workload 或服务层最终结论时，再对当前最佳版本和 original 运行 final audit。
 
@@ -45,7 +47,8 @@ ChatGPT 负责优化判断：识别瓶颈、提出候选、评估投入产出并
 - 变体比较使用同一 Target、同一测试集和环境身份下的成对样本。
 - profiler 只返回观测事实；它不返回优化方向、ROI 或下一步。
 - 知识查询只返回匹配材料或空结果。空结果不会阻止源码分析、profiling 或 ChatGPT 自行提出假设。
-- 未知 profiler 版本、字段或单位必须拒绝解析，不能套用相近版本或相近架构。
+- 未知 profiler 版本、关键字段或单位必须拒绝解析；已知格式中的非关键扩展内容只作为
+  `unmodeled` 保留，不能参与语义计算。不能套用相近版本或相近架构。
 - `ERR_NVGPUCTRPERM` 表示当前宿主机权限不允许读取 NCU counter。记录限制并改用其他有效证据；宿主机权限调整只给建议，除非用户明确授权。
 - 保留原始报告、成对样本、环境身份、被拒候选和 terminal reason，使结论可复核。
 

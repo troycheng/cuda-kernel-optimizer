@@ -20,6 +20,7 @@ FINAL_REFERENCES = {
     "optimizer_limits.md",
     "performance_iteration.md",
     "research_augmentation.md",
+    "request_protocol.md",
     "sass_signatures.json",
     "serving_evidence_protocol.md",
     "systems_and_ir_coverage.md",
@@ -269,8 +270,30 @@ class InformationArchitectureTests(unittest.TestCase):
             "scripts/knowledge_query.py",
             "references/environment_readiness.md",
             "references/research_augmentation.md",
+            "references/request_protocol.md",
         ):
             self.assertIn(marker, text)
+
+    def test_installed_request_reference_covers_every_public_tool(self) -> None:
+        text = (SKILL / "references" / "request_protocol.md").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            "cuda-kernel-optimizer/readiness-input-v1",
+            "cuda-kernel-optimizer/evaluator-input-v1",
+            "cuda-kernel-optimizer/ncu-input-v1",
+            "cuda-kernel-optimizer/nsys-input-v1",
+            "cuda-kernel-optimizer/pytorch-input-v1",
+            "cuda-kernel-optimizer/compiler-input-v1",
+            "cuda-kernel-optimizer/sass-input-v1",
+            "cuda-kernel-optimizer/knowledge-input-v1",
+            "cuda-kernel-optimizer/champion-input-v1",
+            "process_group_only",
+            "status",
+            "cancel",
+        ):
+            self.assertIn(marker, text)
+        self.assertNotIn('"launch_deadline": 0', text)
 
     def test_user_inputs_use_plain_consistent_terms(self) -> None:
         paths = (

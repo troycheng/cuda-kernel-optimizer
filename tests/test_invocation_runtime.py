@@ -131,6 +131,16 @@ class InvocationProbeTests(unittest.TestCase):
             )
             captured = root / "invocations" / result["invocation_id"] / "artifacts" / "stdout.bin"
             self.assertEqual(captured.read_bytes(), payload)
+            events = [
+                json.loads(line)
+                for line in (captured.parents[1] / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertTrue(
+                any(event.get("event") == "heartbeat" for event in events),
+                "a live invocation did not record a heartbeat",
+            )
             collision = captured.parents[1] / "collision.tmp"
             collision.write_bytes(b"replacement")
             with self.assertRaisesRegex(FileExistsError, "already exists"):
@@ -161,6 +171,44 @@ class InvocationProbeTests(unittest.TestCase):
                     },
                     {"host_id": "local-test", "gpu_uuids": []},
                 )
+
+    def test_child_execution_keeps_the_guardian_heartbeat_active(self) -> None:
+        runtime = _load_runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program = root / "sleep.py"
+            program.write_text("import time\ntime.sleep(0.08)\n", encoding="utf-8")
+            tracking = root / "invocation"
+            tracking.mkdir()
+            calls = []
+            started = time.monotonic()
+
+            result = runtime._execute_validated(
+                runtime._validate_command(
+                    {
+                        "argv": [sys.executable, str(program)],
+                        "cwd": str(root),
+                        "env": {},
+                        "output_limit_bytes": 4096,
+                        "required_gpu_uuids": [],
+                    }
+                ),
+                resources={"host_id": "local-test", "gpu_uuids": []},
+                operation_started=started,
+                operation_deadline=started + 1.0,
+                limits={
+                    "operation_timeout_seconds": 1.0,
+                    "command_timeout_seconds": 1.0,
+                    "resource_wait_timeout_seconds": 1.0,
+                    "cleanup_timeout_seconds": 1.0,
+                },
+                absolute_deadline=None,
+                tracking_dir=tracking,
+                progress=lambda: calls.append(time.monotonic()),
+            )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertGreaterEqual(len(calls), 2)
 
     def test_capture_overflow_terminates_process_group_and_removes_partial(self) -> None:
         runtime = _load_runtime()
@@ -277,6 +325,40 @@ class InvocationProbeTests(unittest.TestCase):
                     {key: observed[key] for key in expected}, expected
                 )
 
+    def test_guardian_does_not_launch_worker_after_launch_deadline(self) -> None:
+        runtime = _load_runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            worker = root / "worker.py"
+            worker.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            launch = runtime._build_worker_launch([sys.executable, str(worker)])
+            request = {
+                "operation": "expired_launch_test",
+                "resources": {"host_id": "local-test", "gpu_uuids": []},
+                "operation_timeout_seconds": 1.0,
+                "command_timeout_seconds": 1.0,
+                "resource_wait_timeout_seconds": 1.0,
+                "cleanup_timeout_seconds": 1.0,
+                "launch_deadline": time.time() - 1.0,
+            }
+            request["request_digest"] = runtime.request_digest(request)
+            invocation_id = "inv-" + runtime._invocation_digest(
+                request["request_digest"], launch["digest"]
+            )[:32]
+            invocation = root / "invocations" / invocation_id
+            invocation.mkdir(parents=True)
+            request["created_at_epoch"] = time.time() - 2.0
+            runtime._create_json(invocation / "request.json", request)
+            runtime._create_json(invocation / "worker-launch.json", launch)
+
+            self.assertEqual(runtime._guardian(invocation, root), 1)
+            self.assertFalse((invocation / "worker.json").exists())
+            self.assertFalse((invocation / "result.json").exists())
+            status = runtime.status(root, invocation_id)
+            self.assertEqual(status["query_status"], "worker_lost")
+            self.assertEqual(status["stop_reason"], "launch_deadline_exceeded")
+            self.assertEqual(status["cleanup_status"], "not_required")
+
     def test_result_is_not_completed_until_guardian_records_its_terminal_event(self) -> None:
         runtime = _load_runtime()
         with tempfile.TemporaryDirectory() as directory:
@@ -309,8 +391,24 @@ class InvocationProbeTests(unittest.TestCase):
                     "worker_start_token": "missing",
                 },
             )
+            runtime._append_event(
+                invocation,
+                "heartbeat",
+                worker_pid=99999999,
+                phase="worker_running",
+            )
 
-            self.assertEqual(runtime.status(root, invocation_id)["query_status"], "running")
+            running = runtime.status(root, invocation_id)
+            self.assertEqual(running["query_status"], "running")
+            self.assertEqual(running["heartbeat_phase"], "worker_running")
+            self.assertFalse(running["unresponsive"])
+            self.assertIsInstance(running["heartbeat_at_epoch"], float)
+            with mock.patch.object(
+                runtime.time,
+                "time",
+                return_value=running["heartbeat_at_epoch"] + 100.0,
+            ):
+                self.assertTrue(runtime.status(root, invocation_id)["unresponsive"])
 
             runtime._append_event(
                 invocation,

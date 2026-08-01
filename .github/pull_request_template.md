@@ -5,7 +5,7 @@ Describe the bounded change and the problem it solves.
 ## Evidence
 
 - [ ] Project tests pass
-- [ ] Installed-skill tests pass
+- [ ] Staged installation self-check passes
 - [ ] Python sources compile
 - [ ] `self_check.py` passes
 - [ ] Changed behavior has a regression test

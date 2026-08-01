@@ -51,6 +51,7 @@ REFERENCE_FILES = (
     "optimizer_limits.md",
     "performance_iteration.md",
     "research_augmentation.md",
+    "request_protocol.md",
     "sass_signatures.json",
     "serving_evidence_protocol.md",
     "systems_and_ir_coverage.md",

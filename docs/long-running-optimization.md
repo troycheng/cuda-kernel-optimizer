@@ -23,7 +23,7 @@ The estimate should be a range with evidence, not a precise invented duration. I
 
 ## Invocation lifetime
 
-Each external operation records a request, events, heartbeat, result, elapsed time, stop reason, and cleanup status. Individual command and operation timeouts terminate the process group. SSH or foreground disconnection does not erase the record; use the operation's `status` to inspect the terminal result.
+Each operation records a request, events, heartbeat, result, elapsed time, stop reason, and cleanup status. Individual command and operation timeouts terminate the process group. V1.4 drivers may start only child tasks that remain in that group; remote or detached background tasks are outside the automatic execution contract. SSH or foreground disconnection does not erase the record; use the operation's `status` to inspect the terminal result.
 
 If cleanup cannot be confirmed, conflicting work on the same GPU remains blocked until recovery verifies that no declared task is live. Retrying is explicit, and a completed equivalent result is reused instead of launching duplicate work.
 

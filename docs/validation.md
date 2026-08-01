@@ -12,7 +12,7 @@ The release gate covers:
 - the single command-driver path and closed request/result protocols;
 - correctness blocking later performance stages;
 - NCU, Nsys, PyTorch Profiler, compiler, SASS, and execution-map known-format parsing;
-- fail-closed behavior for unknown fields, versions, units, identities, paths, and digests;
+- fail-closed behavior for unknown interpretation-critical fields, versions, units, identities, paths, and digests, with non-critical extensions retained as unmodeled material;
 - bounded, identity-filtered offline knowledge queries and empty-result behavior;
 - installable package structure, README links, metadata, license, and self-check.
 
@@ -26,6 +26,6 @@ Unprivileged NCU collection may return `ERR_NVGPUCTRPERM`. This is an expected c
 
 V1.4 release validation uses the read-only material supplied through `CUDA_V14_HANDOFF_ROOT` as an immutable regression source. The replay checks current statistical interpretation and archived decision fields separately without rewriting the source. It is not evidence that the current statistic independently validates a historical decision, or that the skill will discover the same mechanisms on an unseen workload.
 
-The 2026-08-01 release run completed on an idle RTX 5090 using immutable image `sha256:b810841fe8962f6f65bb48a693773696be778653d48c7903dc65471ca37188a2`. Five acceptance checks passed in 47.975 seconds. The real Triton path retained Target, Experiment, four Invocation results, Champion selection, and final-audit records. Its one-pair diagnostic screen remained inconclusive but showed a large valid signal; a separately requested formal comparison and final audit both passed. In the retained Iter0 replay, recomputed statistics remained inconclusive while both point estimates stayed below the configured threshold; the archive separately retained its historical `REJECT`, `REJECT`, and `STOP` fields. Digest checks confirmed that the archived inputs were unchanged. The selected GPU had no compute process and no validation mount remained after the run.
+The 2026-08-01 release run completed on an idle RTX 5090 using immutable image `sha256:b810841fe8962f6f65bb48a693773696be778653d48c7903dc65471ca37188a2`. Five acceptance checks passed in 47.858 seconds. The real Triton path retained Target, Experiment, four Invocation results, Champion selection, and final-audit records. Its one-pair diagnostic screen remained inconclusive but showed a large valid signal; a separately requested formal comparison and final audit both passed. In the retained Iter0 replay, recomputed statistics remained inconclusive while both point estimates stayed below the configured threshold; the archive separately retained its historical `REJECT`, `REJECT`, and `STOP` fields. Digest checks confirmed that the archived inputs were unchanged. The selected GPU had no compute process and no validation mount remained after the run.
 
 Exact commands and prerequisites are maintained in the [RTX 5090 test guide](../tests/gpu/sm120/README.md). Workload-specific outcomes belong in [Case studies](case-studies.md).

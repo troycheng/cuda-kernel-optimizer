@@ -9,7 +9,7 @@ NCU 用于解释单个或一组 kernel 的硬件行为。它不能单独证明 w
 - NCU 版本、报告来源和指标单位可确认；
 - replay 开销与副作用可以接受。
 
-`profile_ncu.py analyze` 只解析已支持的导出格式；`collect` 使用当前 Target 的 command driver 采集并导出 CSV。未知版本、字段或单位会拒绝生成语义观测。原始 `.ncu-rep`、导出 CSV、工具身份和解析结果应同时保留。
+`profile_ncu.py analyze` 只解析已支持的导出格式；`collect` 使用当前 Target 的 command driver 采集并导出 CSV。未知版本、关键字段或单位会拒绝生成语义观测；非关键扩展列和未建模指标会单独保留，不参与语义计算。原始 `.ncu-rep`、导出 CSV、工具身份和解析结果应同时保留。
 
 ## 常用观察
 

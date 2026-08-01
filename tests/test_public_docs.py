@@ -75,6 +75,7 @@ class PublicDocsTests(unittest.TestCase):
             "target GPU",
             "minimum useful effect",
             "allowed modification scope",
+            "backup outside the active skills directory",
         ):
             self.assertIn(marker, started)
         self.assertIn("must be supplied by the user", started)

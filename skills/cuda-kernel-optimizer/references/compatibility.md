@@ -28,7 +28,7 @@ compile probe 只能证明某个特性在当前工具链可编译，不能证明
 
 ## Profiler 限制
 
-NCU、Nsys 和 PyTorch Profiler 报告都按已知版本与字段解析。版本、schema、字段或单位未知时拒绝输出语义观测，并保留原始报告与来源信息。
+NCU、Nsys 和 PyTorch Profiler 报告都按已知版本与关键字段解析。版本、schema、解释测量所需的字段或单位未知时拒绝输出语义观测，并保留原始报告与来源信息。已知格式中的非关键扩展内容只作为 `unmodeled` 保留。
 
 `ERR_NVGPUCTRPERM` 表示宿主机不允许读取硬件 counter，不表示 NCU 缺失，也不表示 kernel 有问题。skill 不自动修改驱动权限；可以继续使用 timing、Nsys、PyTorch Profiler、编译产物或 SASS 等适合当前问题的证据。
 

@@ -9,7 +9,7 @@ The CPU/static suite targets Python 3.10 and 3.12. GPU execution uses Linux faci
 | Triton | Compatible Python, framework, Triton, and GPU target | IR, launch, dispatch, and generated binary identity may all matter |
 | Nsight Compute | Supported NCU export or collection tool | Counter permission is optional and reported explicitly |
 | Nsight Systems | Supported exported SQLite dialect or collection tool | Private `.nsys-rep` bytes are not reverse-engineered |
-| PyTorch Profiler | Supported Chrome trace dialect | Unknown events, fields, or units fail closed |
+| PyTorch Profiler | Supported Chrome trace dialect | Unknown versions, interpretation-critical fields, or units fail closed; non-critical extensions remain unmodeled |
 
 Architecture-specific claims require an exact compute capability match. A numerically adjacent SM does not inherit another target's features. Use a local compile probe and current official documentation for capability questions.
 

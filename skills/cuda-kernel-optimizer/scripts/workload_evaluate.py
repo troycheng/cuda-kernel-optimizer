@@ -773,9 +773,11 @@ def create_experiment(value) -> dict:
         set(),
         "cheapest_falsifier",
     )
-    if falsifier["kind"] not in {"none", "command"}:
+    if falsifier["kind"] != "none":
         raise EvaluatorError(
-            "invalid_evaluator_input", "cheapest_falsifier.kind is unsupported"
+            "invalid_evaluator_input",
+            "cheapest_falsifier.kind must be none; complete independent checks "
+            "before creating the Experiment",
         )
     falsifier = {
         "kind": falsifier["kind"],
@@ -1122,11 +1124,6 @@ def screen(value, *, wait_for_result: bool) -> dict:
         raise EvaluatorError(
             "screen_not_enabled",
             "experiment does not define a screen operation",
-        )
-    if experiment["cheapest_falsifier"]["kind"] != "none":
-        raise EvaluatorError(
-            "falsifier_not_executable",
-            "the frozen falsifier has no supported executable contract",
         )
     frozen = _frozen_screen_request(request, target, experiment)
     worker_argv = [

@@ -74,6 +74,7 @@ _INVOCATION_DIR = "CKO_INVOCATION_DIR"
 _ARTIFACT_ROOT = "CKO_ARTIFACT_ROOT"
 _INVOCATION_ID = "CKO_INVOCATION_ID"
 _WORKER_GATE_FD = "CKO_WORKER_GATE_FD"
+_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
 def _closed(value, fields: set[str], label: str, optional=()) -> dict:
@@ -479,7 +480,12 @@ def _release_locks(descriptors: list[int]) -> None:
             os.close(descriptor)
 
 
-def _acquire_resource_locks(resources: dict, deadline: float, cancel_path=None):
+def _acquire_resource_locks(
+    resources: dict,
+    deadline: float,
+    cancel_path=None,
+    progress=None,
+):
     if not resources["gpu_uuids"]:
         return []
     root = _lock_root()
@@ -498,6 +504,8 @@ def _acquire_resource_locks(resources: dict, deadline: float, cancel_path=None):
                 0o600,
             )
             while True:
+                if progress is not None:
+                    progress()
                 if cancel_path is not None and _regular_file_or_absent(Path(cancel_path)):
                     os.close(descriptor)
                     _release_locks(descriptors)
@@ -546,6 +554,7 @@ def _execute_validated(
     cancel_path=None,
     tracking_dir: Path | None = None,
     owner_fd: int | None = None,
+    progress=None,
 ) -> dict:
     deadline, timeout_reason = _command_deadline(
         operation_deadline=operation_deadline,
@@ -645,6 +654,8 @@ def _execute_validated(
                 return "data"
 
             while process.poll() is None:
+                if progress is not None:
+                    progress()
                 watched = [stdout_fd] if stdout_fd is not None else []
                 if owner_fd is not None:
                     watched.append(owner_fd)
@@ -859,6 +870,26 @@ def _append_event(invocation_dir: Path, event: str, **details) -> None:
     STORE.append_regular_bytes(path, payload)
 
 
+def _heartbeat_writer(invocation_dir: Path, worker_pid: int):
+    """Return one throttled event writer owned by the invocation guardian."""
+    last_emitted = float("-inf")
+
+    def emit(phase: str) -> None:
+        nonlocal last_emitted
+        now = time.monotonic()
+        if now - last_emitted < _HEARTBEAT_INTERVAL_SECONDS:
+            return
+        _append_event(
+            invocation_dir,
+            "heartbeat",
+            worker_pid=worker_pid,
+            phase=phase,
+        )
+        last_emitted = now
+
+    return emit
+
+
 def _process_start_token(pid: int) -> str | None:
     proc_stat = Path(f"/proc/{pid}/stat")
     try:
@@ -942,6 +973,35 @@ def _latest_event(invocation_dir: Path, event_name: str) -> dict | None:
     return None
 
 
+def _running_status(invocation_dir: Path, invocation_id: str, created: float) -> dict:
+    now = time.time()
+    result = {
+        "query_status": "running",
+        "invocation_id": invocation_id,
+        "elapsed_seconds": max(0.0, now - created),
+        "cleanup_status": "pending",
+    }
+    heartbeat = _latest_event(invocation_dir, "heartbeat")
+    if (
+        type(heartbeat) is dict
+        and isinstance(heartbeat.get("at_epoch"), (int, float))
+        and not isinstance(heartbeat.get("at_epoch"), bool)
+        and math.isfinite(float(heartbeat["at_epoch"]))
+    ):
+        heartbeat_at = float(heartbeat["at_epoch"])
+        result["heartbeat_at_epoch"] = heartbeat_at
+        if isinstance(heartbeat.get("phase"), str):
+            result["heartbeat_phase"] = heartbeat["phase"]
+        result["unresponsive"] = (
+            now - heartbeat_at > 3 * _HEARTBEAT_INTERVAL_SECONDS
+        )
+    else:
+        result["unresponsive"] = (
+            now - created > 3 * _HEARTBEAT_INTERVAL_SECONDS
+        )
+    return result
+
+
 def _status_from_dir(invocation_dir: Path) -> dict:
     request = _read_json(invocation_dir / "request.json")
     invocation_id = invocation_dir.name
@@ -958,12 +1018,7 @@ def _status_from_dir(invocation_dir: Path) -> dict:
                 ) or _process_matches(
                     worker.get("guardian_pid"), worker.get("guardian_start_token")
                 ):
-                    return {
-                        "query_status": "running",
-                        "invocation_id": invocation_id,
-                        "elapsed_seconds": max(0.0, time.time() - created),
-                        "cleanup_status": "pending",
-                    }
+                    return _running_status(invocation_dir, invocation_id, created)
             guardian_finished = _latest_event(invocation_dir, "guardian_finished")
             if (
                 guardian_finished is None
@@ -1013,12 +1068,7 @@ def _status_from_dir(invocation_dir: Path) -> dict:
             worker.get("guardian_pid"), worker.get("guardian_start_token")
         )
         if worker_live or guardian_live:
-            return {
-                "query_status": "running",
-                "invocation_id": invocation_id,
-                "elapsed_seconds": max(0.0, time.time() - created),
-                "cleanup_status": "pending",
-            }
+            return _running_status(invocation_dir, invocation_id, created)
         return {
             "query_status": "worker_lost",
             "invocation_id": invocation_id,
@@ -1028,20 +1078,20 @@ def _status_from_dir(invocation_dir: Path) -> dict:
         }
 
     rejection = _latest_event(invocation_dir, "worker_launch_rejected")
-    if rejection is not None:
-        if (
-            type(rejection) is dict
-            and rejection.get("stop_reason") == "worker_launch_identity_changed"
-            and isinstance(rejection.get("diagnostic"), str)
-        ):
-            return {
-                "query_status": "worker_lost",
-                "invocation_id": invocation_id,
-                "elapsed_seconds": max(0.0, time.time() - created),
-                "cleanup_status": "not_required",
-                "stop_reason": "worker_launch_identity_changed",
-                "diagnostic": rejection["diagnostic"][:1024],
-            }
+    if type(rejection) is dict and rejection.get("stop_reason") in {
+        "worker_launch_identity_changed",
+        "launch_deadline_exceeded",
+    }:
+        rejected = {
+            "query_status": "worker_lost",
+            "invocation_id": invocation_id,
+            "elapsed_seconds": max(0.0, time.time() - created),
+            "cleanup_status": "not_required",
+            "stop_reason": rejection["stop_reason"],
+        }
+        if isinstance(rejection.get("diagnostic"), str):
+            rejected["diagnostic"] = rejection["diagnostic"][:1024]
+        return rejected
 
     if time.time() <= float(request["launch_deadline"]):
         return {
@@ -1472,6 +1522,13 @@ def _guardian(invocation_dir: Path, artifact_root: Path) -> int:
             diagnostic=str(error)[:1024],
         )
         return 1
+    if time.time() > float(request["launch_deadline"]):
+        _append_event(
+            invocation_dir,
+            "worker_launch_rejected",
+            stop_reason="launch_deadline_exceeded",
+        )
+        return 1
     limits = _limits_from_request(request)
     resources = _resources_from_request(request)
     cancel_path = invocation_dir / "cancel"
@@ -1524,6 +1581,8 @@ def _guardian(invocation_dir: Path, artifact_root: Path) -> int:
         },
     )
     _append_event(invocation_dir, "worker_started", worker_pid=worker.pid)
+    heartbeat = _heartbeat_writer(invocation_dir, worker.pid)
+    heartbeat("worker_running")
     os.write(gate_write, b"1")
     os.close(gate_write)
     started = time.monotonic()
@@ -1532,6 +1591,7 @@ def _guardian(invocation_dir: Path, artifact_root: Path) -> int:
     locks = False
     try:
         while worker.poll() is None:
+            heartbeat("worker_running")
             if _regular_file_or_absent(cancel_path):
                 try:
                     worker.terminate()
@@ -1575,6 +1635,7 @@ def _guardian(invocation_dir: Path, artifact_root: Path) -> int:
                         resources,
                         resource_deadline,
                         cancel_path,
+                        lambda: heartbeat("resource_wait"),
                     )
                     if locks is None:
                         locks = "timeout"
@@ -1643,6 +1704,7 @@ def _guardian(invocation_dir: Path, artifact_root: Path) -> int:
                         resources,
                         resource_deadline,
                         cancel_path,
+                        lambda: heartbeat("resource_wait"),
                     )
                     if locks is None:
                         locks = "timeout"
@@ -1685,6 +1747,7 @@ def _guardian(invocation_dir: Path, artifact_root: Path) -> int:
                             cancel_path=cancel_path,
                             tracking_dir=invocation_dir,
                             owner_fd=request_read,
+                            progress=lambda: heartbeat("child_running"),
                         )
                     except (OSError, ValueError) as error:
                         result = {

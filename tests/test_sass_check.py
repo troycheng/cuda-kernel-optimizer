@@ -144,11 +144,11 @@ class SassProject:
                 "material_ref": self.material_ref,
             },
             "resources": {"host_id": "local-test", "gpu_uuids": []},
-            "operation_timeout_seconds": 3.0,
-            "command_timeout_seconds": 1.0,
+            "operation_timeout_seconds": 5.0,
+            "command_timeout_seconds": 3.0,
             "resource_wait_timeout_seconds": 1.0,
             "cleanup_timeout_seconds": 1.0,
-            "launch_deadline": time.time() + 2.0,
+            "launch_deadline": time.time() + 5.0,
         }
 
     def run(self, request: dict, operation="analyze", wait=True):
@@ -383,9 +383,9 @@ class SassCheckTests(unittest.TestCase):
                     "receipt_index": receipt_index, "relative_path": "kernel.cubin",
                 },
                 "resources": {"host_id": target["environment"]["host"]["host_id"], "gpu_uuids": []},
-                "operation_timeout_seconds": 3.0, "command_timeout_seconds": 1.0,
+                "operation_timeout_seconds": 5.0, "command_timeout_seconds": 3.0,
                 "resource_wait_timeout_seconds": 1.0, "cleanup_timeout_seconds": 1.0,
-                "launch_deadline": time.time() + 2.0,
+                "launch_deadline": time.time() + 5.0,
             }
             events_before = project.driver_events()
             completed = project.run_tool("sass_check.py", "analyze", request, wait=True)

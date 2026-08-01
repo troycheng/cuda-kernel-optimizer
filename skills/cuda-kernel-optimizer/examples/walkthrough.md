@@ -25,7 +25,7 @@
 2. 调用 `workload_evaluate.py baseline` 测量原始业务基线。若 original 精度失败，先报告基础环境问题，不开始性能候选。
 3. 分析源码和已有观测，形成若干竞争性解释。例如：短序列受 launch gap 主导，长序列受 KV 访问主导，或尾块正确性限制了可用 tile。
 4. 选择当前最值得验证的一项，声明候选机制、预期影响、最低成本证伪、修改范围和拒绝条件，再调用 `workload_evaluate.py experiment` 冻结 Candidate 与 Experiment。
-5. 先执行 `screen`。最低成本证伪或精度失败时，到此停止该候选。若 `conservative_bound` 已证明收益上限低于阈值，也不继续；`diagnostic_proxy` 无法定论时，由 ChatGPT 根据它实际检验的主张和下一步成本决定是否进入正式测试。
+5. 创建 Experiment 前先完成最低成本证伪；已经证伪时不执行候选。随后执行 `screen`，精度失败时停止该候选。若 `conservative_bound` 已证明收益上限低于阈值，也不继续；`diagnostic_proxy` 无法定论时，由 ChatGPT 根据它实际检验的主张和下一步成本决定是否进入正式测试。
 6. 只有现有证据无法区分关键假设时，才调用 Nsys、NCU、PyTorch Profiler、编译产物或 SASS 分析。profiler 返回事实，由 ChatGPT 解释。
 7. 候选未被初筛拒绝，并且正式比较仍值得投入时，执行 `target`。结果有效且优于当前最佳版本时，ChatGPT 调用 `champion.py select` 显式记录选择。
 8. 在输出 workload 或服务层最终结论前，执行 `final_audit`，重新比较 original 与当前 Champion。

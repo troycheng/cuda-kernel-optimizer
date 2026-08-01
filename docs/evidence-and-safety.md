@@ -16,7 +16,7 @@ Target, Variant, Experiment, tool executable, profiler artifact, and result iden
 
 ## Profiler limits
 
-Profiler output is diagnostic evidence, not promotion evidence by itself. NCU, Nsys, and PyTorch parsers accept only tested versions and fields. `ERR_NVGPUCTRPERM` records unavailable hardware counters without changing host policy.
+Profiler output is diagnostic evidence, not promotion evidence by itself. NCU, Nsys, and PyTorch parsers accept only tested versions and interpretation-critical fields; non-critical extensions are retained as unmodeled material. `ERR_NVGPUCTRPERM` records unavailable hardware counters without changing host policy.
 
 ## Modification boundary
 

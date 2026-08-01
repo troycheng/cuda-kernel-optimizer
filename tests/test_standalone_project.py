@@ -26,7 +26,6 @@ class StandaloneProjectTests(unittest.TestCase):
         notice = (ROOT / "NOTICE").read_text("utf-8")
         for marker in (
             "KernelFlow-ops/cuda-optimized-skill",
-            "git.yukework.com/mlsys/cuda-optimized-skill",
             "github.com/troycheng/cuda-optimized-skill",
             "Acknowledgements",
             "Mark Liu",
@@ -42,8 +41,8 @@ class StandaloneProjectTests(unittest.TestCase):
                 (ROOT / name).read_text("utf-8"),
             )
 
-    def test_public_files_do_not_expose_private_storage_paths(self) -> None:
-        private_path = "/data/" + "tcheng"
+    def test_public_files_do_not_expose_private_storage_or_internal_hosts(self) -> None:
+        private_markers = ("/data/" + "tcheng", "git." + "yukework.com")
         paths = [ROOT / name for name in ("README.md", "README.en.md", "CONTRIBUTING.md")]
         paths.extend((ROOT / "docs").rglob("*.md"))
         paths.extend((ROOT / "skills" / "cuda-kernel-optimizer").rglob("*"))
@@ -54,7 +53,8 @@ class StandaloneProjectTests(unittest.TestCase):
                 text = path.read_text("utf-8")
             except UnicodeDecodeError:
                 continue
-            self.assertNotIn(private_path, text, str(path))
+            for marker in private_markers:
+                self.assertNotIn(marker, text, str(path))
 
     def test_templates_use_no_archived_repository_schema_identity(self) -> None:
         old_prefix = "https://github.com/troycheng/cuda-optimized-skill/"
@@ -84,6 +84,11 @@ class StandaloneProjectTests(unittest.TestCase):
             "python3 -m unittest discover -s tests",
             (ROOT / "CONTRIBUTING.md").read_text("utf-8"),
         )
+        pull_request_template = (ROOT / ".github/pull_request_template.md").read_text(
+            "utf-8"
+        )
+        self.assertIn("Staged installation self-check passes", pull_request_template)
+        self.assertNotIn("Installed-skill tests pass", pull_request_template)
 
     def test_ci_runs_current_release_gate_on_supported_python(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text("utf-8")

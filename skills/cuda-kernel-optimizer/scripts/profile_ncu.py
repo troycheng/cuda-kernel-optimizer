@@ -492,6 +492,7 @@ def parse_ncu_csv(csv_text: str, tool_version: str, kernel_name_hints: list[str]
         or len(reader.fieldnames) != len(set(reader.fieldnames))
     ):
         raise NcuError("missing_required_column", "NCU CSV is missing required long-form columns")
+    unmodeled_columns = sorted(set(reader.fieldnames) - _CSV_COLUMNS)
     values = {name: [] for name in _METRICS}
     unmodeled = set()
     seen_rows = 0
@@ -534,12 +535,17 @@ def parse_ncu_csv(csv_text: str, tool_version: str, kernel_name_hints: list[str]
                 "tool": {"name": "ncu", "version": tool_version},
             }
         )
+    unmodeled_facts = [
+        {"column_name": name, "reason": "unmodeled_column"}
+        for name in unmodeled_columns
+    ]
+    unmodeled_facts.extend(
+        {"metric_name": name, "reason": "unknown_metric"}
+        for name in sorted(unmodeled)
+    )
     return {
         "observations": observations,
-        "unmodeled": [
-            {"metric_name": name, "reason": "unknown_metric"}
-            for name in sorted(unmodeled)[:_MAX_UNMODELED]
-        ],
+        "unmodeled": unmodeled_facts[:_MAX_UNMODELED],
     }
 
 

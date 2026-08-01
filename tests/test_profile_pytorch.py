@@ -302,6 +302,12 @@ class ProfilePyTorchTests(unittest.TestCase):
         duplicate = b'{"schemaVersion":1,"schemaVersion":1,"traceEvents":[]}'
         with self.assertRaisesRegex(profile.PyTorchError, "duplicate"):
             profile._strict_json_bytes(duplicate, "Chrome trace")
+        unknown_event = _trace()
+        unknown_event["traceEvents"][0]["futureField"] = True
+        self.assertIn(
+            {"kind": "event_fields", "fields": ["futureField"]},
+            profile.parse_chrome_trace(unknown_event, "2.13")["unmodeled"],
+        )
 
     def test_empty_complete_events_and_event_limit_fail_closed(self) -> None:
         profile = _load("profile_pytorch")

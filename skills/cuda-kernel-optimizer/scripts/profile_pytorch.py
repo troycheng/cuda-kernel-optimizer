@@ -37,6 +37,10 @@ _COLLECT_OPTIONAL = {"experiment_ref", "correctness_ref", "absolute_deadline", "
 _MATERIAL = {"id", "sha256", "kind", "tool", "tool_version", "dialect", "object_ref"}
 _OBJECT_REF = {"digest", "locator", "source_kind", "file_count", "total_bytes"}
 _COMPLETE_FIELDS = {"name", "cat", "ph", "pid", "tid", "ts", "dur"}
+_TRACE_EVENT_FIELDS = _COMPLETE_FIELDS | {
+    "args", "bp", "cname", "flow_in", "flow_out", "id", "id2", "s",
+    "scope", "sf", "stack", "tdur", "tts",
+}
 _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 _MAX_TRACE_BYTES = 512 * 1024 * 1024
 _MAX_TOP_LEVEL_FIELDS = 32
@@ -238,10 +242,15 @@ def parse_chrome_trace(trace: dict, tool_version: str) -> dict:
     if len(events) > _MAX_EVENTS:
         raise PyTorchError("event_limit_exceeded", "Chrome trace exceeds event limit")
     observations, phases, unmodeled_complete = [], {}, {}
+    unmodeled_event_fields = set()
     for index, event in enumerate(events):
         if type(event) is not dict or not event or len(event) > _MAX_EVENT_FIELDS:
             raise PyTorchError("invalid_trace_event", f"trace event {index} is invalid")
         phase = _trace_text(event.get("ph"), f"trace event {index}.ph")
+        for field in sorted(set(event) - _TRACE_EVENT_FIELDS):
+            if len(unmodeled_event_fields) >= _MAX_UNMODELED:
+                break
+            unmodeled_event_fields.add(field)
         if phase != "X":
             phases[phase] = phases.get(phase, 0) + 1
             continue
@@ -297,6 +306,13 @@ def parse_chrome_trace(trace: dict, tool_version: str) -> dict:
             {
                 "kind": "top_level_metadata",
                 "fields": extra_top_level[:_MAX_UNMODELED],
+            }
+        )
+    if unmodeled_event_fields:
+        unmodeled.append(
+            {
+                "kind": "event_fields",
+                "fields": sorted(unmodeled_event_fields)[:_MAX_UNMODELED],
             }
         )
     unmodeled.extend(

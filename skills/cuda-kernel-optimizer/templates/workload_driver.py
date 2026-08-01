@@ -78,8 +78,9 @@ def collect_environment(request: dict) -> dict:
 def cleanup(request: dict) -> dict:
     """Return {"status": "confirmed", "live_tasks": []} only after cleanup.
 
-    TODO: terminate and verify every task or external resource started by this
-    driver.  Do not claim confirmation while any task may remain alive.
+    TODO: terminate and verify every child task started by this driver.  Every
+    task must remain in the Invocation process group.  Do not claim
+    confirmation while any task may remain alive.
     """
     raise NotImplementedError("TODO: implement cleanup for this workload")
 

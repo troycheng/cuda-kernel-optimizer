@@ -8,7 +8,8 @@ readiness 通过后，先执行 `workload_evaluate.py baseline`。原始业务�
 
 ## 2. 冻结 Experiment
 
-调用 `workload_evaluate.py experiment` 前，至少说明：
+先完成源码静态审查或独立小测试；已经证伪时不创建候选。调用
+`workload_evaluate.py experiment` 前，至少说明：
 
 - 机制与预期影响；
 - claim layer；
@@ -32,7 +33,7 @@ readiness 通过后，先执行 `workload_evaluate.py baseline`。原始业务�
 5. 正式成对 workload 测试；
 6. 完整服务测试。
 
-`screen` 执行 Experiment 中声明的低成本路径。前一项已足以拒绝候选时，不启动后续昂贵动作。`conservative_bound` 只有在预先说明它为何约束正式目标，并实际证明收益上限低于 minimum effect 时才能拒绝。`diagnostic_proxy` 只检验声明的局部机制；低代理收益或样本不足不能单独否定完整 workload，ChatGPT 根据该主张、其它证据和正式测试成本决定是否继续。profiler 不是固定阶段；只有它能区分仍然竞争的解释时才值得运行。
+`screen` 从精度校验开始执行 Experiment 中声明的低成本测量路径。前一项已足以拒绝候选时，不启动后续昂贵动作。`conservative_bound` 只有在预先说明它为何约束正式目标，并实际证明收益上限低于 minimum effect 时才能拒绝。`diagnostic_proxy` 只检验声明的局部机制；低代理收益或样本不足不能单独否定完整 workload，ChatGPT 根据该主张、其它证据和正式测试成本决定是否继续。profiler 不是固定阶段；只有它能区分仍然竞争的解释时才值得运行。
 
 涉及越界访问、向量化或异步拷贝时，将 `compute-sanitizer memcheck` 纳入 screen；涉及 shared memory、多阶段 pipeline、barrier、warp specialization、原子操作或跨 stream 同步时，再按风险加入 `racecheck`、`initcheck` 或 `synccheck`。这些检查由 Experiment 显式声明，不由机制名称自动触发，也不能替代业务精度校验。
 

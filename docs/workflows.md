@@ -21,7 +21,7 @@ These machine records describe facts and explicit selections. The Handoff summar
 2. `baseline`: establish original performance before any candidate exists.
 3. ChatGPT analyzes source and observations, then chooses the lowest-cost evidence that can distinguish the leading hypotheses.
 4. `experiment`: freeze one Candidate and its measurement design.
-5. `screen`: run the declared falsifier, correctness, and short paired screen. A conclusive failure blocks later expensive work.
+5. `screen`: run correctness and the declared short paired screen. Independent low-cost falsifiers are completed before the Experiment is created; a conclusive failure blocks later expensive work.
 6. A specific profiler `analyze` or `collect`: only when it answers an explicit unresolved question.
 7. `target`: perform formal paired comparison with original or the current Champion.
 8. `select`: explicitly record a passing Candidate as Champion.

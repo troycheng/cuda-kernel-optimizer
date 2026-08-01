@@ -143,6 +143,7 @@ class ReadmeSyncTests(unittest.TestCase):
             "不要修改源码",
             "不声称获得提速",
             "安装标签、commit 和目标目录",
+            "备份到当前 skills 目录之外",
         ):
             self.assertIn(marker, chinese)
         for marker in (
@@ -151,6 +152,7 @@ class ReadmeSyncTests(unittest.TestCase):
             "Do not edit source",
             "Do not claim a speedup",
             "tag, commit, and destination",
+            "backup outside the active skills directory",
         ):
             self.assertIn(marker, english)
 
