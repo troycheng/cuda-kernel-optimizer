@@ -201,6 +201,31 @@ class ArtifactStoreTests(unittest.TestCase):
 
             self.assertEqual(target.read_bytes(), b"captured")
 
+    def test_snapshot_rejects_known_oversize_file_before_first_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp).resolve() / "oversize.bin"
+            source.write_bytes(b"xx")
+            real_read = self.artifacts.os.read
+            read_calls = 0
+
+            def tracked_read(*args, **kwargs):
+                nonlocal read_calls
+                read_calls += 1
+                return real_read(*args, **kwargs)
+
+            with mock.patch.object(self.artifacts.os, "read", side_effect=tracked_read):
+                with self.assertRaisesRegex(ValueError, "exceeded"):
+                    self.artifacts._snapshot_source(
+                        source,
+                        {
+                            "max_files": 1,
+                            "max_total_bytes": 1,
+                            "max_wall_seconds": 1.0,
+                        },
+                    )
+
+            self.assertEqual(read_calls, 0)
+
     def test_materialize_object_rejects_tampered_payload_and_cleans_temporary_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

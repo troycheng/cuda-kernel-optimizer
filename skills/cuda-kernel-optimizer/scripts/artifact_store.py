@@ -749,6 +749,7 @@ def _read_snapshot_file(
     display_path: Path,
     *,
     deadline: float,
+    remaining_bytes: int,
 ) -> tuple[bytes, int]:
     if time.monotonic() >= deadline:
         raise TimeoutError("artifact scan exceeded max_wall_seconds")
@@ -764,13 +765,19 @@ def _read_snapshot_file(
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise ValueError(f"snapshot input is not a regular file: {display_path}")
+        if before.st_size > remaining_bytes:
+            raise ValueError("artifact scan exceeded max_total_bytes")
         chunks = []
+        total = 0
         while True:
             if time.monotonic() >= deadline:
                 raise TimeoutError("artifact scan exceeded max_wall_seconds")
             chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
+            total += len(chunk)
+            if total > remaining_bytes:
+                raise ValueError("artifact scan exceeded max_total_bytes")
             chunks.append(chunk)
         after = os.fstat(descriptor)
         if (
@@ -854,6 +861,7 @@ def _scan_directory(
             name,
             display_path,
             deadline=deadline,
+            remaining_bytes=max_total_bytes - counters["bytes"],
         )
         counters["files"] += 1
         counters["bytes"] += len(payload)
@@ -892,6 +900,7 @@ def _snapshot_source(source, scan_limits) -> tuple[dict, dict[str, bytes]]:
                 leaf,
                 target,
                 deadline=deadline,
+                remaining_bytes=max_total_bytes,
             )
             counters = {"files": 1, "bytes": len(payload)}
             if counters["files"] > max_files or counters["bytes"] > max_total_bytes:
