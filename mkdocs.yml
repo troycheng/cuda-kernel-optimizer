@@ -18,7 +18,6 @@ nav:
   - Validation Status: validation.md
   - Case Studies: case-studies.md
   - Knowledge & Research: knowledge-and-research.md
-  - Agent Protocol: https://github.com/troycheng/cuda-kernel-optimizer/blob/main/skills/cuda-kernel-optimizer/SKILL.md
 
 extra_css:
   - stylesheets/extra.css

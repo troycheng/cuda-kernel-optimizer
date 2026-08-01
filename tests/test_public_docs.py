@@ -23,6 +23,8 @@ PUBLIC_PAGES = (
 class PublicDocsTests(unittest.TestCase):
     def test_public_navigation_and_relative_links(self) -> None:
         config = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+        self.assertNotIn("blob/main", config)
+        self.assertNotIn("Agent Protocol:", config)
         for page in (Path(item).name for item in PUBLIC_PAGES):
             self.assertIn(page, config)
         pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
