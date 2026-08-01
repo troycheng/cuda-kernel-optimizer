@@ -61,6 +61,8 @@ class ReadmeSyncTests(unittest.TestCase):
         for marker in (
             "用户提供可运行的测试 workload",
             "完整执行路径",
+            "基于 CUDA、CUTLASS 和 Triton 的 GPU kernel 与算子实现",
+            "PyTorch 框架以及 vLLM、TensorRT-LLM 推理系统",
             "局部 kernel 提升不等于业务提速",
             "不承诺固定收益",
             "ChatGPT 显式选择",
@@ -69,6 +71,8 @@ class ReadmeSyncTests(unittest.TestCase):
         for marker in (
             "The user supplies a runnable test workload",
             "complete execution path",
+            "GPU kernel and operator implementations built with CUDA, CUTLASS, or Triton",
+            "the PyTorch framework and vLLM/TensorRT-LLM inference systems",
             "A faster kernel is not the same as a faster service",
             "does not promise a fixed speedup",
             "only after ChatGPT explicitly selects it",

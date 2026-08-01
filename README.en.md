@@ -15,7 +15,7 @@
 
 `cuda-kernel-optimizer` is a GPU performance optimization skill for ChatGPT coding environments. The user supplies a runnable test workload, correctness checks, a target GPU, and the allowed modification scope. ChatGPT then checks the environment, establishes the original baseline, analyzes bottlenecks, implements candidates, and runs paired validation. A formally validated variant becomes the current Champion only after ChatGPT explicitly selects it.
 
-The project optimizes the complete execution path, not only a kernel. It covers CUDA, CUTLASS, Triton, PyTorch, vLLM, and TensorRT-LLM, together with framework scheduling, CPU and data processing, transfers, communication, I/O, allocation, and serving conditions. The user's complete workload metric remains the objective. A faster kernel is not the same as a faster service.
+The project optimizes the complete execution path, not only a kernel. Its analysis covers GPU kernel and operator implementations built with CUDA, CUTLASS, or Triton, as well as scheduling, CPU and data processing, transfers, communication, I/O, allocation, and serving conditions in the PyTorch framework and vLLM/TensorRT-LLM inference systems. The user's complete workload metric remains the objective. A faster kernel is not the same as a faster service.
 
 The available evidence determines the strength of the result. A complete workload, correctness checks, and a stable benchmark can support an end-to-end claim. Source or local tests support only claims at those layers. The project does not promise a fixed speedup and does not create performance conclusions when the workload or correctness checks are missing.
 
