@@ -408,6 +408,10 @@ class NsysAnalyzeTests(unittest.TestCase):
                 result = module.analyze(request, wait_for_result=True)
             self.assertEqual(result["execution_status"], "succeeded")
             self.assertNotIn("workload_adapter.py", [item["name"] for item in result["provenance"]["tool_identity"]["implementations"]])
+            self.assertEqual(
+                set(result["provenance"]["tool_identity"]),
+                {"version", "implementations", "digest"},
+            )
             time.sleep(0.1)
             status = module._status_or_cancel(
                 {"format_version": request["format_version"], "operation": "status", "artifact_root": str(root), "invocation_id": result["invocation_id"]},

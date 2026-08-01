@@ -301,9 +301,10 @@ def _tool_identity(operation: str) -> dict:
         files.append({"name": name, "sha256": STORE.sha256_file(Path(__file__).with_name(name))})
     identity = {
         "version": TOOL_IDENTITY_VERSION,
-        "result_contract": RESULT_VERSION,
         "implementations": files,
     }
+    if operation == "collect":
+        identity["result_contract"] = RESULT_VERSION
     identity["digest"] = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return identity
 
