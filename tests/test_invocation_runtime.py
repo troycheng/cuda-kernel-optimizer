@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,7 +42,231 @@ def _process_exists(pid: int) -> bool:
     return True
 
 
+def _capture_command(root: Path, program: Path, *, maximum: int) -> dict:
+    return {
+        "argv": [sys.executable, str(program)],
+        "cwd": str(root),
+        "env": {},
+        "output_limit_bytes": 64,
+        "required_gpu_uuids": [],
+        "stdout_capture": {
+            "relative_path": "artifacts/stdout.bin",
+            "max_bytes": maximum,
+        },
+    }
+
+
+def _submit_command(runtime, root: Path, command: dict) -> dict:
+    worker = root / "runtime-worker.py"
+    worker.write_text(
+        "import importlib.util, json, os, sys, time\n"
+        "from pathlib import Path\n"
+        "spec=importlib.util.spec_from_file_location('runtime_worker_runtime', sys.argv[1])\n"
+        "runtime=importlib.util.module_from_spec(spec); spec.loader.exec_module(runtime)\n"
+        "invocation=Path(os.environ['CKO_INVOCATION_DIR'])\n"
+        "request=json.loads((invocation/'request.json').read_text('utf-8'))\n"
+        "child=runtime.run_child(request['command'])\n"
+        "result={'record_type':'runtime_test','execution_status':"
+        "('succeeded' if child['status']=='completed' else 'invalid'),"
+        "'cleanup_status':child['cleanup_status'],'child':child,"
+        "'finished_at_epoch':time.time()}\n"
+        "(invocation/'result.json').write_text(json.dumps(result),encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    request = {
+        "operation": "runtime_capture_test",
+        "command": command,
+        "resources": {"host_id": "local-test", "gpu_uuids": []},
+        "operation_timeout_seconds": 3.0,
+        "command_timeout_seconds": 2.0,
+        "resource_wait_timeout_seconds": 1.0,
+        "cleanup_timeout_seconds": 1.0,
+        "launch_deadline": time.time() + 2.0,
+    }
+    request["request_digest"] = runtime.request_digest(request)
+    return runtime.submit(
+        root,
+        request,
+        [sys.executable, str(worker), str(RUNTIME_PATH)],
+        True,
+    )
+
+
 class InvocationProbeTests(unittest.TestCase):
+    def test_invocation_stdout_capture_publishes_exact_bytes_and_bounded_prefix(self) -> None:
+        runtime = _load_runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program = root / "emit.py"
+            payload = b"captured-" * 1024
+            program.write_text(
+                "import sys\nsys.stdout.buffer.write(b'captured-' * 1024)\n",
+                encoding="utf-8",
+            )
+
+            result = _submit_command(
+                runtime, root, _capture_command(root, program, maximum=len(payload))
+            )
+
+            child = result["child"]
+            self.assertEqual(child["status"], "completed")
+            self.assertLessEqual(len(child["stdout"]), 96)
+            self.assertIn("[output truncated]", child["stdout"])
+            self.assertEqual(
+                child["stdout_capture"],
+                {
+                    "relative_path": "artifacts/stdout.bin",
+                    "size_bytes": len(payload),
+                    "sha256": __import__("hashlib").sha256(payload).hexdigest(),
+                },
+            )
+            captured = root / "invocations" / result["invocation_id"] / "artifacts" / "stdout.bin"
+            self.assertEqual(captured.read_bytes(), payload)
+            collision = captured.parents[1] / "collision.tmp"
+            collision.write_bytes(b"replacement")
+            with self.assertRaisesRegex(FileExistsError, "already exists"):
+                runtime._publish_capture(collision, captured)
+            self.assertEqual(captured.read_bytes(), payload)
+
+    def test_capture_path_is_canonical_and_probe_rejects_capture(self) -> None:
+        runtime = _load_runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program = root / "emit.py"
+            program.write_text("print('x')\n", encoding="utf-8")
+            command = _capture_command(root, program, maximum=1024)
+            for path in ("../escape", "/tmp/escape", "a//b", "a\\b", "a\x00b"):
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, "stdout_capture"):
+                    runtime._validate_command({
+                        **command,
+                        "stdout_capture": {"relative_path": path, "max_bytes": 1024},
+                    })
+            with self.assertRaisesRegex(ValueError, "probe"):
+                runtime.probe(
+                    command,
+                    {
+                        "operation_timeout_seconds": 1.0,
+                        "command_timeout_seconds": 1.0,
+                        "resource_wait_timeout_seconds": 1.0,
+                        "cleanup_timeout_seconds": 1.0,
+                    },
+                    {"host_id": "local-test", "gpu_uuids": []},
+                )
+
+    def test_capture_overflow_terminates_process_group_and_removes_partial(self) -> None:
+        runtime = _load_runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program = root / "overflow.py"
+            pid_path = root / "pids.json"
+            program.write_text(
+                "import json, os, subprocess, sys, time\n"
+                "from pathlib import Path\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\n"
+                f"Path({str(pid_path)!r}).write_text(json.dumps([os.getpid(),child.pid]))\n"
+                "sys.stdout.buffer.write(b'x'*4097);sys.stdout.buffer.flush();time.sleep(60)\n",
+                encoding="utf-8",
+            )
+
+            result = _submit_command(
+                runtime, root, _capture_command(root, program, maximum=4096)
+            )
+
+            child = result["child"]
+            self.assertEqual(child["status"], "failed")
+            self.assertEqual(child["stop_reason"], "output_limit_exceeded")
+            self.assertEqual(child["cleanup_status"], "confirmed")
+            self.assertNotIn("stdout_capture", child)
+            invocation = root / "invocations" / result["invocation_id"]
+            self.assertFalse((invocation / "artifacts" / "stdout.bin").exists())
+            pids = json.loads(pid_path.read_text("utf-8"))
+            deadline = time.monotonic() + 2.0
+            while any(_process_exists(pid) for pid in pids) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual([pid for pid in pids if _process_exists(pid)], [])
+
+            tracking = root / "direct-invocation"
+            tracking.mkdir()
+            original_write = os.write
+
+            def fail_capture_write(descriptor, data):
+                if len(data) > 1 and data.startswith(b"x"):
+                    raise OSError("simulated capture write failure")
+                return original_write(descriptor, data)
+
+            started = time.monotonic()
+            with mock.patch.object(runtime.os, "write", side_effect=fail_capture_write):
+                with self.assertRaisesRegex(OSError, "simulated capture write failure"):
+                    runtime._execute_validated(
+                        runtime._validate_command(
+                            _capture_command(root, program, maximum=8192)
+                        ),
+                        resources={"host_id": "local-test", "gpu_uuids": []},
+                        operation_started=started,
+                        operation_deadline=started + 3.0,
+                        limits={
+                            "operation_timeout_seconds": 3.0,
+                            "command_timeout_seconds": 2.0,
+                            "resource_wait_timeout_seconds": 1.0,
+                            "cleanup_timeout_seconds": 1.0,
+                        },
+                        absolute_deadline=None,
+                        tracking_dir=tracking,
+                    )
+            self.assertFalse((tracking / "active-child.json").exists())
+            self.assertFalse((tracking / "artifacts" / "stdout.bin").exists())
+            pids = json.loads(pid_path.read_text("utf-8"))
+            self.assertEqual([pid for pid in pids if _process_exists(pid)], [])
+
+    def test_guardian_launch_rejection_is_event_only_terminal_status(self) -> None:
+        runtime = _load_runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            worker = root / "worker.py"
+            worker.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            launch = runtime._build_worker_launch([sys.executable, str(worker)])
+            request = {
+                "operation": "launch_rejection_test",
+                "resources": {"host_id": "local-test", "gpu_uuids": []},
+                "operation_timeout_seconds": 1.0,
+                "command_timeout_seconds": 1.0,
+                "resource_wait_timeout_seconds": 1.0,
+                "cleanup_timeout_seconds": 1.0,
+                "launch_deadline": time.time() + 10.0,
+            }
+            request["request_digest"] = runtime.request_digest(request)
+            invocation_id = "inv-" + runtime._invocation_digest(
+                request["request_digest"], launch["digest"]
+            )[:32]
+            invocation = root / "invocations" / invocation_id
+            invocation.mkdir(parents=True)
+            request["created_at_epoch"] = time.time()
+            runtime._create_json(invocation / "request.json", request)
+            runtime._create_json(invocation / "worker-launch.json", launch)
+            worker.write_text("raise SystemExit(1)\n", encoding="utf-8")
+
+            self.assertEqual(runtime._guardian(invocation, root), 1)
+
+            self.assertFalse((invocation / "result.json").exists())
+            self.assertFalse((invocation / "worker.json").exists())
+            event = json.loads((invocation / "events.jsonl").read_text("utf-8"))
+            self.assertEqual(event["event"], "worker_launch_rejected")
+            self.assertEqual(event["stop_reason"], "worker_launch_identity_changed")
+            self.assertLessEqual(len(event["diagnostic"]), 1024)
+            expected = {
+                "query_status": "worker_lost",
+                "invocation_id": invocation_id,
+                "cleanup_status": "not_required",
+                "stop_reason": "worker_launch_identity_changed",
+                "diagnostic": event["diagnostic"],
+            }
+            for observed in (
+                runtime.status(root, invocation_id), runtime.wait(root, invocation_id),
+                runtime.cancel(root, invocation_id),
+            ):
+                self.assertEqual(
+                    {key: observed[key] for key in expected}, expected
+                )
     def test_worker_launch_source_drift_is_rejected_before_exec(self) -> None:
         runtime = _load_runtime()
         with tempfile.TemporaryDirectory() as directory:

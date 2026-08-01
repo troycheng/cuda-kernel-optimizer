@@ -23,7 +23,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import stat
 
 
@@ -48,6 +48,8 @@ _COMMAND_FIELDS = {
     "output_limit_bytes",
     "required_gpu_uuids",
 }
+_STDOUT_CAPTURE_FIELDS = {"relative_path", "max_bytes"}
+_MAX_STDOUT_CAPTURE_BYTES = 8 * 1024 * 1024 * 1024
 _LIMIT_FIELDS = {
     "operation_timeout_seconds",
     "command_timeout_seconds",
@@ -73,11 +75,11 @@ _INVOCATION_ID = "CKO_INVOCATION_ID"
 _WORKER_GATE_FD = "CKO_WORKER_GATE_FD"
 
 
-def _closed(value, fields: set[str], label: str) -> dict:
+def _closed(value, fields: set[str], label: str, optional=()) -> dict:
     if type(value) is not dict:
         raise ValueError(f"{label} must be an object")
     missing = fields - set(value)
-    unknown = set(value) - fields
+    unknown = set(value) - fields - set(optional)
     if missing:
         raise ValueError(f"{label} is missing fields: {sorted(missing)}")
     if unknown:
@@ -108,7 +110,7 @@ def _validate_gpu_uuids(value, label: str) -> list[str]:
 
 
 def _validate_command(value) -> dict:
-    command = _closed(value, _COMMAND_FIELDS, "command_spec")
+    command = _closed(value, _COMMAND_FIELDS, "command_spec", {"stdout_capture"})
     argv = command["argv"]
     if isinstance(argv, (str, bytes, bytearray)) or not isinstance(argv, Sequence):
         raise ValueError("command_spec.argv must be a non-empty string list")
@@ -139,13 +141,35 @@ def _validate_command(value) -> dict:
         command["required_gpu_uuids"],
         "command_spec.required_gpu_uuids",
     )
-    return {
+    normalized = {
         "argv": normalized_argv,
         "cwd": cwd,
         "env": dict(environment),
         "output_limit_bytes": output_limit,
         "required_gpu_uuids": gpu_uuids,
     }
+    if "stdout_capture" in command:
+        capture = _closed(
+            command["stdout_capture"], _STDOUT_CAPTURE_FIELDS, "stdout_capture"
+        )
+        raw = capture["relative_path"]
+        path = PurePosixPath(raw) if isinstance(raw, str) else None
+        windows = PureWindowsPath(raw) if isinstance(raw, str) else None
+        if (
+            path is None or not raw or raw != path.as_posix() or path.is_absolute()
+            or windows.is_absolute() or windows.drive or "\\" in raw
+            or "\x00" in raw
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("stdout_capture.relative_path must be canonical invocation-relative POSIX syntax")
+        maximum = capture["max_bytes"]
+        if (
+            isinstance(maximum, bool) or not isinstance(maximum, int)
+            or not 1 <= maximum <= _MAX_STDOUT_CAPTURE_BYTES
+        ):
+            raise ValueError("stdout_capture.max_bytes must be a bounded positive integer")
+        normalized["stdout_capture"] = {"relative_path": raw, "max_bytes": maximum}
+    return normalized
 
 
 def _validate_limits(value) -> dict:
@@ -302,6 +326,33 @@ def _read_prefix(stream, limit: int) -> str:
     payload = payload[:limit]
     text = payload.decode("utf-8", errors="replace")
     return text + ("\n[output truncated]" if truncated else "")
+
+
+def _captured_prefix(payload: bytearray, limit: int) -> str:
+    truncated = len(payload) > limit
+    text = bytes(payload[:limit]).decode("utf-8", errors="replace")
+    return text + ("\n[output truncated]" if truncated else "")
+
+
+def _publish_capture(temporary: Path, destination: Path) -> None:
+    parent_fd, leaf, target = STORE._open_parent_directory(destination, create=True)
+    linked = False
+    try:
+        try:
+            os.link(temporary, leaf, dst_dir_fd=parent_fd, follow_symlinks=False)
+            linked = True
+        except FileExistsError as error:
+            raise FileExistsError(f"stdout capture already exists: {target}") from error
+        os.fsync(parent_fd)
+    except BaseException:
+        if linked:
+            try:
+                os.unlink(leaf, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+        raise
+    finally:
+        os.close(parent_fd)
 
 
 def _lock_root() -> Path:
@@ -519,34 +570,35 @@ def _execute_validated(
     child_token = secrets.token_hex(8)
     child_argv_path = tracking_dir / f".child-{child_token}.json"
     _create_json(child_argv_path, {"argv": command["argv"]})
+    capture = command.get("stdout_capture")
+    capture_fd = None
+    capture_path = None
+    capture_digest = hashlib.sha256()
+    capture_size = 0
+    prefix = bytearray()
+    if capture is not None:
+        capture_fd, temporary = tempfile.mkstemp(prefix=".stdout-capture-", dir=tracking_dir)
+        capture_path = Path(temporary)
     gate_read, gate_write = os.pipe()
     environment[_WORKER_GATE_FD] = str(gate_read)
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-        try:
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve()),
-                    "_child_gate",
-                    "--invocation-dir",
-                    str(tracking_dir),
-                    "--artifact-root",
-                    str(_lock_root()),
-                    "--worker-argv-file",
-                    str(child_argv_path),
-                ],
-                cwd=command["cwd"],
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout,
-                stderr=stderr,
-                start_new_session=True,
-                pass_fds=(gate_read,),
-            )
-        finally:
-            os.close(gate_read)
-        process_group = process.pid
-        try:
+    process = None
+    process_group = None
+    try:
+        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr:
+            try:
+                process = subprocess.Popen(
+                    [
+                        sys.executable, str(Path(__file__).resolve()), "_child_gate",
+                        "--invocation-dir", str(tracking_dir), "--artifact-root",
+                        str(_lock_root()), "--worker-argv-file", str(child_argv_path),
+                    ],
+                    cwd=command["cwd"], env=environment, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE if capture is not None else stdout_file,
+                    stderr=stderr, start_new_session=True, pass_fds=(gate_read,),
+                )
+            finally:
+                os.close(gate_read)
+            process_group = process.pid
             _atomic_json(
                 tracking_dir / "active-child.json",
                 {
@@ -558,90 +610,140 @@ def _execute_validated(
             )
             if command["required_gpu_uuids"]:
                 _write_occupancies(
-                    _lock_root(),
-                    resources,
-                    invocation_dir=tracking_dir,
-                    process_group=process_group,
-                    child_pid=process.pid,
+                    _lock_root(), resources, invocation_dir=tracking_dir,
+                    process_group=process_group, child_pid=process.pid,
                 )
             os.write(gate_write, b"1")
-        except BaseException:
             os.close(gate_write)
-            _terminate_group(
-                process,
-                process_group,
-                limits["cleanup_timeout_seconds"],
-            )
-            _remove_record(child_argv_path)
-            raise
-        os.close(gate_write)
-        stop_reason = None
-        while process.poll() is None:
-            if owner_fd is not None:
-                readable, _, _ = select.select([owner_fd], [], [], 0)
-                if readable and not os.read(owner_fd, 1):
+            stdout_fd = process.stdout.fileno() if capture is not None else None
+            if stdout_fd is not None:
+                os.set_blocking(stdout_fd, False)
+            stop_reason = None
+
+            def drain() -> str:
+                nonlocal capture_size
+                try:
+                    chunk = os.read(stdout_fd, 64 * 1024)
+                except BlockingIOError:
+                    return "pending"
+                if not chunk:
+                    return "eof"
+                remaining = command["output_limit_bytes"] + 1 - len(prefix)
+                if remaining > 0:
+                    prefix.extend(chunk[:remaining])
+                capture_size += len(chunk)
+                if capture_size > capture["max_bytes"]:
+                    return "overflow"
+                capture_digest.update(chunk)
+                offset = 0
+                while offset < len(chunk):
+                    written = os.write(capture_fd, chunk[offset:])
+                    if written <= 0:
+                        raise OSError("stdout capture write made no progress")
+                    offset += written
+                return "data"
+
+            while process.poll() is None:
+                watched = [stdout_fd] if stdout_fd is not None else []
+                if owner_fd is not None:
+                    watched.append(owner_fd)
+                readable, _, _ = select.select(watched, [], [], 0.02) if watched else ([], [], [])
+                if stdout_fd in readable:
+                    drained = drain()
+                    if drained == "overflow":
+                        stop_reason = "output_limit_exceeded"
+                        break
+                if owner_fd is not None and owner_fd in readable and not os.read(owner_fd, 1):
                     stop_reason = "owner_lost"
                     break
-            if cancel_path is not None and _regular_file_or_absent(Path(cancel_path)):
-                stop_reason = "cancelled"
-                break
-            if time.monotonic() >= deadline:
-                stop_reason = timeout_reason
-                break
-            time.sleep(min(0.02, max(0.001, deadline - time.monotonic())))
-
-        if stop_reason is not None:
-            cleanup_status = _terminate_group(
-                process,
-                process_group,
-                limits["cleanup_timeout_seconds"],
-            )
-            if cleanup_status == "confirmed" and command["required_gpu_uuids"]:
-                _clear_occupancies(_lock_root(), resources)
-            response = {
-                "status": (
-                    "cancelled"
-                    if stop_reason in {"cancelled", "owner_lost"}
-                    else "timed_out"
-                ),
-                "stop_reason": stop_reason,
-                "returncode": process.returncode,
-                "elapsed_seconds": time.monotonic() - operation_started,
-                "cleanup_status": cleanup_status,
-                "stdout": _read_prefix(stdout, command["output_limit_bytes"]),
-                "stderr": _read_prefix(stderr, command["output_limit_bytes"]),
-            }
-        else:
-            returncode = process.returncode
+                if cancel_path is not None and _regular_file_or_absent(Path(cancel_path)):
+                    stop_reason = "cancelled"
+                    break
+                if time.monotonic() >= deadline:
+                    stop_reason = timeout_reason
+                    break
             cleanup_status = (
-                "confirmed"
-                if not _group_exists(process_group)
-                else _terminate_group(
-                    process,
-                    process_group,
-                    limits["cleanup_timeout_seconds"],
-                )
+                _terminate_group(process, process_group, limits["cleanup_timeout_seconds"])
+                if stop_reason is not None or _group_exists(process_group)
+                else "confirmed"
             )
+            if stdout_fd is not None and stop_reason is None:
+                drained = "pending"
+                while True:
+                    readable, _, _ = select.select([stdout_fd], [], [], 0)
+                    if stdout_fd not in readable:
+                        break
+                    drained = drain()
+                    if drained in {"eof", "overflow"}:
+                        break
+                if drained == "overflow":
+                    stop_reason = "output_limit_exceeded"
             if cleanup_status == "confirmed" and command["required_gpu_uuids"]:
                 _clear_occupancies(_lock_root(), resources)
+            returncode = process.returncode
+            if stop_reason in {"cancelled", "owner_lost"}:
+                status = "cancelled"
+            elif stop_reason in {timeout_reason}:
+                status = "timed_out"
+            elif stop_reason is not None:
+                status = "failed"
+            else:
+                status = "completed" if returncode == 0 else "failed"
+                stop_reason = "completed" if returncode == 0 else "command_failed"
             response = {
-                "status": "completed" if returncode == 0 else "failed",
-                "stop_reason": "completed" if returncode == 0 else "command_failed",
-                "returncode": returncode,
+                "status": status, "stop_reason": stop_reason, "returncode": returncode,
                 "elapsed_seconds": time.monotonic() - operation_started,
                 "cleanup_status": cleanup_status,
-                "stdout": _read_prefix(stdout, command["output_limit_bytes"]),
+                "stdout": (
+                    _captured_prefix(prefix, command["output_limit_bytes"])
+                    if capture is not None else _read_prefix(stdout_file, command["output_limit_bytes"])
+                ),
                 "stderr": _read_prefix(stderr, command["output_limit_bytes"]),
             }
-        if response["cleanup_status"] == "confirmed":
-            _remove_record(tracking_dir / "active-child.json")
+            if capture is not None and status == "completed" and cleanup_status == "confirmed":
+                os.fsync(capture_fd)
+                destination = tracking_dir / PurePosixPath(capture["relative_path"])
+                _publish_capture(capture_path, destination)
+                response["stdout_capture"] = {
+                    "relative_path": capture["relative_path"],
+                    "size_bytes": capture_size,
+                    "sha256": capture_digest.hexdigest(),
+                }
+            if process.stdout is not None:
+                process.stdout.close()
+            if cleanup_status == "confirmed":
+                _remove_record(tracking_dir / "active-child.json")
+            _remove_record(child_argv_path)
+            return response
+    except BaseException:
+        if process is not None and process_group is not None:
+            cleanup_status = _terminate_group(
+                process, process_group, limits["cleanup_timeout_seconds"]
+            )
+            if cleanup_status == "confirmed":
+                if command["required_gpu_uuids"]:
+                    _clear_occupancies(_lock_root(), resources)
+                _remove_record(tracking_dir / "active-child.json")
+            if process.stdout is not None:
+                process.stdout.close()
         _remove_record(child_argv_path)
-        return response
+        raise
+    finally:
+        try:
+            os.close(gate_write)
+        except OSError:
+            pass
+        if capture_fd is not None:
+            os.close(capture_fd)
+        if capture_path is not None:
+            capture_path.unlink(missing_ok=True)
 
 
 def probe(command_spec, runtime_limits, resources) -> dict:
     """Run one synchronous, bounded readiness command through a guardian."""
     command = _validate_command(command_spec)
+    if "stdout_capture" in command:
+        raise ValueError("probe does not permit stdout_capture")
     limits = _validate_limits(runtime_limits)
     claimed_resources = _validate_resources(resources)
     probe_dir = Path(tempfile.mkdtemp(prefix="cko-probe-"))
@@ -876,6 +978,32 @@ def _status_from_dir(invocation_dir: Path) -> dict:
             "cleanup_status": "unknown",
             "stop_reason": "worker_lost",
         }
+
+    events_path = invocation_dir / "events.jsonl"
+    if _regular_file_or_absent(events_path):
+        try:
+            records = STORE.read_regular_bytes(
+                events_path, maximum_bytes=_MAX_RECORD_BYTES
+            ).splitlines()
+            rejection = next((event for event in (
+                json.loads(record.decode("utf-8"))
+                for record in reversed(records) if record
+            ) if type(event) is dict and event.get("event") == "worker_launch_rejected"), None)
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            rejection = None
+        if (
+            type(rejection) is dict
+            and rejection.get("stop_reason") == "worker_launch_identity_changed"
+            and isinstance(rejection.get("diagnostic"), str)
+        ):
+            return {
+                "query_status": "worker_lost",
+                "invocation_id": invocation_id,
+                "elapsed_seconds": max(0.0, time.time() - created),
+                "cleanup_status": "not_required",
+                "stop_reason": "worker_launch_identity_changed",
+                "diagnostic": rejection["diagnostic"][:1024],
+            }
 
     if time.time() <= float(request["launch_deadline"]):
         return {
@@ -1294,20 +1422,12 @@ def _guardian(invocation_dir: Path, artifact_root: Path) -> int:
             _read_json(invocation_dir / "worker-launch.json"),
         )
     except ValueError as error:
-        _atomic_json(
-            invocation_dir / "result.json",
-            {
-                "status": "failed",
-                "stop_reason": "worker_launch_identity_changed",
-                "returncode": None,
-                "elapsed_seconds": 0.0,
-                "cleanup_status": "confirmed",
-                "stdout": "",
-                "stderr": str(error)[:1024],
-                "finished_at_epoch": time.time(),
-            },
+        _append_event(
+            invocation_dir,
+            "worker_launch_rejected",
+            stop_reason="worker_launch_identity_changed",
+            diagnostic=str(error)[:1024],
         )
-        _append_event(invocation_dir, "worker_launch_rejected")
         return 1
     limits = _limits_from_request(request)
     resources = _resources_from_request(request)
@@ -1580,6 +1700,8 @@ def _guardian(invocation_dir: Path, artifact_root: Path) -> int:
 def _probe_guardian(probe_dir: Path, owner_fd: int) -> int:
     probe = _read_json(probe_dir / "probe.json")
     command = _validate_command(probe["command"])
+    if "stdout_capture" in command:
+        raise ValueError("probe does not permit stdout_capture")
     limits = _validate_limits(probe["limits"])
     resources = _command_resources(_validate_resources(probe["resources"]), command)
     started = time.monotonic()
