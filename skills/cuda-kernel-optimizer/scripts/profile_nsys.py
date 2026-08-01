@@ -290,12 +290,14 @@ def parse_nsys_sqlite(path, tool_version: str) -> dict:
     }
 
 
-def _tool_identity() -> dict:
+def _tool_identity(operation: str) -> dict:
+    if operation not in {"analyze", "collect"}:
+        raise NsysError("invalid_nsys_input", "tool identity operation is unsupported")
     files = []
-    for name in (
-        "profile_nsys.py", "_invocation_runtime.py", "artifact_store.py",
-        "workload_adapter.py",
-    ):
+    names = ["profile_nsys.py", "_invocation_runtime.py", "artifact_store.py"]
+    if operation == "collect":
+        names.append("workload_adapter.py")
+    for name in names:
         files.append({"name": name, "sha256": STORE.sha256_file(Path(__file__).with_name(name))})
     identity = {
         "version": TOOL_IDENTITY_VERSION,
@@ -349,7 +351,7 @@ def _validate_collect(value) -> tuple[dict, dict]:
 
 def analyze(value, *, wait_for_result: bool) -> dict:
     request, root, material = _validate_analyze(value)
-    frozen = {**request, "report_material": material, "tool_identity": _tool_identity()}
+    frozen = {**request, "report_material": material, "tool_identity": _tool_identity("analyze")}
     frozen["request_digest"] = RUNTIME.request_digest(frozen)
     return RUNTIME.submit(root, frozen, [sys.executable, str(Path(__file__).resolve()), "_worker"], wait_for_result)
 
@@ -362,18 +364,18 @@ def _frozen_collect_request(request: dict, resolved: dict) -> dict:
         "role": resolved["role"],
         "case_id": resolved["case_id"],
         "variant": resolved["variant"],
-        "experiment_ref": resolved["experiment_ref"],
-        "correctness_ref": resolved["correctness_ref"],
         "driver": resolved["driver"],
         "nsys_tool": resolved["nsys_tool"],
         "resources": resolved["resources"],
-        "tool_identity": _tool_identity(),
+        "tool_identity": _tool_identity("collect"),
         "operation_timeout_seconds": request["operation_timeout_seconds"],
         "command_timeout_seconds": request["command_timeout_seconds"],
         "resource_wait_timeout_seconds": request["resource_wait_timeout_seconds"],
         "cleanup_timeout_seconds": request["cleanup_timeout_seconds"],
         "launch_deadline": request["launch_deadline"],
     }
+    if resolved["role"] == "candidate":
+        frozen.update({"experiment_ref": resolved["experiment_ref"], "correctness_ref": resolved["correctness_ref"]})
     for field in ("absolute_deadline", "retry_of"):
         if field in request:
             frozen[field] = request[field]
@@ -427,9 +429,11 @@ def _revalidate_collect_worker(request: dict, artifact_root: Path) -> dict:
         key: request[key]
         for key in (
             "target_ref", "baseline_ref", "role", "case_id", "variant",
-            "experiment_ref", "correctness_ref", "driver", "nsys_tool", "resources",
+            "driver", "nsys_tool", "resources",
         )
     }
+    if request["role"] == "candidate":
+        expected.update({"experiment_ref": request["experiment_ref"], "correctness_ref": request["correctness_ref"]})
     if {key: resolved[key] for key in expected} != expected:
         raise NsysError("collection_changed", "frozen collection bindings changed")
     return resolved
@@ -460,10 +464,10 @@ def _base_result(request: dict, started_epoch: float) -> dict:
                 "baseline_ref": request["baseline_ref"],
                 "role": request["role"],
                 "case_id": request["case_id"],
-                "experiment_ref": request["experiment_ref"],
-                "correctness_ref": request["correctness_ref"],
             }
         )
+        if request["role"] == "candidate":
+            result.update({"experiment_ref": request["experiment_ref"], "correctness_ref": request["correctness_ref"]})
     return result
 
 
@@ -584,7 +588,7 @@ def _worker_main() -> int:
     request, started = _strict_json(invocation / "request.json"), time.monotonic()
     result = _base_result(request, time.time())
     try:
-        if request.get("tool_identity") != _tool_identity():
+        if request.get("tool_identity") != _tool_identity(request["operation"]):
             raise NsysError("tool_identity_changed", "implementation changed before analysis")
         if request["operation"] == "collect":
             _collect_worker(request, root, invocation, result)

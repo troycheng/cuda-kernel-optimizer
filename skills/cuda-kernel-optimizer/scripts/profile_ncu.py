@@ -287,12 +287,14 @@ def _hints(value) -> list[str]:
     return list(value)
 
 
-def _tool_identity() -> dict:
+def _tool_identity(operation: str) -> dict:
+    if operation not in {"analyze", "collect"}:
+        raise NcuError("invalid_ncu_input", "tool identity operation is unsupported")
     implementations = []
-    for name in (
-        "profile_ncu.py", "_invocation_runtime.py", "artifact_store.py",
-        "workload_adapter.py",
-    ):
+    names = ["profile_ncu.py", "_invocation_runtime.py", "artifact_store.py"]
+    if operation == "collect":
+        names.append("workload_adapter.py")
+    for name in names:
         path = Path(__file__).with_name(name)
         implementations.append({"name": name, "sha256": STORE.sha256_file(path)})
     identity = {
@@ -423,7 +425,7 @@ def _frozen_request(request: dict, material: dict) -> dict:
         "report_material": material,
         "kernel_name_hints": request["kernel_name_hints"],
         "resources": request["resources"],
-        "tool_identity": _tool_identity(),
+        "tool_identity": _tool_identity("analyze"),
         "operation_timeout_seconds": request["operation_timeout_seconds"],
         "command_timeout_seconds": request["command_timeout_seconds"],
         "resource_wait_timeout_seconds": request["resource_wait_timeout_seconds"],
@@ -445,19 +447,19 @@ def _frozen_collect_request(request: dict, resolved: dict) -> dict:
         "role": resolved["role"],
         "case_id": resolved["case_id"],
         "variant": resolved["variant"],
-        "experiment_ref": resolved["experiment_ref"],
-        "correctness_ref": resolved["correctness_ref"],
         "driver": resolved["driver"],
         "ncu_tool": resolved["ncu_tool"],
         "kernel_name_hints": request["kernel_name_hints"],
         "resources": resolved["resources"],
-        "tool_identity": _tool_identity(),
+        "tool_identity": _tool_identity("collect"),
         "operation_timeout_seconds": request["operation_timeout_seconds"],
         "command_timeout_seconds": request["command_timeout_seconds"],
         "resource_wait_timeout_seconds": request["resource_wait_timeout_seconds"],
         "cleanup_timeout_seconds": request["cleanup_timeout_seconds"],
         "launch_deadline": request["launch_deadline"],
     }
+    if resolved["role"] == "candidate":
+        frozen.update({"experiment_ref": resolved["experiment_ref"], "correctness_ref": resolved["correctness_ref"]})
     for field in ("absolute_deadline", "retry_of"):
         if field in request:
             frozen[field] = request[field]
@@ -607,9 +609,11 @@ def _revalidate_collect_worker(request: dict, artifact_root: Path) -> dict:
         key: request[key]
         for key in (
             "target_ref", "baseline_ref", "role", "case_id", "variant",
-            "experiment_ref", "correctness_ref", "driver", "ncu_tool", "resources",
+            "driver", "ncu_tool", "resources",
         )
     }
+    if request["role"] == "candidate":
+        expected.update({"experiment_ref": request["experiment_ref"], "correctness_ref": request["correctness_ref"]})
     actual = {key: resolved[key] for key in expected}
     if actual != expected:
         raise NcuError("collection_changed", "frozen collection bindings changed")
@@ -641,10 +645,10 @@ def _base_result(request: dict, started_epoch: float) -> dict:
                 "baseline_ref": request["baseline_ref"],
                 "role": request["role"],
                 "case_id": request["case_id"],
-                "experiment_ref": request["experiment_ref"],
-                "correctness_ref": request["correctness_ref"],
             }
         )
+        if request["role"] == "candidate":
+            result.update({"experiment_ref": request["experiment_ref"], "correctness_ref": request["correctness_ref"]})
     return result
 
 
@@ -796,7 +800,7 @@ def _worker_main() -> int:
     started_mono = time.monotonic()
     result = _base_result(request, started_epoch)
     try:
-        if request.get("tool_identity") != _tool_identity():
+        if request.get("tool_identity") != _tool_identity(request["operation"]):
             result["execution_status"] = "invalid"
             result["stop_reason"] = "tool_identity_changed"
         elif request.get("operation") == "collect":

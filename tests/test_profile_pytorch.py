@@ -215,6 +215,11 @@ class ProfilePyTorchTests(unittest.TestCase):
             self.assertEqual(result["operation"], "collect")
             self.assertEqual(result["execution_status"], "succeeded")
             self.assertEqual(result["measurement_validity"], "valid")
+            self.assertNotIn("experiment_ref", result)
+            self.assertNotIn("correctness_ref", result)
+            frozen_request = json.loads((root / "invocations" / result["invocation_id"] / "request.json").read_text(encoding="utf-8"))
+            self.assertNotIn("experiment_ref", frozen_request)
+            self.assertNotIn("correctness_ref", frozen_request)
             self.assertEqual(result["provenance"]["tool"], {"name": "pytorch_profiler", "version": "2.13.0+cu130"})
             self.assertEqual([item["semantic_id"] for item in result["observations"]], ["pytorch.trace.complete_event"])
             self.assertIn("driver_output", result["provenance"])
@@ -365,6 +370,7 @@ class ProfilePyTorchTests(unittest.TestCase):
             self.assertEqual(result["execution_status"], "succeeded")
             self.assertEqual(result["measurement_validity"], "valid")
             self.assertEqual(result["provenance"]["tool"], {"name": "pytorch_profiler", "version": "2.13.1"})
+            self.assertNotIn("workload_adapter.py", [item["name"] for item in result["provenance"]["tool_identity"]["implementations"]])
             status = profile._status_or_cancel(
                 {"format_version": request["format_version"], "operation": "status", "artifact_root": str(root), "invocation_id": result["invocation_id"]}, "status"
             )

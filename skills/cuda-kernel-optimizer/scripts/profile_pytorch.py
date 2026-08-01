@@ -318,8 +318,13 @@ def parse_chrome_trace(trace: dict, tool_version: str) -> dict:
     }
 
 
-def _tool_identity() -> dict:
-    implementations = [{"name": name, "sha256": STORE.sha256_file(Path(__file__).with_name(name))} for name in ("profile_pytorch.py", "_invocation_runtime.py", "artifact_store.py", "workload_adapter.py")]
+def _tool_identity(operation: str) -> dict:
+    if operation not in {"analyze", "collect"}:
+        raise PyTorchError("invalid_pytorch_input", "tool identity operation is unsupported")
+    names = ["profile_pytorch.py", "_invocation_runtime.py", "artifact_store.py"]
+    if operation == "collect":
+        names.append("workload_adapter.py")
+    implementations = [{"name": name, "sha256": STORE.sha256_file(Path(__file__).with_name(name))} for name in names]
     identity = {"version": "cuda-kernel-optimizer/pytorch-tool-v1", "result_contract": RESULT_VERSION, "implementations": implementations}
     identity["digest"] = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return identity
@@ -391,7 +396,9 @@ def _validate_collect(value) -> tuple[dict, dict]:
 
 
 def _frozen_collect_request(request: dict, resolved: dict) -> dict:
-    frozen = {"operation": "collect", "target_ref": resolved["target_ref"], "baseline_ref": resolved["baseline_ref"], "role": resolved["role"], "case_id": resolved["case_id"], "variant": resolved["variant"], "experiment_ref": resolved["experiment_ref"], "correctness_ref": resolved["correctness_ref"], "driver": resolved["driver"], "resources": resolved["resources"], "torch_version": resolved["torch_version"], "tool_identity": _tool_identity(), "operation_timeout_seconds": request["operation_timeout_seconds"], "command_timeout_seconds": request["command_timeout_seconds"], "resource_wait_timeout_seconds": request["resource_wait_timeout_seconds"], "cleanup_timeout_seconds": request["cleanup_timeout_seconds"], "launch_deadline": request["launch_deadline"]}
+    frozen = {"operation": "collect", "target_ref": resolved["target_ref"], "baseline_ref": resolved["baseline_ref"], "role": resolved["role"], "case_id": resolved["case_id"], "variant": resolved["variant"], "driver": resolved["driver"], "resources": resolved["resources"], "torch_version": resolved["torch_version"], "tool_identity": _tool_identity("collect"), "operation_timeout_seconds": request["operation_timeout_seconds"], "command_timeout_seconds": request["command_timeout_seconds"], "resource_wait_timeout_seconds": request["resource_wait_timeout_seconds"], "cleanup_timeout_seconds": request["cleanup_timeout_seconds"], "launch_deadline": request["launch_deadline"]}
+    if resolved["role"] == "candidate":
+        frozen.update({"experiment_ref": resolved["experiment_ref"], "correctness_ref": resolved["correctness_ref"]})
     for field in ("absolute_deadline", "retry_of"):
         if field in request:
             frozen[field] = request[field]
@@ -401,7 +408,7 @@ def _frozen_collect_request(request: dict, resolved: dict) -> dict:
 
 def analyze(value, *, wait_for_result: bool) -> dict:
     request, root, material = _validate_analyze(value)
-    frozen = {**request, "report_material": material, "tool_identity": _tool_identity()}
+    frozen = {**request, "report_material": material, "tool_identity": _tool_identity("analyze")}
     frozen["request_digest"] = RUNTIME.request_digest(frozen)
     return RUNTIME.submit(root, frozen, [sys.executable, str(Path(__file__).resolve()), "_worker"], wait_for_result)
 
@@ -417,7 +424,9 @@ def _command_spec(argv: list[str], workspace: Path, gpu_uuids: list[str]) -> dic
 
 def _revalidate_collect_worker(request: dict, root: Path) -> dict:
     resolved = _resolve_collect({**request, "artifact_root": str(root)})
-    keys = ("target_ref", "baseline_ref", "role", "case_id", "variant", "experiment_ref", "correctness_ref", "driver", "resources", "torch_version")
+    keys = ("target_ref", "baseline_ref", "role", "case_id", "variant", "driver", "resources", "torch_version")
+    if request["role"] == "candidate":
+        keys += ("experiment_ref", "correctness_ref")
     if {key: resolved[key] for key in keys} != {key: request[key] for key in keys}:
         raise PyTorchError("collection_changed", "frozen collection bindings changed")
     return resolved
@@ -478,9 +487,11 @@ def _worker_main() -> int:
     if request["operation"] == "analyze":
         result["report_ref"] = request["report_ref"]
     else:
-        result.update({"baseline_ref": request["baseline_ref"], "role": request["role"], "case_id": request["case_id"], "experiment_ref": request["experiment_ref"], "correctness_ref": request["correctness_ref"]})
+        result.update({"baseline_ref": request["baseline_ref"], "role": request["role"], "case_id": request["case_id"]})
+        if request["role"] == "candidate":
+            result.update({"experiment_ref": request["experiment_ref"], "correctness_ref": request["correctness_ref"]})
     try:
-        if request.get("tool_identity") != _tool_identity():
+        if request.get("tool_identity") != _tool_identity(request["operation"]):
             raise PyTorchError("tool_identity_changed", "implementation changed before analysis")
         if request["operation"] == "collect":
             _collect_worker(request, root, invocation, result)

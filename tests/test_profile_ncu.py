@@ -227,6 +227,11 @@ class ProfileNcuTests(unittest.TestCase):
             self.assertEqual(result["operation"], "collect")
             self.assertEqual(result["execution_status"], "succeeded")
             self.assertEqual(result["measurement_validity"], "valid")
+            self.assertNotIn("experiment_ref", result)
+            self.assertNotIn("correctness_ref", result)
+            frozen_request = json.loads((root / "invocations" / result["invocation_id"] / "request.json").read_text(encoding="utf-8"))
+            self.assertNotIn("experiment_ref", frozen_request)
+            self.assertNotIn("correctness_ref", frozen_request)
             self.assertEqual(
                 [item["semantic_id"] for item in result["observations"]],
                 [
@@ -477,6 +482,7 @@ class ProfileNcuTests(unittest.TestCase):
             result = json.loads(completed.stdout)
             self.assertEqual(result["measurement_validity"], "valid")
             self.assertEqual(result["provenance"]["tool"]["version"], "2026.2.1")
+            self.assertNotIn("workload_adapter.py", [item["name"] for item in result["provenance"]["tool_identity"]["implementations"]])
             self.assertFalse((root / "objects" / "sha256" / report_object["digest"] / "payload" / "report.csv").samefile(report))
 
 
