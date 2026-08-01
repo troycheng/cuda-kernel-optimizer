@@ -964,13 +964,18 @@ def _status_from_dir(invocation_dir: Path) -> dict:
                         "elapsed_seconds": max(0.0, time.time() - created),
                         "cleanup_status": "pending",
                     }
-            return {
-                "query_status": "worker_lost",
-                "invocation_id": invocation_id,
-                "elapsed_seconds": max(0.0, time.time() - created),
-                "cleanup_status": "unknown",
-                "stop_reason": "worker_lost",
-            }
+            guardian_finished = _latest_event(invocation_dir, "guardian_finished")
+            if (
+                guardian_finished is None
+                or guardian_finished.get("result_published") is not True
+            ):
+                return {
+                    "query_status": "worker_lost",
+                    "invocation_id": invocation_id,
+                    "elapsed_seconds": max(0.0, time.time() - created),
+                    "cleanup_status": "unknown",
+                    "stop_reason": "worker_lost",
+                }
         result = _read_json(result_path)
         active = invocation_dir / "active-child.json"
         cleanup_status = result.get("cleanup_status", "unknown")

@@ -320,6 +320,61 @@ class InvocationProbeTests(unittest.TestCase):
             )
             self.assertEqual(runtime.status(root, invocation_id)["query_status"], "completed")
 
+    def test_status_rechecks_terminal_event_after_observing_guardian_exit(self) -> None:
+        runtime = _load_runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invocation_id = "inv-" + "b" * 32
+            invocation = root / "invocations" / invocation_id
+            invocation.mkdir(parents=True)
+            now = time.time()
+            runtime._create_json(
+                invocation / "request.json",
+                {"created_at_epoch": now, "launch_deadline": now + 10.0},
+            )
+            runtime._create_json(
+                invocation / "result.json",
+                {
+                    "execution_status": "succeeded",
+                    "cleanup_status": "confirmed",
+                    "finished_at_epoch": now,
+                },
+            )
+            runtime._create_json(
+                invocation / "worker.json",
+                {
+                    "guardian_pid": 99999998,
+                    "guardian_start_token": "missing",
+                    "worker_pid": 99999999,
+                    "worker_start_token": "missing",
+                },
+            )
+            actual_latest_event = runtime._latest_event
+            calls = 0
+
+            def finish_between_event_and_process_checks(path, event_name):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    runtime._append_event(
+                        invocation,
+                        "guardian_finished",
+                        worker_returncode=0,
+                        result_published=True,
+                    )
+                    return None
+                return actual_latest_event(path, event_name)
+
+            with mock.patch.object(
+                runtime,
+                "_latest_event",
+                side_effect=finish_between_event_and_process_checks,
+            ):
+                current = runtime.status(root, invocation_id)
+
+            self.assertEqual(current["query_status"], "completed")
+            self.assertIn("result_ref", current)
+
     def test_worker_launch_source_drift_is_rejected_before_exec(self) -> None:
         runtime = _load_runtime()
         with tempfile.TemporaryDirectory() as directory:
