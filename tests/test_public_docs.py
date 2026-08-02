@@ -17,6 +17,9 @@ PUBLIC_PAGES = (
     "docs/validation.md",
     "docs/case-studies.md",
     "docs/knowledge-and-research.md",
+    "docs/project-evolution.md",
+    "docs/project-evolution.en.md",
+    "docs/evolution-case-profiler-evidence-validation.md",
 )
 
 
@@ -142,6 +145,18 @@ class PublicDocsTests(unittest.TestCase):
         self.assertIn("complete evidence", text)
         self.assertIn("not as a positive public performance case", text)
         self.assertNotRegex(text, r"\d+(?:\.\d+)?%")
+
+    def test_project_evolution_routes_language_and_public_case(self) -> None:
+        text = (ROOT / "docs/project-evolution.md").read_text(encoding="utf-8")
+        english = (ROOT / "docs/project-evolution.en.md").read_text(encoding="utf-8")
+        self.assertIn("project-evolution.en.md", text)
+        self.assertIn("evolution-case-profiler-evidence-validation.md", text)
+        for page in (text, english):
+            self.assertNotIn("../.github", page)
+            self.assertIn(
+                "https://github.com/troycheng/cuda-kernel-optimizer/tree/main/.github/evolution",
+                page,
+            )
 
     def test_internal_history_is_not_public_documentation(self) -> None:
         self.assertFalse((ROOT / "maintainers").exists())

@@ -171,6 +171,7 @@ artifacts/
 - [长时间优化](docs/long-running-optimization.md)
 - [证据与安全](docs/evidence-and-safety.md)
 - [知识、检索与外部质证](docs/knowledge-and-research.md)
+- [项目如何从真实使用中改进](docs/project-evolution.md)
 - [兼容性](docs/compatibility.md)
 - [AI 执行协议](skills/cuda-kernel-optimizer/SKILL.md)
 - [完整示例](skills/cuda-kernel-optimizer/examples/walkthrough.md)

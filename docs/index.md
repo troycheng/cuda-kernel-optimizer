@@ -15,6 +15,9 @@ Start with the [Chinese README](../README.md) or [English README](../README.en.m
 - [Validation records](validation.md): see what the project itself has tested.
 - [Case studies](case-studies.md): review historical workload outcomes without treating them as predictions.
 - [Knowledge and research](knowledge-and-research.md): understand offline knowledge, current-source search, and external challenge.
+- [Project evolution](project-evolution.md): learn how real use becomes a bounded, evidence-backed project change.
+- [Project evolution in English](project-evolution.en.md): read the English contribution guide.
+- [Evolution case](evolution-case-profiler-evidence-validation.md): review a deterministic profiler-validation fix, not a performance example.
 - AI execution protocol: read `skills/cuda-kernel-optimizer/SKILL.md` from the installed release, so the instructions match the installed code.
 
 A result is usable only when its claim matches the supplied evidence. Source inspection supports a hypothesis; a stable kernel test supports a kernel claim; a representative workload supports an end-to-end claim; a controlled serving experiment supports a serving claim.
