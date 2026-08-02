@@ -150,6 +150,13 @@ A change is ready to merge only when correctness passes, the user's real target 
 
 ## Release notes
 
+### V1.4.1
+
+- Added a project-evolution contribution process for turning problems found in real use into reviewable cases, evaluation results, and release decisions.
+- Added four lightweight templates: Case Snapshot, Evaluation Definition, Evaluation Result, and Release Decision. They do not upload material, admit knowledge, submit code, or publish releases automatically.
+- Published the first replay case for Profiler evidence-object validation, separating confirmed tool behavior from unsupported performance or generality claims.
+- Updated the contribution guide, pull request checks, and documentation tests. The V1.4 runtime, installed skill, knowledge base, and optimization decision model are unchanged.
+
 ### V1.4.0
 
 - Made ChatGPT the only optimization decision maker and removed automatic planning, global workflow state, and duplicate execution entry points.
