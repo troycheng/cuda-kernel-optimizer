@@ -169,6 +169,7 @@ See [GitHub Releases](https://github.com/troycheng/cuda-kernel-optimizer/release
 - [Long-running optimization](docs/long-running-optimization.md)
 - [Evidence and safety](docs/evidence-and-safety.md)
 - [Knowledge, research, and external review](docs/knowledge-and-research.md)
+- [How real use improves the project](docs/project-evolution.en.md)
 - [Compatibility](docs/compatibility.md)
 - [AI execution protocol](skills/cuda-kernel-optimizer/SKILL.md)
 - [Complete walkthrough](skills/cuda-kernel-optimizer/examples/walkthrough.md)

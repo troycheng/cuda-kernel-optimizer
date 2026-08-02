@@ -18,6 +18,9 @@ nav:
   - Validation Status: validation.md
   - Case Studies: case-studies.md
   - Knowledge & Research: knowledge-and-research.md
+  - Project Evolution: project-evolution.md
+  - Project Evolution (English): project-evolution.en.md
+  - Evolution Case: evolution-case-profiler-evidence-validation.md
 
 extra_css:
   - stylesheets/extra.css

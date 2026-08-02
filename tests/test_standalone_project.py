@@ -78,16 +78,24 @@ class StandaloneProjectTests(unittest.TestCase):
             ".github/ISSUE_TEMPLATE/bug_report.yml",
             ".github/ISSUE_TEMPLATE/feature_request.yml",
             ".github/pull_request_template.md",
+            ".github/evolution/case-snapshot.md",
+            ".github/evolution/evaluation-definition.md",
+            ".github/evolution/evaluation-result.md",
+            ".github/evolution/release-decision.md",
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
+        contributing = (ROOT / "CONTRIBUTING.md").read_text("utf-8")
         self.assertIn(
             "python3 -m unittest discover -s tests",
-            (ROOT / "CONTRIBUTING.md").read_text("utf-8"),
+            contributing,
         )
+        self.assertIn("Project evolution", contributing)
         pull_request_template = (ROOT / ".github/pull_request_template.md").read_text(
             "utf-8"
         )
         self.assertIn("Staged installation self-check passes", pull_request_template)
+        self.assertIn("private material", pull_request_template.lower())
+        self.assertIn("Evaluation Definition", pull_request_template)
         self.assertNotIn("Installed-skill tests pass", pull_request_template)
 
     def test_ci_runs_current_release_gate_on_supported_python(self) -> None:
