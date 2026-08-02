@@ -70,11 +70,6 @@ ChatGPT 指令、知识和方向判断使用行为评测：固定模型、环境
 
 ## 模板和示例
 
-贡献模板：
-
-- [案例快照](../.github/evolution/case-snapshot.md)
-- [评测定义](../.github/evolution/evaluation-definition.md)
-- [评测结果](../.github/evolution/evaluation-result.md)
-- [发布决定](../.github/evolution/release-decision.md)
+四个模板位于仓库的 [`.github/evolution`](https://github.com/troycheng/cuda-kernel-optimizer/tree/main/.github/evolution) 目录：`case-snapshot.md`、`evaluation-definition.md`、`evaluation-result.md` 和 `release-decision.md`。贡献入口跟随主仓库更新，不随已安装 skill 进入用户项目。
 
 首个公开示例是一次 [Profiler 证据对象校验修复](evolution-case-profiler-evidence-validation.md)。它展示怎样回放确定性工具缺陷，也明确说明回溯证据不能支持哪些结论。

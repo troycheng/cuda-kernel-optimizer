@@ -70,9 +70,6 @@ Local evidence supports a local claim. A tool fix does not prove a performance g
 
 ## Templates and example
 
-- [Case Snapshot](../.github/evolution/case-snapshot.md)
-- [Evaluation Definition](../.github/evolution/evaluation-definition.md)
-- [Evaluation Result](../.github/evolution/evaluation-result.md)
-- [Release Decision](../.github/evolution/release-decision.md)
+The four templates live in the repository's [`.github/evolution`](https://github.com/troycheng/cuda-kernel-optimizer/tree/main/.github/evolution) directory: `case-snapshot.md`, `evaluation-definition.md`, `evaluation-result.md`, and `release-decision.md`. The contribution surface follows the main repository and is not installed into a user's project with the skill.
 
 The first public example is the [profiler evidence-object validation fix](evolution-case-profiler-evidence-validation.md). It shows a deterministic conformance replay and the limits of retrospective evidence.
