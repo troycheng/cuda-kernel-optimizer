@@ -48,11 +48,19 @@ If these inputs are incomplete, ChatGPT reports the gaps and helps establish the
 
 ### Install
 
-ChatGPT's coding environment performs the installation. Users do not need to run the repository's Python scripts manually. Send:
+In an environment that supports Skills CLI, install the current release directly:
+
+```bash
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.4.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+```
+
+ChatGPT can also perform the installation, so users do not need to run the repository's Python scripts manually. Send:
 
 > Install `skills/cuda-kernel-optimizer` from the latest published release of [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer). Install only that skill into the active skills directory. When replacing an existing version, keep its backup outside the active skills directory so only one skill with this name is loaded. Run the CPU/static self-check and report the installed tag, commit, and destination. Do not use `main` unless I ask.
 
 Start a new session after installation so the skill instructions reload. The self-check verifies the package structure only; it does not prove that the target GPU, workload, or profiler is ready.
+
+The project is also listed on [skills.sh](https://skills.sh/troycheng/cuda-kernel-optimizer/cuda-kernel-optimizer), with its installation entry and basic security scan results.
 
 ### Run a ten-minute fit check
 
@@ -180,5 +188,6 @@ See [GitHub Releases](https://github.com/troycheng/cuda-kernel-optimizer/release
 - [Compatibility](docs/compatibility.md)
 - [AI execution protocol](skills/cuda-kernel-optimizer/SKILL.md)
 - [Complete walkthrough](skills/cuda-kernel-optimizer/examples/walkthrough.md)
+- [GitHub Discussions](https://github.com/troycheng/cuda-kernel-optimizer/discussions): share workloads, cases, and optimization directions
 
 License: [MIT License](LICENSE). This project is independent of CUDA, CUTLASS, Triton, and NVIDIA Nsight. Use those dependencies under their respective licenses.
