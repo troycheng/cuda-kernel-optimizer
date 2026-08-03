@@ -2,6 +2,12 @@
 
 ## Install with ChatGPT
 
+In an environment that supports Skills CLI, install the current release directly:
+
+```bash
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.4.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+```
+
 The user does not run repository scripts manually. Send this request in a ChatGPT coding session:
 
 > Install `skills/cuda-kernel-optimizer` from the latest published release tag of [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer). Install only that skill into the active skills directory. When replacing an existing version, keep its backup outside the active skills directory so only one skill with this name is loaded. Run the CPU/static self-check and report the tag, commit, and destination. Do not use the moving `main` branch unless I ask.

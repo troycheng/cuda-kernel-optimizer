@@ -48,11 +48,19 @@
 
 ### 安装
 
-安装由 ChatGPT 的编程环境完成，用户不需要手工运行仓库内的 Python 脚本。可以直接发送：
+支持 Skills CLI 的环境可以直接安装当前正式版：
+
+```bash
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.4.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+```
+
+也可以让 ChatGPT 完成安装，用户不需要手工运行仓库内的 Python 脚本。直接发送：
 
 > 从 [troycheng/cuda-kernel-optimizer](https://github.com/troycheng/cuda-kernel-optimizer) 的最新正式版本安装 `skills/cuda-kernel-optimizer`。只安装到当前 skills 目录；如需替换已有版本，先把旧目录备份到当前 skills 目录之外，避免加载两个同名 skill。执行 CPU/static self-check，并报告安装标签、commit 和目标目录。除非我明确要求，否则不要使用 `main`。
 
 安装完成后开启新会话，使 skill 指令重新加载。self-check 只验证安装包结构，不代表目标 GPU、workload 或 profiler 已经可用。
+
+项目也收录在 [skills.sh](https://skills.sh/troycheng/cuda-kernel-optimizer/cuda-kernel-optimizer)，可查看安装入口和基础安全扫描结果。
 
 ### 先做十分钟检查
 
@@ -182,5 +190,6 @@ artifacts/
 - [兼容性](docs/compatibility.md)
 - [AI 执行协议](skills/cuda-kernel-optimizer/SKILL.md)
 - [完整示例](skills/cuda-kernel-optimizer/examples/walkthrough.md)
+- [GitHub Discussions](https://github.com/troycheng/cuda-kernel-optimizer/discussions)：交流 workload、案例和优化方向
 
 许可证：[MIT License](LICENSE)。本项目独立于 CUDA、CUTLASS、Triton 和 NVIDIA Nsight；相关依赖遵循各自许可证。
