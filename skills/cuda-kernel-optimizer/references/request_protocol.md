@@ -90,6 +90,9 @@ runtime limit，并提供短期 `launch_deadline`。可选的 `absolute_deadline
 driver 输入输出协议以 `templates/workload_driver_request.schema.json`、
 `templates/workload_driver_result.schema.json` 和 `templates/workload_driver.py` 为准。
 V1.4 只支持留在 Invocation 进程组内的任务，不支持远端或脱离进程组的后台任务。
+optimization readiness 只支持 combined driver；最小 smoke 在 request 的开放 `sampling`
+对象中发送 `{"kind":"smoke","repetitions":2}`。driver result 的 primary 和全部 constraints
+必须与 request objective 的名称、unit 和集合精确一致，每组 samples 必须恰好有两个值。
 
 只有现成报告或编译产物时使用 diagnostic Target：
 
@@ -132,6 +135,13 @@ V1.4 只支持留在 Invocation 进程组内的任务，不支持远端或脱离
   "launch_deadline": "<current epoch seconds + 60>"
 }
 ```
+
+新建的 combined Target 在 baseline 对每个 case 只调用 driver 一次；driver 必须在一次 result 中返回
+`samples_per_case` 个 primary 样本，以及数量相同的每项 constraint 样本。样本数、名称、unit
+或 constraint 集合不一致时，第一次 result 即失败，不能进入聚合。额外诊断写入已声明 artifact
+或 driver 日志，不能混入 measurements.constraints。evaluator 仍可读取已冻结的旧 separate Target；
+该兼容路径会对每个 case 分别调用 correctness 和 measure，共 `2 × C` 次，不代表 readiness
+仍能新建 separate optimization Target。
 
 `experiment` 是同步记录操作，不含 runtime limit：
 
@@ -182,6 +192,10 @@ V1.4 只支持留在 Invocation 进程组内的任务，不支持远端或脱离
 
 把 `operation` 改为 `screen` 可做初筛；改为 `final_audit` 时删除 `experiment_ref`。
 正式比较的 `pairs` 不得低于 Target 的 `minimum_pairs`。
+combined driver 的 baseline 调用数为 `C`，screen 调用数为 `2 × P × C`；正式 target 或
+final audit 还会先对两个 Variant 各做一次每-case 精度调用，因此总数为
+`2 × C + 2 × P × C`。其中 `C` 是 case 数、`P` 是 pairs；单 case、3 pairs 的正式调用为
+8 次。readiness smoke 另计一次。
 
 ## profiler
 

@@ -60,8 +60,11 @@ def run_correctness(request: dict) -> dict:
 def run_measurements(request: dict) -> dict:
     """Return primary and constraint sample arrays from the real workload.
 
-    TODO: run the user's actual measurement.  All samples must be finite and
-    the returned units must be the units actually observed.
+    Resolve the full frozen case from request["case"]["id"].  For readiness,
+    return request["sampling"]["repetitions"] samples; for baseline, return
+    request["sampling"]["samples_per_case"] samples.  Primary and constraint
+    names and units must exactly match request["objective"].  Put extra
+    diagnostics in declared artifacts or logs, not measurements.constraints.
     """
     raise NotImplementedError("TODO: implement run_measurements for this workload")
 

@@ -51,7 +51,7 @@
 支持 Skills CLI 的环境可以直接安装当前正式版：
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.4.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.4.2/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 也可以让 ChatGPT 完成安装，用户不需要手工运行仓库内的 Python 脚本。直接发送：
@@ -159,6 +159,13 @@ artifacts/
 [验证记录](docs/validation.md)说明自动化检查和实际 GPU 覆盖；[案例](docs/case-studies.md)只记录带原始证据的历史结果。两者都不预测新项目一定能获得多少收益。
 
 ## 版本说明
+
+### V1.4.2
+
+- 新建 optimization Target 时只接受 combined readiness，并以两样本 smoke 精确校验指标名称、单位、constraint 集合和样本数；旧 separate Target 仍可由 evaluator 读取。
+- baseline 严格执行 `samples_per_case`，并在现有错误表面保留具体 contract code、字段差异、return code、截断输出和 cleanup 状态。
+- 候选前和正式 target 前显式核对 profile 的 Target、Variant、请求 slice、phase、coverage、系统归因和端到端收益上限；共享宿主机缺少连续、时间对齐的资源观测时，性能结论标为 inconclusive。
+- 补充 live workload 成本说明、子智能体单写者边界、完整 Handoff，以及公开的前瞻评测定义和独立结果。本版本不声称 GPU 性能提升。
 
 ### V1.4.1
 

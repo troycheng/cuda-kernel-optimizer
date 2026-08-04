@@ -77,8 +77,46 @@ class SkillMetadataTests(unittest.TestCase):
         self.assertIn("知识查询只返回匹配材料或空结果", self.prose)
         self.assertIn("空结果不会阻止源码分析", self.prose)
 
+    def test_profile_facts_require_system_attribution_before_a_candidate(self) -> None:
+        for marker in (
+            "系统级归因",
+            "主要 measured time",
+            "未归因部分",
+            "比较可行的 subsystem 方向",
+            "coverage 已知时界定端到端收益上限",
+            "最低成本观测",
+            "证据不适用时，只保留 diagnostic hypothesis",
+        ):
+            self.assertIn(marker, self.prose)
+
+    def test_shared_host_subagents_and_handoff_have_bounded_behavior(self) -> None:
+        for marker in (
+            "正式样本窗口重叠",
+            "性能归因 inconclusive",
+            "唯一写者",
+            "使用最低足够能力",
+            "正式共享 GPU 实验不并行",
+            "局部结果到端到端目标的解释",
+            "skill friction/feedback",
+        ):
+            self.assertIn(marker, self.prose)
+
+    def test_live_cost_profile_recheck_and_resource_watch_fail_closed(self) -> None:
+        for marker in (
+            "首次 live workload 前",
+            "当前完成点",
+            "每次新 profiler 事实",
+            "进入正式 target 前无条件",
+            "观测缺失或中断",
+            "Champion 或 Original",
+            "未覆盖风险",
+        ):
+            self.assertIn(marker, self.prose)
+
     def test_external_search_and_ai_are_optional_and_local_evidence_decides(self) -> None:
         self.assertIn("外部搜索和第三方 AI 质证是可选的研究手段", self.prose)
+        self.assertIn("挑战问题定义、假设和证据遗漏", self.prose)
+        self.assertIn("外部模型不批准候选，也不接管执行", self.prose)
         self.assertIn("本地精度与测量证据决定", self.prose)
 
     def test_every_referenced_skill_path_exists(self) -> None:

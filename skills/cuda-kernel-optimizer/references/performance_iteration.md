@@ -8,7 +8,19 @@ readiness 通过后，先执行 `workload_evaluate.py baseline`。原始业务�
 
 ## 2. 冻结 Experiment
 
-先完成源码静态审查或独立小测试；已经证伪时不创建候选。调用
+每次新 profiler 事实用于候选判断前，先确认它与 Target、Variant、case/request slice、并发、phase 和环境身份一致，
+并区分 steady、capture、warmup、mixed 与 unknown。随后用系统级归因回答：主要 measured time
+分布在哪些 subsystem，哪些时间未归因，还有哪些合理方向，为什么当前方向更值得验证。成本或
+可行性没有证据时写 unknown，不凭局部热点臆测 ROI。
+
+若候选只覆盖完整 workload 的一部分，令 `f` 为该部分占完整 workload 时间的比例，`r` 为候选
+使该部分延迟下降的比例，则理想化吞吐收益上限为 `1 / (1 - f × r) - 1`。局部结果给出相对
+吞吐增幅 `g` 时，换算 `r = g / (1 + g)`；例如 `g = 19.3%` 时 `r ≈ 16.2%`。若给出的是
+`k` 倍加速，则换算 `r = (k - 1) / k`。该式忽略额外 launch、同步、CPU 和通信成本，只能作为上限。
+coverage unknown 时，先选择最低成本 coverage 观测或端到端证伪；上限低于 minimum effect 时
+不创建 Experiment。
+
+再完成源码静态审查或独立小测试；已经证伪时不创建候选。调用
 `workload_evaluate.py experiment` 前，至少说明：
 
 - 机制与预期影响；
@@ -34,6 +46,14 @@ readiness 通过后，先执行 `workload_evaluate.py baseline`。原始业务�
 6. 完整服务测试。
 
 `screen` 从精度校验开始执行 Experiment 中声明的低成本测量路径。前一项已足以拒绝候选时，不启动后续昂贵动作。`conservative_bound` 只有在预先说明它为何约束正式目标，并实际证明收益上限低于 minimum effect 时才能拒绝。`diagnostic_proxy` 只检验声明的局部机制；低代理收益或样本不足不能单独否定完整 workload，ChatGPT 根据该主张、其它证据和正式测试成本决定是否继续。profiler 不是固定阶段；只有它能区分仍然竞争的解释时才值得运行。
+
+每次进入正式 `target` 前，无条件简短复核 Target、Variant、case/request slice、phase、coverage、
+收益上限和 ROI。若其间取得新 profiler 事实，重新完成上一节的系统级归因，而不是沿用旧候选理由。
+
+共享宿主机在正式性能采样前启动低频、只读的 CPU/GPU 观测，持续到采样结束，并保存与样本
+时间对齐的原始输出。观测缺失、中断，或出现与样本窗口重叠、达到用户或环境规则给出的影响阈值
+且无法解释的污染时，性能结果标为 environment-inconclusive；correctness 结果仍独立保留。
+瞬时或非重叠异常不限制性能归因。正式共享 GPU 实验保持串行，周期采样交给确定性命令。
 
 涉及越界访问、向量化或异步拷贝时，将 `compute-sanitizer memcheck` 纳入 screen；涉及 shared memory、多阶段 pipeline、barrier、warp specialization、原子操作或跨 stream 同步时，再按风险加入 `racecheck`、`initcheck` 或 `synccheck`。这些检查由 Experiment 显式声明，不由机制名称自动触发，也不能替代业务精度校验。
 

@@ -51,7 +51,7 @@ If these inputs are incomplete, ChatGPT reports the gaps and helps establish the
 In an environment that supports Skills CLI, install the current release directly:
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.4.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.4.2/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 ChatGPT can also perform the installation, so users do not need to run the repository's Python scripts manually. Send:
@@ -157,6 +157,13 @@ A change is ready to merge only when correctness passes, the user's real target 
 [Validation records](docs/validation.md) describe automated checks and physical GPU coverage. [Case studies](docs/case-studies.md) retain only historical results with original evidence. Neither predicts the gain of a new project.
 
 ## Release notes
+
+### V1.4.2
+
+- New optimization Targets now require combined readiness with a two-sample smoke that exactly closes metric names, units, the constraint set, and sample counts. The evaluator can still read frozen legacy separate Targets.
+- Baseline now enforces `samples_per_case` and preserves the exact contract code, field difference, return code, bounded output, and cleanup status on existing error surfaces.
+- Candidate and formal-target decisions explicitly recheck profile Target, Variant, request slice, phase, coverage, system attribution, and the idealized end-to-end ceiling. Missing continuous, time-aligned shared-host resource evidence makes performance inconclusive.
+- Added live-workload cost disclosure, the subagent single-writer boundary, complete Handoff requirements, and a prospective public evaluation definition with independent results. This release makes no GPU performance claim.
 
 ### V1.4.1
 
