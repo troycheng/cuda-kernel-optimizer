@@ -209,9 +209,9 @@ No private material was uploaded, evaluated, or used as public proof.
 
 ### Human decision
 
-On 2026-08-04, the maintainer authorized publishing this bounded revision to
-GitHub and the internal review remote. This accepts the change for review; it
-does not authorize an automatic merge, version tag, or package release.
+On 2026-08-04, the maintainer first authorized publishing this bounded revision
+to GitHub and the internal review remote, then explicitly authorized merging
+both default branches and publishing release `v1.4.2`.
 
 ### Evidence reviewed and accepted scope
 
@@ -228,8 +228,11 @@ compatibility claim was accepted.
 
 - GitHub draft pull request:
   `https://github.com/troycheng/cuda-kernel-optimizer/pull/5`
-- Internal review branch:
-  `agent/readiness-measurement-closure` targeting `main`
+- GitHub release:
+  `https://github.com/troycheng/cuda-kernel-optimizer/releases/tag/v1.4.2`
+- Internal merge request: `#1` on the internal review remote
+- Internal release tag: `v1.4.2`
 
-Merge, tag, release, withdrawal, or rollback remains an explicit later human
-decision on the corresponding carrier.
+The release tag points to the public release commit. The internal `main` keeps
+its repository-specific history and merges that same release commit. Any later
+withdrawal or rollback requires another explicit human decision.

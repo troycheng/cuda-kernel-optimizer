@@ -214,6 +214,7 @@ class ReadmeSyncTests(unittest.TestCase):
                 "result.json",
                 "champion/",
                 "handoff.md",
+                "### V1.4.2",
                 "### V1.4.1",
                 "### V1.4.0",
             ):
