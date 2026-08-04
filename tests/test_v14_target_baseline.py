@@ -71,7 +71,7 @@ class TargetBaselineBlackBoxTests(unittest.TestCase):
             self.assertIn("target_not_optimizable", baseline.stderr)
             self.assertEqual(project.driver_events(), [])
 
-    def test_failed_correctness_does_not_start_baseline_measurement(self) -> None:
+    def test_failed_correctness_invalidates_combined_baseline_measurement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = V14Project(Path(directory))
 
@@ -104,10 +104,7 @@ class TargetBaselineBlackBoxTests(unittest.TestCase):
             baseline_result = decode_stdout(baseline)
             self.assertEqual(baseline_result["measurement_validity"], "invalid")
             self.assertEqual(baseline_result["verdict"], "failed")
-            self.assertIn(
-                "measure",
-                baseline_result["skipped_expensive_stages"],
-            )
+            self.assertEqual(baseline_result["skipped_expensive_stages"], [])
 
             baseline_events = [
                 event
@@ -116,7 +113,7 @@ class TargetBaselineBlackBoxTests(unittest.TestCase):
             ]
             self.assertEqual(
                 [event["mode"] for event in baseline_events],
-                ["correctness"],
+                ["combined"],
             )
 
     def test_driver_pass_status_cannot_override_frozen_correctness_rule(self) -> None:
@@ -142,7 +139,70 @@ class TargetBaselineBlackBoxTests(unittest.TestCase):
                 for event in project.driver_events()
                 if event["execution_id"] != checked["probe_id"]
             ]
-            self.assertEqual([event["mode"] for event in events], ["correctness"])
+            self.assertEqual([event["mode"] for event in events], ["combined"])
+
+    def test_baseline_rejects_sample_count_mismatch_before_aggregation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = V14Project(Path(directory))
+            project.set_behavior(original_samples=[10.0, 10.1])
+            readiness = project.readiness_input()
+            readiness["driver"]["execution_mode"] = "combined"
+            readiness["smoke"]["mode"] = "combined"
+            checked = project.run_tool("readiness.py", "check", readiness)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+
+            project.set_behavior(original_samples=[10.0])
+            baseline_request = project.baseline_input()
+            baseline_request["sampling_design"]["samples_per_case"] = 3
+            baseline = project.run_tool(
+                "workload_evaluate.py",
+                "baseline",
+                baseline_request,
+                wait=True,
+            )
+
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            result = decode_stdout(baseline)
+            self.assertEqual(result["execution_status"], "failed")
+            self.assertEqual(result["measurement_validity"], "invalid")
+            self.assertEqual(result["stop_reason"], "sample_count_mismatch")
+            self.assertEqual(len(result["command_receipts"]), 1)
+            command_result = result["command_receipts"][0]["command_result"]
+            self.assertEqual(command_result["stop_reason"], "sample_count_mismatch")
+            self.assertIn(
+                "path=measurements.primary.samples expected=3 observed=1",
+                command_result["stderr"],
+            )
+
+    def test_baseline_preserves_exact_constraint_contract_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = V14Project(Path(directory))
+            project.check()
+            project.set_behavior(
+                constraints=[
+                    {
+                        "name": "p99_ttft",
+                        "unit": "ms",
+                        "samples": [2.0, 2.1],
+                    }
+                ]
+            )
+
+            baseline = project.run_tool(
+                "workload_evaluate.py",
+                "baseline",
+                project.baseline_input(),
+                wait=True,
+            )
+
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            result = decode_stdout(baseline)
+            self.assertEqual(result["stop_reason"], "constraint_metric_mismatch")
+            command_result = result["command_receipts"][0]["command_result"]
+            self.assertEqual(
+                command_result["stop_reason"], "constraint_metric_mismatch"
+            )
+            self.assertIn("observed=['p99_ttft']", command_result["stderr"])
 
 
 if __name__ == "__main__":

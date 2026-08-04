@@ -43,7 +43,10 @@
     "driver_identity": {"$ref": "#/$defs/sha256"},
     "environment": {"$ref": "#/$defs/environment"},
     "correctness": {"$ref": "#/$defs/correctness"},
-    "measurements": {"$ref": "#/$defs/measurements"}
+    "measurements": {
+      "$ref": "#/$defs/measurements",
+      "description": "Names, units, constraint set, and sample counts must exactly close the originating request objective and sampling instruction."
+    }
   },
   "allOf": [
     {

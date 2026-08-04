@@ -1578,11 +1578,18 @@ def _driver_call(
             driver_request,
             bundle_manifest=output_manifest,
         )
+        if "measurements" in driver_result:
+            ADAPTER.validate_measurement_contract(
+                driver_result["measurements"],
+                driver_request["objective"],
+                driver_request["sampling"],
+            )
     except (OSError, ValueError) as error:
+        stop_reason = getattr(error, "code", "driver_result_invalid")
         invalid = {
             **command_result,
             "status": "failed",
-            "stop_reason": "driver_result_invalid",
+            "stop_reason": stop_reason,
             "stderr": str(error)[:1024],
         }
         return None, invalid, {
@@ -1822,14 +1829,6 @@ def _run_baseline_worker(
             )
 
     primary = target["primary_metric"]
-    for measurement in measurements:
-        try:
-            _measurement_values({"measurements": measurement}, target)
-        except EvaluatorError:
-            result["correctness_receipts"] = correctness_receipts
-            result["execution_status"] = "invalid"
-            result["stop_reason"] = "measurement_contract_mismatch"
-            return _finish(result, started_mono=started_mono)
     result["correctness_receipts"] = correctness_receipts
     result["performance_receipt"] = {
         "status": "valid",
@@ -1877,36 +1876,18 @@ def _formal_binding_matches(
 
 def _measurement_values(driver_result: dict, target: dict) -> dict:
     measurements = driver_result["measurements"]
-    primary = target["primary_metric"]
     observed = measurements["primary"]
-    if observed["name"] != primary["name"] or observed["unit"] != primary["unit"]:
-        raise EvaluatorError(
-            "primary_metric_mismatch",
-            "driver primary measurement does not match the Target",
-        )
-    expected_constraints = {
-        constraint["name"]: constraint for constraint in target["constraints"]
-    }
     observed_constraints = {
         constraint["name"]: constraint
         for constraint in measurements["constraints"]
     }
-    if set(expected_constraints) != set(observed_constraints):
-        raise EvaluatorError(
-            "constraint_metric_mismatch",
-            "driver constraint measurements do not match the Target",
-        )
     values = {
         "primary": statistics.median(observed["samples"]),
         "constraints": {},
     }
-    for name, contract in expected_constraints.items():
+    for contract in target["constraints"]:
+        name = contract["name"]
         measurement = observed_constraints[name]
-        if measurement["unit"] != contract["unit"]:
-            raise EvaluatorError(
-                "constraint_unit_mismatch",
-                f"driver constraint unit does not match the Target: {name}",
-            )
         values["constraints"][name] = statistics.median(measurement["samples"])
     return values
 

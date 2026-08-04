@@ -117,7 +117,7 @@ class V14Project:
                     "            'unit': 'ms',",
                     "            'samples': samples,",
                     "        },",
-                    "        'constraints': [],",
+                    "        'constraints': behavior.get('constraints', []),",
                     "    }",
                     "output = Path(request['output_path'])",
                     "temporary = output.with_suffix(output.suffix + '.tmp')",
@@ -137,6 +137,7 @@ class V14Project:
         correctness_by_role=None,
         original_samples=None,
         candidate_samples=None,
+        constraints=None,
     ) -> None:
         write_json(
             self.behavior,
@@ -150,10 +151,11 @@ class V14Project:
                 "correctness_by_role": (
                     {} if correctness_by_role is None else correctness_by_role
                 ),
+                "constraints": [] if constraints is None else constraints,
                 "samples": {
-                    "original": [10.0] if original_samples is None else original_samples,
-                    "reference": [10.0] if original_samples is None else original_samples,
-                    "candidate": [9.0] if candidate_samples is None else candidate_samples,
+                    "original": [10.0, 10.1] if original_samples is None else original_samples,
+                    "reference": [10.0, 10.1] if original_samples is None else original_samples,
+                    "candidate": [9.0, 9.1] if candidate_samples is None else candidate_samples,
                 },
             },
         )
@@ -195,7 +197,7 @@ class V14Project:
             "driver": {
                 "command": [sys.executable, str(self.driver)],
                 "request_argument": "--request",
-                "execution_mode": "separate",
+                "execution_mode": "combined",
                 "protocol_version": "cuda-kernel-optimizer/driver-v1",
                 "profiler_capabilities": [],
                 "side_effects": [],
@@ -214,7 +216,7 @@ class V14Project:
                 "bootstrap_samples": 100,
             },
             "smoke": {
-                "mode": "correctness",
+                "mode": "combined",
                 "case_id": "main",
                 "resources": {"host_id": "local-test", "gpu_uuids": []},
                 "runtime_limits": {
@@ -247,7 +249,7 @@ class V14Project:
             "target_ref": self.target_ref(),
             "sampling_design": {
                 "case_ids": ["main"],
-                "samples_per_case": 1,
+                "samples_per_case": 2,
                 "seed": 0,
             },
             "resources": {"host_id": "local-test", "gpu_uuids": []},

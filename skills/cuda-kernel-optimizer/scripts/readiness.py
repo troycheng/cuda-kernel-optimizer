@@ -154,6 +154,14 @@ def _canonical_bytes(value) -> bytes:
         raise InputError("readiness input must be finite JSON") from error
 
 
+def _bounded_stream(value: str, limit: int = 256) -> str:
+    rendered = repr(value)
+    if len(rendered) <= limit:
+        return rendered
+    marker = "...<truncated>"
+    return rendered[: limit - len(marker)] + marker
+
+
 def _strict_json(path) -> dict:
     raw = STORE.read_regular_bytes(path)
 
@@ -370,6 +378,10 @@ def _validate_input(value) -> dict:
         raise InputError("smoke.case_id is not in test_suite.case_ids")
     STORE._scan_limits(request["scan_limits"])
     driver = ADAPTER.validate_driver(request["driver"])
+    if driver["execution_mode"] != "combined":
+        raise InputError("optimization readiness requires a combined driver")
+    if smoke["mode"] != "combined":
+        raise InputError("optimization readiness requires a combined smoke")
     return {
         **request,
         "artifact_root": str(artifact_root),
@@ -655,7 +667,7 @@ def check(value) -> dict:
             role="original",
             mode=request["smoke"]["mode"],
             case={"id": request["smoke"]["case_id"]},
-            sampling={"kind": "smoke"},
+            sampling={"kind": "smoke", "repetitions": 2},
             output_path=driver_output,
         )
         driver_request_path = smoke_root / "driver-request.json"
@@ -680,7 +692,12 @@ def check(value) -> dict:
         )
         if command_result["status"] != "completed":
             raise InputError(
-                f"driver smoke did not complete: {command_result['stop_reason']}"
+                "driver smoke did not complete: "
+                f"stop_reason={command_result['stop_reason']} "
+                f"returncode={command_result['returncode']!r} "
+                f"stdout={_bounded_stream(command_result['stdout'])} "
+                f"stderr={_bounded_stream(command_result['stderr'])} "
+                f"cleanup_status={command_result['cleanup_status']}"
             )
         smoke_result_object = STORE.freeze_path(
             temporary,
@@ -701,6 +718,11 @@ def check(value) -> dict:
             frozen_smoke_output / "result.json",
             driver_request,
             bundle_manifest=smoke_output_manifest,
+        )
+        ADAPTER.validate_measurement_contract(
+            driver_result["measurements"],
+            driver_request["objective"],
+            driver_request["sampling"],
         )
         correctness = driver_result.get("correctness")
         if correctness is None:

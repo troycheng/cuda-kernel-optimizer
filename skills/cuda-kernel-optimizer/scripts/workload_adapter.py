@@ -1360,6 +1360,104 @@ def _validate_measurements(value) -> dict:
     }
 
 
+class _MeasurementContractError(ValueError):
+    def __init__(self, code: str, path: str, expected, observed) -> None:
+        self.code = code
+        self.path = path
+        self.expected = expected
+        self.observed = observed
+        super().__init__(
+            f"{code} path={path} expected={expected!r} observed={observed!r}"
+        )
+
+
+def validate_measurement_contract(
+    measurements: Mapping,
+    objective: Mapping,
+    sampling: Mapping,
+) -> dict:
+    """Close one normalized measurement result against its exact request."""
+    normalized = _validate_measurements(dict(measurements))
+    objective = _closed(
+        dict(objective), _OBJECTIVE_INPUT_FIELDS, "measurement objective"
+    )
+    primary = objective["primary_metric"]
+    if not isinstance(primary, Mapping):
+        raise ValueError("measurement objective primary_metric must be an object")
+    expected_primary = {
+        "name": primary.get("name"),
+        "unit": primary.get("unit"),
+    }
+    observed_primary = {
+        "name": normalized["primary"]["name"],
+        "unit": normalized["primary"]["unit"],
+    }
+    if observed_primary != expected_primary:
+        raise _MeasurementContractError(
+            "primary_metric_mismatch",
+            "measurements.primary",
+            expected_primary,
+            observed_primary,
+        )
+
+    constraints = objective["constraints"]
+    if type(constraints) is not list or any(
+        not isinstance(item, Mapping) for item in constraints
+    ):
+        raise ValueError("measurement objective constraints must be an object list")
+    expected_constraints = {
+        item.get("name"): item.get("unit") for item in constraints
+    }
+    observed_constraints = {
+        item["name"]: item["unit"] for item in normalized["constraints"]
+    }
+    if set(observed_constraints) != set(expected_constraints):
+        raise _MeasurementContractError(
+            "constraint_metric_mismatch",
+            "measurements.constraints",
+            sorted(expected_constraints),
+            sorted(observed_constraints),
+        )
+    for name, expected_unit in expected_constraints.items():
+        observed_unit = observed_constraints[name]
+        if observed_unit != expected_unit:
+            raise _MeasurementContractError(
+                "constraint_unit_mismatch",
+                f"measurements.constraints[{name!r}].unit",
+                expected_unit,
+                observed_unit,
+            )
+
+    if not isinstance(sampling, Mapping):
+        raise ValueError("measurement sampling must be an object")
+    expected_count = sampling.get("samples_per_case", sampling.get("repetitions"))
+    if expected_count is not None:
+        if (
+            isinstance(expected_count, bool)
+            or not isinstance(expected_count, int)
+            or expected_count < 1
+            or expected_count > _MAX_SAMPLES
+        ):
+            raise ValueError("measurement sampling count is invalid")
+        sample_lists = [("measurements.primary.samples", normalized["primary"]["samples"])]
+        sample_lists.extend(
+            (
+                f"measurements.constraints[{item['name']!r}].samples",
+                item["samples"],
+            )
+            for item in normalized["constraints"]
+        )
+        for path, samples in sample_lists:
+            if len(samples) != expected_count:
+                raise _MeasurementContractError(
+                    "sample_count_mismatch",
+                    path,
+                    expected_count,
+                    len(samples),
+                )
+    return normalized
+
+
 def _validate_environment(value) -> dict:
     environment = _closed(value, _ENVIRONMENT_FIELDS, "driver environment")
     gpu_uuids = environment["gpu_uuids"]

@@ -40,7 +40,7 @@ class InvocationLifecycleBlackBoxTests(unittest.TestCase):
             ]
             self.assertEqual(
                 [(event["operation"], event["mode"]) for event in events],
-                [("baseline", "correctness"), ("baseline", "measure")],
+                [("baseline", "combined")],
             )
             invocation_dirs = list(
                 (project.artifact_root / "invocations").glob("*")
