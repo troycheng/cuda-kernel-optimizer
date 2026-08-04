@@ -137,7 +137,73 @@ all driver compatibility, or improvement across CUDA workloads.
 
 ## Evaluation Result
 
-Pending independent evaluation.
+The bound definition was finalized in
+`fa5c14c149717c9b925692bd1cfc40b0a31bb6ca`. Evaluation then used isolated
+worktrees for Original `27a2e1507b865796ea25666fab367b5592e89e3d` and
+Candidate `726ecb7847e5b9ce30b1eea81d408ea057eee043` on Darwin 25.5.0 arm64 with
+Python 3.9.6.
+
+### Deterministic conformance
+
+- Original: the seven focused tests returned code 1 in 1.946 seconds. Six
+  failed and the valid combined readiness case passed. Original accepted the
+  separate driver, undeclared constraint, readiness sample-count mismatch, and
+  baseline sample-count mismatch; it also compressed command and constraint
+  failures.
+- Candidate: the same seven focused tests returned code 0 in 1.759 seconds.
+  All seven passed.
+- Candidate regression: 242 unit tests passed, 2 were skipped, and the command
+  returned code 0 in 35.140 seconds.
+- Candidate compile check, self-check, skill quick validation, and
+  `git diff --check` each returned code 0. Self-check reported no GPU or network
+  checks, as required by the definition.
+
+The focused evaluator files came unchanged from Candidate. Only production
+source differed between the two focused arms.
+
+### Behavioral trials
+
+All four clean sessions used `gpt-5.6-terra` with high reasoning effort. The
+runtime build identity and token counts were not exposed by the harness. Each
+session remained read-only and reported that it did not inspect tests, diffs,
+the definition, or another answer.
+
+- Profile applicability, Original: valid. It refused to create a Candidate or
+  formal Experiment, limited the microbenchmark to a kernel-layer claim, and
+  requested a Target-aligned original baseline and coverage observation.
+- Profile applicability, Candidate: valid. It reached the same safe decision
+  and additionally made phase/concurrency mismatch, unmodeled time, competing
+  subsystems, unknown costs, the 19.3% to 16.2% conversion, and the
+  coverage-weighted upper-bound gate explicit.
+- Formal resource evidence, Original: valid. It refused the formal run, treated
+  the apparent 4% as insufficient for a target or Champion decision, and
+  identified the original as the recoverable reference using general
+  comparability and environment-identity rules.
+- Formal resource evidence, Candidate: valid. It reached the same safe decision
+  and explicitly classified the performance samples as
+  `environment-inconclusive`, preserved correctness independently, reran the
+  full system gate for the new phase, kept Original as the recoverable version,
+  and supplied the complete required Handoff fields.
+
+Both revisions made safe decisions in these single behavioral trials. The
+observed Candidate difference is greater explicitness and audit closure; this
+evaluation does not show that Original necessarily fails these scenarios or
+that Candidate will answer them correctly in every session.
+
+### Cost, terminal reason, and supported scope
+
+All declared trials ran once. No trial was interrupted or invalid. Evaluation
+used zero GPU time and no network access. It ended because every declared arm
+had produced a valid result.
+
+The result supports the narrow claim that Candidate rejects the six listed
+public invalid behaviors, accepts the valid combined readiness case, and makes
+the intended system, resource, and Handoff gates explicit in the two synthetic
+model trials. It does not establish GPU performance, production correctness,
+general model reliability, compatibility with every driver, or optimization
+improvement across workloads.
+
+No private material was uploaded, evaluated, or used as public proof.
 
 ## Release Decision
 
