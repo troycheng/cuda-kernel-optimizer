@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SKILL = ROOT / "skills" / "cuda-kernel-optimizer"
 SCRIPTS = ROOT / "skills" / "cuda-kernel-optimizer" / "scripts"
 
 
@@ -52,6 +53,25 @@ class SkillEvalTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, script)
             self.assertIn(choices, completed.stdout, script)
+
+    def test_business_positive_tail_result_is_not_discarded_by_throughput_coverage(self) -> None:
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        iteration = (SKILL / "references" / "performance_iteration.md").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            "不能仅因调用次数少或总耗时占比低而否定",
+            "不只看 primary",
+            "就将它纳入优化结果并明确适用场景",
+            "没有提升当前主指标不能单独作为丢弃理由",
+        ):
+            self.assertIn(marker, skill)
+        for marker in (
+            "时间占比和 Amdahl 上限只适用于吞吐、均值",
+            "不能单独作为丢弃改动的理由",
+            "保留整体不负向的长尾",
+        ):
+            self.assertIn(marker, iteration)
 
 
 if __name__ == "__main__":

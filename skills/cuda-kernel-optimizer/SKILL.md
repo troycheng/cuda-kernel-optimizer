@@ -35,9 +35,9 @@ ChatGPT 负责优化判断：识别瓶颈、提出候选、评估投入产出并
 1. 明确性能目标、最低有效收益、允许修改的文件、风险边界、时间与 GPU 使用范围，以及宿主机是否只给建议。首次 live workload 前简要说明串行服务/GPU 生命周期、可并行只读工作、从 driver mode 推导的预计 live 调用数、当前完成点，以及首次适配成本与可避免重试；该说明不持久化。
 2. 执行 readiness。优化 Target 必须冻结原始版本、真实测试集、精度规则、command driver、性能目标、环境身份和统计要求；诊断 Target 可以只绑定已有报告，但不能假装具备 workload。
 3. 修改代码前先测原始业务基线。精度未通过时，不解释性能样本。
-4. 每次新 profiler 事实用于候选判断前，先核对 Target、Variant、case/request slice、并发、phase、coverage 和 claim layer，再完成系统级归因：说明主要 measured time 与未归因部分，比较可行的 subsystem 方向；coverage 已知时界定端到端收益上限，未知时明确标记；候选成本或可行性没有证据时也明确标记，并给出证伪首选方向的最低成本观测。证据不适用时，只保留 diagnostic hypothesis。
+4. 每次新 profiler 事实用于候选判断前，先核对 Target、Variant、case/request slice、并发、phase、coverage 和 claim layer，再完成系统级归因：说明主要 measured time 与未归因部分，比较可行的 subsystem 方向；coverage 已知时界定端到端收益上限，未知时明确标记。coverage 判断必须与指标匹配：吞吐和均值可以用完整 workload 的时间占比界定收益上限；p95、p99 等长尾指标要看受影响请求、关键路径和 phase，不能仅因调用次数少或总耗时占比低而否定。候选成本或可行性没有证据时也明确标记，并给出证伪首选方向的最低成本观测。证据不适用时，只保留 diagnostic hypothesis。
 5. 创建 Experiment 前完成源码静态审查或独立的最低成本证伪；已经证伪或收益上限低于 minimum effect 时不执行候选。随后冻结 Experiment，再依次完成精度校验和短版成对初筛。只有 profiler 能回答一个明确且尚未解决的问题时才运行它；进入正式 target 前无条件简短复核 Target、Variant、case/request slice、phase、coverage、收益上限和 ROI，新 profile 事实则重新执行第 4 步的完整判断。
-6. 将实测收益与不确定性同用户的最低有效收益、下一步时间和 GPU 成本比较。继续是否值得由 ChatGPT 判断，命令超时只负责防止工具卡死。
+6. 判断优化结果时检查所有已声明且有业务价值的重要指标，不只看 primary。若改动在真实 workload 上稳定改善一项重要指标，例如 p95 或 p99，同时正确性通过且总体吞吐、平均延迟等关键指标未超过允许的退化范围，就将它纳入优化结果并明确适用场景；没有提升当前主指标不能单独作为丢弃理由。测试后才发现的新收益先作为假设，再用以该指标为主目标的冻结 Target 验证，避免从噪声中事后挑结果。最后将实测收益与不确定性同用户的最低有效收益、下一步时间和 GPU 成本比较；继续是否值得由 ChatGPT 判断，命令超时只负责防止工具卡死。
 7. 正式结果有效后，ChatGPT 可以显式选择候选。需要 workload 或服务层最终结论时，再对当前最佳版本和 original 运行 final audit。
 8. 每个终态都留下简短 Handoff，包含结论与证据、claim layer、Champion 或 Original、局部结果到端到端目标的解释、已拒方向、未覆盖风险、skill friction/feedback，以及 workspace 状态和停止原因。
 

@@ -20,6 +20,10 @@ readiness 通过后，先执行 `workload_evaluate.py baseline`。原始业务�
 coverage unknown 时，先选择最低成本 coverage 观测或端到端证伪；上限低于 minimum effect 时
 不创建 Experiment。
 
+上面的时间占比和 Amdahl 上限只适用于吞吐、均值等可按时间贡献估算的指标。判断 p95、p99
+等长尾指标时，要看改动影响了哪些请求、是否位于关键路径，以及发生在 warmup、steady 还是
+request drain；不能仅因调用次数少或总耗时占比低而否定长尾收益。
+
 再完成源码静态审查或独立小测试；已经证伪时不创建候选。调用
 `workload_evaluate.py experiment` 前，至少说明：
 
@@ -61,6 +65,15 @@ coverage unknown 时，先选择最低成本 coverage 观测或端到端证伪�
 
 收益判断同时考虑点估计、区间、最低有效收益、约束和测量稳定性。可移除时间是“假设该部分完全消失”的上限，不是候选必然获得的收益。
 
+判断优化结果时检查真实 workload 上所有已声明且有业务价值的重要指标，不只看 primary。若
+改动稳定改善一项重要指标，例如 p95 或 p99，同时正确性通过且总体吞吐、平均延迟等关键指标
+未超过允许的退化范围，就将它纳入优化结果并明确适用场景。没有提升当前主指标，只能说明它
+没有达到当前 Target 的主目标，不能单独作为丢弃改动的理由。
+
+若某项收益是在测试后才发现，先把它作为新假设；只有重新冻结以该指标为主目标、以其它重要
+指标为约束的 Target 并通过正式验证后，才能据此选择 Champion。这样既保留整体不负向的长尾
+优化，也避免从噪声中事后挑选看起来有利的指标。
+
 正式 `target` 结果应比较 Candidate 与当前 reference。reference 起初是 original；选择过有效 Candidate 后，后续候选直接与当前 Champion 比较，避免只证明自己优于已经落后的 baseline。
 
 ## 5. 选择与最终复测
@@ -75,7 +88,7 @@ coverage unknown 时，先选择最低成本 coverage 观测或端到端证伪�
 
 出现以下情况应尽早停止：
 
-- 收益上限低于最低有效收益；
+- 与当前指标匹配的收益上限低于最低有效收益；
 - 精度或 dispatch identity 失败；
 - screen 已按预先声明的证伪条件拒绝机制，或 conservative bound 已证明收益上限不足；
 - 重复证据已经否定该机制；
