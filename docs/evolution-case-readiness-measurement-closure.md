@@ -207,4 +207,29 @@ No private material was uploaded, evaluated, or used as public proof.
 
 ## Release Decision
 
-Pending human maintainer review. An evaluation result will not select a release.
+### Human decision
+
+On 2026-08-04, the maintainer authorized publishing this bounded revision to
+GitHub and the internal review remote. This accepts the change for review; it
+does not authorize an automatic merge, version tag, or package release.
+
+### Evidence reviewed and accepted scope
+
+The decision reviewed the Original/Candidate deterministic comparison, full
+Candidate regression, four clean behavioral trials, claim limits, and private
+material exclusion recorded above. Accepted scope is limited to V1.4 readiness
+measurement closure, error preservation, model-led applicability/resource
+gates, driver documentation, tests, and the installed skill synchronization.
+
+No GPU speed, production correctness, general model reliability, or all-driver
+compatibility claim was accepted.
+
+### Publication carriers
+
+- GitHub draft pull request:
+  `https://github.com/troycheng/cuda-kernel-optimizer/pull/5`
+- Internal review branch:
+  `agent/readiness-measurement-closure` targeting `main`
+
+Merge, tag, release, withdrawal, or rollback remains an explicit later human
+decision on the corresponding carrier.
