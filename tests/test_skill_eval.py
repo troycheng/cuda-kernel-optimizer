@@ -73,6 +73,17 @@ class SkillEvalTests(unittest.TestCase):
         ):
             self.assertIn(marker, iteration)
 
+    def test_post_use_feedback_is_actionable_and_opt_in_for_external_submission(self) -> None:
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        for marker in (
+            "本次真实使用暴露",
+            "观察到的行为、实际影响或成本、期望改动和最小证据",
+            "没有可行动反馈时写 `none`",
+            "只有用户明确授权时才向外部仓库提交反馈",
+            "本身不等于 skill feedback",
+        ):
+            self.assertIn(marker, skill)
+
 
 if __name__ == "__main__":
     unittest.main()

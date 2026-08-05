@@ -41,6 +41,12 @@ ChatGPT 负责优化判断：识别瓶颈、提出候选、评估投入产出并
 7. 正式结果有效后，ChatGPT 可以显式选择候选。需要 workload 或服务层最终结论时，再对当前最佳版本和 original 运行 final audit。
 8. 每个终态都留下简短 Handoff，包含结论与证据、claim layer、Champion 或 Original、局部结果到端到端目标的解释、已拒方向、未覆盖风险、skill friction/feedback，以及 workspace 状态和停止原因。
 
+## 使用后反馈
+
+将 Handoff 中的 `skill friction/feedback` 用于记录本次真实使用暴露、且可能改变 skill 指令、工具或知识的具体问题，以及值得保留的有效机制。每条只写观察到的行为、实际影响或成本、期望改动和最小证据；不要复述完整优化过程，不要把基本正确行为当作成果，也不要为填满字段添加通用风险。没有可行动反馈时写 `none`。
+
+Handoff 默认留在用户环境。只有用户明确授权时才向外部仓库提交反馈；移除私有 workload、内部地址、凭据和未公开材料，并将相互独立的问题分别提交。优化结果或上游 PR 可以作为问题来源和证据，但本身不等于 skill feedback。
+
 ## 证据规则
 
 - Candidate 和 reference 内容必须冻结，并由每份结果显式引用。
