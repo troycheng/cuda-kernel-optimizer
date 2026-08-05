@@ -1,5 +1,7 @@
 # MXFP6 SM120 exact dispatch and p99 TPOT
 
+[简体中文](case-mxfp6-sm120-tail-latency.zh-CN.md)
+
 This is a small, real-use field feedback example, not a reproducible benchmark. It records why a bounded optimization was retained and what the optimizer learned from that decision.
 
 ## Goal and change
