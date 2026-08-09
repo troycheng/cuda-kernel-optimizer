@@ -44,6 +44,8 @@ V1.4 optimization readiness 只接受 `execution_mode: "combined"` 和
 - 关键工具缺失且没有等价证据路径；
 - 测量噪声大到无法识别最低有效收益。
 
+共享 GPU 的“空闲”必须由一个短、有界、只读的观测窗口证明，而不是只看 compute PID 或显存。至少同时记录设备身份、利用率、显存、功耗和可见进程；PID 为空但持续高利用率属于未解释污染，必须换卡、等待或标为 inconclusive。低显存本身既不能证明空闲，也不能单独证明污染。多 GPU workload 还要在冻结设备集合前核对 NUMA、PCIe/NVLink 与 P2P 可达性。
+
 命令失败会在现有错误输出中保留 stop reason、returncode、截断 stdout/stderr 和 cleanup。readiness 成功只证明本次最小 probe 闭合，不证明之后的 baseline 分布稳定，也不证明共享宿主机不会被其他任务污染。
 
 普通 Python 工具可在用户授权的隔离环境中安装。驱动、GPU 权限、时钟、功耗、服务和容器运行时等宿主机变化默认只给建议。修复测试脚本或依赖不是一次性能迭代，应单独说明耗时和剩余风险。

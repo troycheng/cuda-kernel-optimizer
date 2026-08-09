@@ -2,9 +2,13 @@
 
 每轮只验证一个能够清楚解释的候选机制。ChatGPT 负责选择候选和判断投入是否值得；脚本只执行指定 operation。
 
+当前 Target 的 primary 决定研究方向和任务是否完成。secondary 或长尾收益的接纳发生在结果产生之后，不能反向成为低 primary ROI 候选的优先理由。
+
 ## 1. 先测 original
 
 readiness 通过后，先执行 `workload_evaluate.py baseline`。原始业务基线必须来自冻结的测试集、精度规则、driver 和环境身份。没有有效 baseline，不创建候选。
+
+在解释 baseline 前先审计每个决策指标的语义：写清实际分子、分母和数据来源，并标出由文本重分词、抽样日志或不同 tokenizer 重建的值。利用冻结 workload 可推出的恒等关系做检查；例如固定每请求输出 token 数时，优先使用合约已知或服务端 generation accounting 的总量，而不是重新 tokenize 生成文本。口径与 Target 不一致且无法修正时，只保留 diagnostic 样本，不在接近阈值的比较中使用该指标。
 
 ## 2. 冻结 Experiment
 
@@ -19,6 +23,17 @@ readiness 通过后，先执行 `workload_evaluate.py baseline`。原始业务�
 `k` 倍加速，则换算 `r = (k - 1) / k`。该式忽略额外 launch、同步、CPU 和通信成本，只能作为上限。
 coverage unknown 时，先选择最低成本 coverage 观测或端到端证伪；上限低于 minimum effect 时
 不创建 Experiment。
+
+先按对 primary 的预期端到端收益排序仍可行的 subsystem 和候选，再比较 coverage 可信度、
+phase/关键路径匹配、实现风险和取得结论的成本。不要因为某个局部 kernel 容易修改、microbenchmark
+容易获得正数或源码中恰好缺少某个 tile，就让它越过 primary ROI 更高的方向。若当前可修改范围内
+没有足够 primary ROI，回到系统归因比较 communication、runtime、scheduler 等仍在授权范围内的方向，
+而不是继续扫描低覆盖 kernel。
+
+在第一次昂贵 target 前用 original 的成对重复估计各决策指标的测量分辨率。候选的预期 primary
+收益低于 minimum effect 或该分辨率，且也不针对一个预先声明、预期超过自身门槛的重要 secondary 时，
+不为了证明“整体不回归”而单独启动完整服务测试；保留局部证据，等待与同一 Target 下其它互不冲突的
+已测机制组合后再建立新的 Candidate，或直接记录为局部结果。
 
 上面的时间占比和 Amdahl 上限只适用于吞吐、均值等可按时间贡献估算的指标。判断 p95、p99
 等长尾指标时，要看改动影响了哪些请求、是否位于关键路径，以及发生在 warmup、steady 还是
@@ -35,6 +50,10 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 - 拒绝条件；
 - 进入正式测试的条件；
 - 使用的测试 case 与成对采样设计。
+
+对 AOT/CUTLASS 模板机制，在第一次构建前同时冻结该机制的有界候选配置、config ID、实验开关、
+回退方式和预计构建次数。把可以由同一产物独立选择的配置编进一次 screen artifact，先完成局部筛选；
+只为最终胜者再构建一次交付产物。不要把每个 tile、stage 或开关各变成一次完整 wheel 构建。
 
 组合两个已测机制属于新的 Candidate，必须建立新的 Experiment 并重新验证精度和性能。过去两个候选各自通过，不代表组合后仍正确或仍有收益。
 
@@ -57,7 +76,8 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 共享宿主机在正式性能采样前启动低频、只读的 CPU/GPU 观测，持续到采样结束，并保存与样本
 时间对齐的原始输出。观测缺失、中断，或出现与样本窗口重叠、达到用户或环境规则给出的影响阈值
 且无法解释的污染时，性能结果标为 environment-inconclusive；correctness 结果仍独立保留。
-瞬时或非重叠异常不限制性能归因。正式共享 GPU 实验保持串行，周期采样交给确定性命令。
+瞬时或非重叠异常不限制性能归因。进程列表为空或显存很低不能单独证明 GPU 空闲；选卡时还要在
+有界窗口采样利用率和功耗，正式窗口继续保留这些观测。正式共享 GPU 实验保持串行，周期采样交给确定性命令。
 
 涉及越界访问、向量化或异步拷贝时，将 `compute-sanitizer memcheck` 纳入 screen；涉及 shared memory、多阶段 pipeline、barrier、warp specialization、原子操作或跨 stream 同步时，再按风险加入 `racecheck`、`initcheck` 或 `synccheck`。这些检查由 Experiment 显式声明，不由机制名称自动触发，也不能替代业务精度校验。
 
@@ -65,10 +85,12 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 
 收益判断同时考虑点估计、区间、最低有效收益、约束和测量稳定性。可移除时间是“假设该部分完全消失”的上限，不是候选必然获得的收益。
 
+本节是结果接纳规则，不是候选排序规则。一个结果可以值得保留或显式纳入当前版本，但仍未达到当前 Target 的 primary，且不能因此停止主目标搜索。
+
 判断优化结果时检查真实 workload 上所有已声明且有业务价值的重要指标，不只看 primary。若
 改动稳定改善一项重要指标，例如 p95 或 p99，同时正确性通过且总体吞吐、平均延迟等关键指标
-未超过允许的退化范围，就将它纳入优化结果并明确适用场景。没有提升当前主指标，只能说明它
-没有达到当前 Target 的主目标，不能单独作为丢弃改动的理由。
+未超过允许的退化范围，就将它纳入优化结果，记录为局部结果并明确适用场景。没有提升当前主指标，只能说明它
+没有达到当前 Target 的主目标，不能单独作为删除改动的理由，也不能据此停止主目标搜索。
 
 若某项收益是在测试后才发现，先把它作为新假设；只有重新冻结以该指标为主目标、以其它重要
 指标为约束的 Target 并通过正式验证后，才能据此选择 Champion。这样既保留整体不负向的长尾
@@ -78,13 +100,15 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 
 ## 5. 选择与最终复测
 
-有效正式结果不会自动更新最佳版本。ChatGPT 复核精度、统计结果、环境身份和适用范围后，显式调用 `champion.py select`。需要回退时，用拒绝当前 Champion 的 final audit 调用 `restore-original`。
+有效正式结果不会自动更新最佳版本。只有当前 Target 的 primary verdict 通过后，ChatGPT 才复核精度、统计结果、环境身份、维护成本和适用范围，并显式决定是否调用 `champion.py select`。secondary-only 收益保留在局部结果和交付建议中；要将其选为 Champion，必须以该指标为 primary 建立并验证新的 Target。需要回退时，用拒绝当前 Champion 的 final audit 调用 `restore-original`。
 
 在形成 workload 或服务层最终结论前，执行 `final_audit` 重新比较 original 与当前 Champion。kernel 指标改善不能替代这一步。
 
 ## 6. 时间与停止
 
 每条外部命令有独立 timeout 和进程组清理，防止构建、测试或 profiler 卡死。是否继续优化不由 timeout 决定，而由现有证据、预期收益、下一步时间和 GPU 成本、风险与用户授权共同决定。
+
+时间或 GPU 授权是上限，不要求为了耗尽预算而执行低价值实验；但在上限明显未耗尽时，关闭当前候选族不能直接结束 Target。先记录 elapsed/remaining budget、已覆盖的候选空间和残余系统成本，再重新比较至少一轮跨 subsystem 方向，例如 communication、runtime、scheduler、memory、fusion 或更贴近真实请求的 workload。只有下一轮最高价值方向也有证据表明收益上限不足、成本不值得、不可行或超出授权，才形成全局 terminal reason。
 
 出现以下情况应尽早停止：
 
@@ -93,6 +117,10 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 - screen 已按预先声明的证伪条件拒绝机制，或 conservative bound 已证明收益上限不足；
 - 重复证据已经否定该机制；
 - 下一步超出用户授权的时间、GPU、风险或修改范围；
-- 没有新的非重复方向。
+- 重新完成跨 subsystem 候选排序后，没有新的非重复且值得投入的方向。
+
+只有局部结果而 primary 未达成时，不得把任务标记为优化完成。若仍有更高 primary ROI 方向，
+继续该方向；若没有或成本已不值得，保持 original 或已有 Champion，并以“主目标未达成”的
+terminal reason 停止，同时在 Handoff 中另列局部结果。
 
 修复 runner、测试集或依赖不算性能 iteration。若基础环境问题持续消耗时间，应停止优化并单独报告，而不是把环境维护包装成候选实验。

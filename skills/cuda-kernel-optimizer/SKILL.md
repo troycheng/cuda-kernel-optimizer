@@ -9,6 +9,8 @@ ChatGPT 负责优化判断：识别瓶颈、提出候选、评估投入产出并
 
 优化目标是用户的完整 workload，而不是孤立的 kernel 指标。kernel 测量只能支持 kernel 层结论；要得出 workload 或服务层结论，必须先取得用户提供的真实测试集和精度校验。不得自行编造、下载或替换测试 workload。
 
+当前 Target 的 primary 指标决定候选排序和任务是否完成。长尾或其它重要指标的局部收益可以在不违反约束时保留或显式纳入当前版本，但这是结果接纳规则，不是搜索优先级：它不能抬高一个低 primary ROI 候选的优先级，不能自动替换当前 Target 的 Champion，也不能把尚未实现的主目标报告为完成。
+
 ## 按需读取
 
 只加载当前问题所需的脚本和 reference。
@@ -32,14 +34,14 @@ ChatGPT 负责优化判断：识别瓶颈、提出候选、评估投入产出并
 
 ## 优化流程
 
-1. 明确性能目标、最低有效收益、允许修改的文件、风险边界、时间与 GPU 使用范围，以及宿主机是否只给建议。首次 live workload 前简要说明串行服务/GPU 生命周期、可并行只读工作、从 driver mode 推导的预计 live 调用数、当前完成点，以及首次适配成本与可避免重试；该说明不持久化。
+1. 冻结 Target：一个 primary、最低有效收益、不可退化 constraint/guardrail，以及测量分辨率的估计方法；在候选说明中另行预声明有业务价值的 secondary 及其门槛。同时明确允许修改的文件、风险边界、时间与 GPU 使用范围，以及宿主机是否只给建议。首次 live workload 前简要说明串行服务/GPU 生命周期、可并行只读工作、从 driver mode 推导的预计 live 调用数、当前完成点，以及首次适配成本与可避免重试；该说明不持久化。
 2. 执行 readiness。优化 Target 必须冻结原始版本、真实测试集、精度规则、command driver、性能目标、环境身份和统计要求；诊断 Target 可以只绑定已有报告，但不能假装具备 workload。
-3. 修改代码前先测原始业务基线。精度未通过时，不解释性能样本。
-4. 每次新 profiler 事实用于候选判断前，先核对 Target、Variant、case/request slice、并发、phase、coverage 和 claim layer，再完成系统级归因：说明主要 measured time 与未归因部分，比较可行的 subsystem 方向；coverage 已知时界定端到端收益上限，未知时明确标记。coverage 判断必须与指标匹配：吞吐和均值可以用完整 workload 的时间占比界定收益上限；p95、p99 等长尾指标要看受影响请求、关键路径和 phase，不能仅因调用次数少或总耗时占比低而否定。候选成本或可行性没有证据时也明确标记，并给出证伪首选方向的最低成本观测。证据不适用时，只保留 diagnostic hypothesis。
-5. 创建 Experiment 前完成源码静态审查或独立的最低成本证伪；已经证伪或收益上限低于 minimum effect 时不执行候选。随后冻结 Experiment，再依次完成精度校验和短版成对初筛。只有 profiler 能回答一个明确且尚未解决的问题时才运行它；进入正式 target 前无条件简短复核 Target、Variant、case/request slice、phase、coverage、收益上限和 ROI，新 profile 事实则重新执行第 4 步的完整判断。
-6. 判断优化结果时检查所有已声明且有业务价值的重要指标，不只看 primary。若改动在真实 workload 上稳定改善一项重要指标，例如 p95 或 p99，同时正确性通过且总体吞吐、平均延迟等关键指标未超过允许的退化范围，就将它纳入优化结果并明确适用场景；没有提升当前主指标不能单独作为丢弃理由。测试后才发现的新收益先作为假设，再用以该指标为主目标的冻结 Target 验证，避免从噪声中事后挑结果。最后将实测收益与不确定性同用户的最低有效收益、下一步时间和 GPU 成本比较；继续是否值得由 ChatGPT 判断，命令超时只负责防止工具卡死。
-7. 正式结果有效后，ChatGPT 可以显式选择候选。需要 workload 或服务层最终结论时，再对当前最佳版本和 original 运行 final audit。
-8. 每个终态都留下简短 Handoff，包含结论与证据、claim layer、Champion 或 Original、局部结果到端到端目标的解释、已拒方向、未覆盖风险、skill friction/feedback，以及 workspace 状态和停止原因。
+3. 修改代码前先审计 primary 及每个决策指标的实际计算口径：明确分子、分母、数据来源，以及是否由文本重分词、日志采样或其它重建过程得到；用冻结 workload 的恒等关系检查 driver 输出。口径与 Target 不一致且无法修正时，结果只能作 diagnostic，不能用于阈值判断。完成审计后，修改代码前先测原始业务基线，并用预先声明的 original 重复样本估计当前环境的测量分辨率。精度未通过时，不解释性能样本。
+4. 每次新 profiler 事实用于候选判断前，先核对 Target、Variant、case/request slice、并发、phase、coverage 和 claim layer，再完成系统级归因：说明主要 measured time 与未归因部分，比较可行的 subsystem 方向；coverage 已知时界定端到端收益上限，未知时明确标记。按“对 primary 的预期端到端收益、phase/关键路径匹配、coverage 可信度、可行性、风险和实验成本”排序候选；实现容易、局部增幅大或恰好缺一个配置都不能代替这个排序。coverage 判断必须与指标匹配：吞吐和均值可以用完整 workload 的时间占比界定收益上限；p95、p99 等长尾指标要看受影响请求、关键路径和 phase，不能仅因调用次数少或总耗时占比低而否定。候选成本或可行性没有证据时也明确标记，并给出证伪首选方向的最低成本观测。证据不适用时，只保留 diagnostic hypothesis。
+5. 创建 Experiment 前完成源码静态审查或独立的最低成本证伪；已经证伪、primary 收益上限低于 minimum effect，或预期效果低于正式测量分辨率且既不服务于预先声明的重要 secondary、也没有明确合并计划时，不执行昂贵候选。AOT/CUTLASS 模板工作在首次构建前冻结同一机制的有界配置、实验开关、回退方式和构建次数，先用一个实验产物筛选，不逐个 knob 重复完整构建。随后冻结 Experiment，再依次完成精度校验和短版成对初筛。只有 profiler 能回答一个明确且尚未解决的问题时才运行它；进入正式 target 前无条件简短复核 Target、Variant、case/request slice、phase、coverage、收益上限、测量分辨率和 ROI，新 profile 事实则重新执行第 4 步的完整判断。
+6. 本步只判断已经测出的结果是否值得保留，不改变候选搜索优先级。检查所有已声明且有业务价值的重要指标，不只看 primary。若改动在真实 workload 上稳定改善一项重要指标，例如 p95 或 p99，同时正确性通过且总体吞吐、平均延迟等 guardrail 未超过允许的退化范围，就将它纳入优化结果，记录为适用场景明确的局部结果；没有提升当前 primary 不能单独作为删除改动的理由。ChatGPT 可以依据预先声明的 secondary 和维护成本将其列入交付建议，但它不能成为当前 Target 的 Champion；必须同时记录 primary 未达成，也不能据此停止主目标搜索。测试后才发现的新收益先作为假设；要因该收益选择 Champion，必须重新冻结以该指标为 primary、其它重要指标为约束的 Target，避免从噪声中事后挑结果。最后将实测收益与不确定性同用户的最低有效收益、下一步时间和 GPU 成本比较；继续是否值得由 ChatGPT 判断，命令超时只负责防止工具卡死。
+7. 正式结果有效且通过当前 Target 的 primary verdict 后，ChatGPT 才能显式选择候选。secondary-only 收益保留为局部结果；要让它成为 Champion，先以该指标为 primary 冻结新的 Target。需要 workload 或服务层最终结论时，再对当前最佳版本和 original 运行 final audit。
+8. 每个终态都留下简短 Handoff，包含结论与证据、claim layer、当前 Target 的 primary 是否达成、Champion 或 Original、另行保留的局部结果、局部结果到端到端目标的解释、已拒方向、未覆盖风险、skill friction/feedback，以及 workspace 状态和停止原因。若在用户授权的时间或 GPU 上限明显未耗尽时停止，还要记录已用与剩余预算、当前候选族的覆盖边界，并重新做一次跨 subsystem 候选排序；只有下一轮最高价值方向也有证据表明不值得或不能执行时，才形成 Target 的 terminal reason。当前候选族关闭不等于 Target 完成；局部结果存在不等于优化任务完成。
 
 ## 使用后反馈
 
@@ -57,7 +59,8 @@ Handoff 默认留在用户环境。只有用户明确授权时才向外部仓库
 - 未知 profiler 版本、关键字段或单位必须拒绝解析；已知格式中的非关键扩展内容只作为
   `unmodeled` 保留，不能参与语义计算。不能套用相近版本或相近架构。
 - `ERR_NVGPUCTRPERM` 表示当前宿主机权限不允许读取 NCU counter。记录限制并改用其他有效证据；宿主机权限调整只给建议，除非用户明确授权。
-- 共享宿主机在正式性能采样前启动确定性、低频、只读的 CPU/GPU 观测，持续到采样结束并保存时间对齐的原始输出。观测缺失或中断，或存在与正式样本窗口重叠、达到有依据阈值且未被解释的资源污染时，性能归因 inconclusive；瞬时、非重叠异常不否定 correctness。
+- 共享宿主机在选卡和正式性能采样前启动确定性、低频、只读的 CPU/GPU 观测，持续到采样结束并保存时间对齐的原始输出。GPU 进程列表为空或显存占用很低都不能单独证明设备空闲；还要在有界窗口检查利用率、功耗和进程可见性，并解释持续活动。观测缺失或中断，或存在与正式样本窗口重叠、达到有依据阈值且未被解释的资源污染时，性能归因 inconclusive；瞬时、非重叠异常不否定 correctness。
+- 编译产物结论不能越过其证据阶段。源码、AOT 包或 binary 中的字符串只证明文本存在；fusion、消除或调度等 post-lowering 主张必须来自绑定同一 Experiment 的 lowered/generated code、编译器精确匹配记录或 runtime kernel 证据。
 - 使用子智能体时，主智能体是远端代码、GPU 实验和 artifact root 的唯一写者；只并行边界清楚的独立只读任务，使用最低足够能力，并说明模型、思考强度和目标。周期采样由确定性命令完成，正式共享 GPU 实验不并行。
 - 保留原始报告、成对样本、环境身份、被拒候选和 terminal reason，使结论可复核。
 

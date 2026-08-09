@@ -27,6 +27,8 @@ Triton 或 CUDA 候选可按需要检查：
 
 不同层之间需要可追溯关联：源码变体、编译参数、产物摘要、kernel 名称、dispatch shape 和运行结果必须指向同一个 Experiment。只看到某条指令或某个 IR 形态，不能证明它是主要瓶颈或带来完整 workload 收益。
 
+主张还必须与编译阶段匹配。源码、AOT 包、符号表或 binary strings 中出现算子名，只能证明该字符串存在，不能证明 post-grad/lowering 之后仍是独立算子，也不能证明 runtime 是否 fusion。fusion、算子消除或调度主张需要绑定同一 Experiment 的 lowered/generated code、编译器 debug pattern-match 结果（含规则、计数和 shape/variant 绑定），或实际 runtime kernel 证据；缺少这些绑定时写 unproven，不从较早阶段外推。
+
 ## 知识覆盖
 
 `knowledge_query.py` 可按精确 GPU、CUDA、框架、claim layer 和观测查询 `references/knowledge/cards.json`。返回的机制卡用于补充检查点和反例，不是完整候选列表。空结果不限制 ChatGPT 从源码和实测证据中提出新方向。
