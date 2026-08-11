@@ -48,6 +48,7 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 - 最低成本证伪；
 - minimum effect；
 - 拒绝条件；
+- 失败最多能否定当前实现、集成方式、代理结论还是整个机制；
 - 进入正式测试的条件；
 - 使用的测试 case 与成对采样设计。
 
@@ -68,7 +69,9 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 5. 正式成对 workload 测试；
 6. 完整服务测试。
 
-`screen` 从精度校验开始执行 Experiment 中声明的低成本测量路径。前一项已足以拒绝候选时，不启动后续昂贵动作。`conservative_bound` 只有在预先说明它为何约束正式目标，并实际证明收益上限低于 minimum effect 时才能拒绝。`diagnostic_proxy` 只检验声明的局部机制；低代理收益或样本不足不能单独否定完整 workload，ChatGPT 根据该主张、其它证据和正式测试成本决定是否继续。profiler 不是固定阶段；只有它能区分仍然竞争的解释时才值得运行。
+`screen` 从精度校验开始执行 Experiment 中声明的低成本测量路径。前一项已足以按预声明范围拒绝候选时，不启动后续昂贵动作。`conservative_bound` 只有在预先说明它为何约束正式目标，并实际证明收益上限低于 minimum effect 时才能拒绝机制。`diagnostic_proxy` 只检验声明的局部机制；低代理收益或样本不足不能单独否定完整 workload，ChatGPT 根据该主张、其它证据和正式测试成本决定是否继续。正确性、安全、dispatch identity、环境或指标口径失败会使相应结果无效，只能关闭受影响的实现或测量；不能据此评价机制。
+
+当 profile 和 coverage 表明候选仍有达到 minimum effect 的可能，或局部机制收益与完整 workload 结果冲突时，关闭机制前先解释差额来自路径未命中、额外 launch/同步/通信、资源竞争、测量分辨率还是机制本身。现有证据不能区分时，按 `research_augmentation.md` 核验一手资料并取得独立反例；若存在一个不同且最低成本的判别实验，且其结果可能改变结论，才追加一次。重新尝试必须有新证据、不同实现路径或不同测量设计；简单重跑、换名或调参不能延长已被同类证据否定的方向。profiler 不是固定阶段；只有它能区分仍然竞争的解释时才值得运行。
 
 每次进入正式 `target` 前，无条件简短复核 Target、Variant、case/request slice、phase、coverage、
 收益上限和 ROI。若其间取得新 profiler 事实，重新完成上一节的系统级归因，而不是沿用旧候选理由。
@@ -108,7 +111,7 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 
 每条外部命令有独立 timeout 和进程组清理，防止构建、测试或 profiler 卡死。是否继续优化不由 timeout 决定，而由现有证据、预期收益、下一步时间和 GPU 成本、风险与用户授权共同决定。
 
-时间或 GPU 授权是上限，不要求为了耗尽预算而执行低价值实验；但在上限明显未耗尽时，关闭当前候选族不能直接结束 Target。先记录 elapsed/remaining budget、已覆盖的候选空间和残余系统成本，再重新比较至少一轮跨 subsystem 方向，例如 communication、runtime、scheduler、memory、fusion 或更贴近真实请求的 workload。只有下一轮最高价值方向也有证据表明收益上限不足、成本不值得、不可行或超出授权，才形成全局 terminal reason。
+时间或 GPU 授权是上限，不要求为了耗尽预算而执行低价值实验；但在上限明显未耗尽时，关闭当前候选族不能直接结束 Target。先记录 elapsed/remaining budget、已覆盖的候选空间和残余系统成本，再重新比较至少一轮跨 subsystem 方向，例如 communication、runtime、scheduler、memory、fusion 或更贴近真实请求的 workload。对尚未关闭且预期 primary ROI 最高的方向，先检查它是否只被失败实现或不充分 proxy 连带拒绝；存在关键知识或因果缺口时按 `research_augmentation.md` 质证。只有该方向也有证据表明收益上限不足、成本不值得、不可行或超出授权，才形成全局 terminal reason。
 
 出现以下情况应尽早停止：
 

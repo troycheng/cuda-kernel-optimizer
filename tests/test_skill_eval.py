@@ -129,6 +129,39 @@ class SkillEvalTests(unittest.TestCase):
         self.assertNotIn("选择理由只来自 secondary", skill)
         self.assertNotIn("选择理由只来自预先声明的 secondary", iteration)
 
+    def test_high_impact_decisions_require_bounded_research_and_scoped_rejection(self) -> None:
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        iteration = (SKILL / "references" / "performance_iteration.md").read_text(
+            encoding="utf-8"
+        )
+        research = (SKILL / "references" / "research_augmentation.md").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            "只记录改变事实判断、候选排序或实验设计的研究增量",
+            "失败最多能否定当前实现、集成方式、代理结论还是整个机制",
+            "拒绝范围不能越过证据能够支持的范围",
+            "检查它是否被失败实现误杀",
+            "至少一个可用的非 OpenAI 模型家族",
+            "不能互相算作异构质证",
+        ):
+            self.assertIn(marker, skill)
+        for marker in (
+            "不能据此评价机制",
+            "局部机制收益与完整 workload 结果冲突",
+            "重新尝试必须有新证据、不同实现路径或不同测量设计",
+            "是否只被失败实现或不充分 proxy 连带拒绝",
+        ):
+            self.assertIn(marker, iteration)
+        for marker in (
+            "准备实施昂贵候选",
+            "准备关闭仍有较高 primary ROI 的候选",
+            "简短研究增量",
+            "同一提供方或模型家族的不同入口也不算独立来源",
+            "不能把未核实内容表述为当前事实",
+        ):
+            self.assertIn(marker, research)
+
 
 if __name__ == "__main__":
     unittest.main()

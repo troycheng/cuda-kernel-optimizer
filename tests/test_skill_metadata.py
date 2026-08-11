@@ -113,9 +113,10 @@ class SkillMetadataTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.prose)
 
-    def test_external_search_and_ai_are_optional_and_local_evidence_decides(self) -> None:
-        self.assertIn("外部搜索和第三方 AI 质证是可选的研究手段", self.prose)
-        self.assertIn("挑战问题定义、假设和证据遗漏", self.prose)
+    def test_external_research_is_risk_triggered_and_local_evidence_decides(self) -> None:
+        self.assertIn("外部研究按决策风险有条件触发", self.prose)
+        self.assertIn("至少一个可用的非 OpenAI 模型家族", self.prose)
+        self.assertIn("不能互相算作异构质证", self.prose)
         self.assertIn("外部模型不批准候选，也不接管执行", self.prose)
         self.assertIn("本地精度与测量证据决定", self.prose)
 
