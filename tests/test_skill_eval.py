@@ -90,6 +90,29 @@ class SkillEvalTests(unittest.TestCase):
         ):
             self.assertIn(marker, skill)
 
+    def test_single_host_torchrun_avoids_unproven_standalone_rendezvous(self) -> None:
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        readiness = (
+            SKILL / "references" / "environment_readiness.md"
+        ).read_text(encoding="utf-8")
+        for marker in (
+            "在首次 GPU workload 前先验证实际 launcher 和 rendezvous",
+            "默认使用显式 loopback `--master-addr`",
+            "不使用 `--standalone`",
+            "不重复相同启动形式",
+            "核实其准确 PID/PGID",
+        ):
+            self.assertIn(marker, skill)
+        for marker in (
+            "--master-addr=127.0.0.1",
+            "GLOO_SOCKET_IFNAME=lo",
+            "属于 launcher/readiness failure",
+            "不用同一启动形式重试",
+            "只终止该进程组",
+            "不再重新探索已知失败的启动形式",
+        ):
+            self.assertIn(marker, readiness)
+
     def test_real_use_regressions_require_model_level_gates(self) -> None:
         skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
         iteration = (SKILL / "references" / "performance_iteration.md").read_text(

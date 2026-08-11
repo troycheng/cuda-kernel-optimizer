@@ -30,6 +30,21 @@
 方法，并在当前成本图中说明哪些准备是首次适配、哪些失败会形成可避免重试。readiness 只执行
 一次明确 probe；它不接管服务生命周期或建立新的持久流程。
 
+### 单机多进程启动
+
+在加载模型或占用 GPU 前，用实际容器、shell、环境变量和 launcher 完成一次有界的 rendezvous
+probe。单机 `torchrun` 在 hostname 的 IPv4/IPv6 解析和网络接口尚未实测证明时，不默认使用
+`--standalone`；使用 `--master-addr=127.0.0.1`、启动前确认空闲并记录的显式
+`--master-port`，Gloo 仍尝试解析 hostname 时再显式设置 `GLOO_SOCKET_IFNAME=lo`。多机任务不能
+使用 loopback，必须从每个节点验证 master 地址和所选接口可达。
+
+连续出现 `IPv6 network addresses ... cannot be retrieved`、`gai error`、hostname 解析失败或
+rendezvous 超时，属于 launcher/readiness failure，不是 kernel、GPU 或性能结果。立即在有界时间内
+停止，不用同一启动形式重试；改用已验证的显式 rendezvous 后重新 probe。远程 SSH 客户端退出不
+代表远端进程已结束：启动前记录独立 PID/PGID，失败后只终止该进程组，等待退出并核对 launcher、
+worker、资源监控和 GPU process 均无残留。最后把可工作的完整命令写回 command driver；后续
+Experiment 不再重新探索已知失败的启动形式。
+
 V1.4 optimization readiness 只接受 `execution_mode: "combined"` 和
 `smoke.mode: "combined"`。smoke 请求两个样本，以验证 driver 确实执行 sampling；它不用于估计稳定分布。返回的 primary、constraints、unit 和样本数必须与 objective 和 sampling 精确闭合。额外诊断写入已声明 artifact 或日志，不能作为未声明 constraint 返回。separate driver 需要保存两次完整 probe evidence，延期到有版本化 Target contract 时再支持。
 
