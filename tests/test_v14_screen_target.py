@@ -7,6 +7,71 @@ from tests.v14_support import V14Project, decode_stderr, decode_stdout
 
 
 class ScreenTargetBlackBoxTests(unittest.TestCase):
+    def test_correctness_rejection_is_terminal_without_performance_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = V14Project(Path(directory))
+            project.check()
+            baseline = project.baseline()
+            created = project.run_tool(
+                "workload_evaluate.py",
+                "experiment",
+                project.experiment_input(baseline["result_ref"]),
+            )
+            experiment_ref = decode_stdout(created)["experiment_ref"]
+            project.set_behavior(correctness_by_role={"candidate": "failed"})
+            screened = project.run_tool(
+                "workload_evaluate.py",
+                "screen",
+                project.screen_input(experiment_ref),
+                wait=True,
+            )
+            self.assertEqual(screened.returncode, 0, screened.stderr)
+            screen_result = decode_stdout(screened)
+            self.assertEqual(screen_result["measurement_validity"], "invalid")
+            self.assertEqual(screen_result["stop_reason"], "correctness_failed")
+            compared = project.run_tool(
+                "workload_evaluate.py",
+                "target",
+                project.target_input(experiment_ref),
+                wait=True,
+            )
+            self.assertEqual(compared.returncode, 2)
+            self.assertEqual(decode_stderr(compared)["error_code"], "screen_rejected")
+
+    def test_same_process_contract_runs_one_driver_call_per_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = V14Project(Path(directory))
+            checked = project.check()
+            baseline = project.baseline()
+            experiment_input = project.experiment_input(baseline["result_ref"])
+            experiment_input["comparison_contract"]["acquisition"] = {
+                "lifecycle": "same_process",
+                "shared_state": ["service", "weights", "allocator"],
+                "rebuilt_state": ["variant"],
+                "rationale": "fixture supports both variants in one process",
+            }
+            created = project.run_tool(
+                "workload_evaluate.py", "experiment", experiment_input
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            experiment_ref = decode_stdout(created)["experiment_ref"]
+            screened = project.run_tool(
+                "workload_evaluate.py",
+                "screen",
+                project.screen_input(experiment_ref),
+                wait=True,
+            )
+            self.assertEqual(screened.returncode, 0, screened.stderr)
+            result = decode_stdout(screened)
+            self.assertEqual(result["completed_driver_calls"], 1)
+            events = [
+                event for event in project.driver_events()
+                if event["execution_id"] not in {checked["probe_id"], baseline["invocation_id"]}
+            ]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(set(events[0]["roles"]), {"reference", "candidate"})
+            self.assertEqual(events[0]["acquisition"]["lifecycle"], "same_process")
+
     def test_diagnostic_proxy_screen_does_not_start_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = V14Project(Path(directory))
@@ -85,6 +150,9 @@ class ScreenTargetBlackBoxTests(unittest.TestCase):
             self.assertEqual(result["operation"], "target")
             self.assertEqual(result["measurement_validity"], "valid")
             self.assertEqual(result["verdict"], "passed")
+            self.assertEqual(result["completed_driver_calls"], 4)
+            self.assertEqual(result["evidence_plan"]["driver_calls"], 4)
+            self.assertEqual(result["skipped_evidence_steps"], [])
             self.assertEqual(
                 result["performance_receipt"]["reference_status"],
                 "current",

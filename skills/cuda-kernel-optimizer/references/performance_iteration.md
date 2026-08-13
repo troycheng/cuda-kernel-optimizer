@@ -50,7 +50,10 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 - 拒绝条件；
 - 失败最多能否定当前实现、集成方式、代理结论还是整个机制；
 - 进入正式测试的条件；
-- 使用的测试 case 与成对采样设计。
+- reference 与 candidate 的关系；
+- Target 规则之外的附加精度 gate，以及只作解释的 diagnostic；
+- 使用的测试 case、成对采样设计、隔离或同进程生命周期；
+- 会改变候选判断或实验设计的版本化外部前提；未核实时标记为假设。
 
 对 AOT/CUTLASS 模板机制，在第一次构建前同时冻结该机制的有界候选配置、config ID、实验开关、
 回退方式和预计构建次数。把可以由同一产物独立选择的配置编进一次 screen artifact，先完成局部筛选；
@@ -69,7 +72,7 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 5. 正式成对 workload 测试；
 6. 完整服务测试。
 
-`screen` 从精度校验开始执行 Experiment 中声明的低成本测量路径。前一项已足以按预声明范围拒绝候选时，不启动后续昂贵动作。`conservative_bound` 只有在预先说明它为何约束正式目标，并实际证明收益上限低于 minimum effect 时才能拒绝机制。`diagnostic_proxy` 只检验声明的局部机制；低代理收益或样本不足不能单独否定完整 workload，ChatGPT 根据该主张、其它证据和正式测试成本决定是否继续。正确性、安全、dispatch identity、环境或指标口径失败会使相应结果无效，只能关闭受影响的实现或测量；不能据此评价机制。
+`screen` 执行 Experiment 中声明的低成本证据计划。Driver V2 的一次调用同时返回每个 subject 的正确性和性能观测；工具先验证正确性，再决定这些性能样本能否解释，不为两个判断重复启动完整 workload。隔离比较每个 pair/case 启动 reference 和 candidate 各一次；只有 driver 声明确实支持且 Experiment 冻结了共享状态时，才在同一进程的一次调用内完成两个 subject。前一项已足以按预声明范围拒绝候选时，不启动后续昂贵动作。`conservative_bound` 只有在预先说明它为何约束正式目标，并实际证明收益上限低于 minimum effect 时才能拒绝机制。`diagnostic_proxy` 只检验声明的局部机制；低代理收益或样本不足不能单独否定完整 workload，ChatGPT 根据该主张、其它证据和正式测试成本决定是否继续。正确性、安全、dispatch identity、环境或指标口径失败会使相应性能结果无效，只能关闭受影响的实现或测量；不能据此评价机制。
 
 当 profile 和 coverage 表明候选仍有达到 minimum effect 的可能，或局部机制收益与完整 workload 结果冲突时，关闭机制前先解释差额来自路径未命中、额外 launch/同步/通信、资源竞争、测量分辨率还是机制本身。现有证据不能区分时，按 `research_augmentation.md` 核验一手资料并取得独立反例；若存在一个不同且最低成本的判别实验，且其结果可能改变结论，才追加一次。重新尝试必须有新证据、不同实现路径或不同测量设计；简单重跑、换名或调参不能延长已被同类证据否定的方向。profiler 不是固定阶段；只有它能区分仍然竞争的解释时才值得运行。
 
@@ -103,7 +106,7 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 
 ## 5. 选择与最终复测
 
-有效正式结果不会自动更新最佳版本。只有当前 Target 的 primary verdict 通过后，ChatGPT 才复核精度、统计结果、环境身份、维护成本和适用范围，并显式决定是否调用 `champion.py select`。secondary-only 收益保留在局部结果和交付建议中；要将其选为 Champion，必须以该指标为 primary 建立并验证新的 Target。需要回退时，用拒绝当前 Champion 的 final audit 调用 `restore-original`。
+有效正式结果不会自动更新最佳版本。只有当前 Target 的 primary verdict 通过后，ChatGPT 才复核精度、统计结果、实际 runtime 身份、比较契约、维护成本和适用范围，并显式决定是否调用 `champion.py select`。容器 lineage 不完整时，结论只能归属于被冻结的最终 runtime，不能归因于未经确认的 upstream base。secondary-only 收益保留在局部结果和交付建议中；要将其选为 Champion，必须以该指标为 primary 建立并验证新的 Target。需要回退时，用拒绝当前 Champion 的 final audit 调用 `restore-original`。
 
 在形成 workload 或服务层最终结论前，执行 `final_audit` 重新比较 original 与当前 Champion。kernel 指标改善不能替代这一步。
 

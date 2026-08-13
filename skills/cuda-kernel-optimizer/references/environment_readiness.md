@@ -45,8 +45,11 @@ rendezvous 超时，属于 launcher/readiness failure，不是 kernel、GPU 或�
 worker、资源监控和 GPU process 均无残留。最后把可工作的完整命令写回 command driver；后续
 Experiment 不再重新探索已知失败的启动形式。
 
-V1.4 optimization readiness 只接受 `execution_mode: "combined"` 和
-`smoke.mode: "combined"`。smoke 请求两个样本，以验证 driver 确实执行 sampling；它不用于估计稳定分布。返回的 primary、constraints、unit 和样本数必须与 objective 和 sampling 精确闭合。额外诊断写入已声明 artifact 或日志，不能作为未声明 constraint 返回。separate driver 需要保存两次完整 probe evidence，延期到有版本化 Target contract 时再支持。
+optimization readiness 要求 Driver V2 至少声明 `single_variant_combined`。smoke 请求两个样本，
+验证 driver 确实执行 sampling；它不用于估计稳定分布。一次 evidence bundle 同时返回正确性和
+性能事实，primary、constraints、unit 和样本数必须与 objective 和 sampling 精确闭合。只有
+driver 确实能在同一进程内运行两个 subject 并保持所声明的共享状态时，才声明
+`paired_same_process_combined`。V2 不兼容旧 Driver V1 Target。
 
 ## 失败处理
 

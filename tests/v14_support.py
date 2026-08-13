@@ -54,7 +54,8 @@ class V14Project:
                     "parser.add_argument('--request', required=True)",
                     "args = parser.parse_args()",
                     "request = json.loads(Path(args.request).read_text('utf-8'))",
-                    "assert Path(request['variant']['locator']).exists()",
+                    "for subject in request['subjects']:",
+                    "    assert Path(subject['variant']['locator']).exists()",
                     "assert Path(request['test_suite']['locator']).exists()",
                     "assert Path(request['correctness']['reference']['locator']).exists()",
                     "root = Path(__file__).resolve().parent",
@@ -62,8 +63,8 @@ class V14Project:
                     "event = json.dumps({",
                     "    'execution_id': request['execution_id'],",
                     "    'operation': request['operation'],",
-                    "    'mode': request['mode'],",
-                    "    'role': request['role'],",
+                    "    'roles': [subject['role'] for subject in request['subjects']],",
+                    "    'acquisition': request['acquisition'],",
                     "}, sort_keys=True) + '\\n'",
                     "descriptor = os.open(",
                     "    root / 'driver-events.jsonl',",
@@ -75,13 +76,14 @@ class V14Project:
                     "finally:",
                     "    os.close(descriptor)",
                     "result = {",
-                    "    'protocol_version': 'cuda-kernel-optimizer/driver-result-v1',",
+                    "    'protocol_version': 'cuda-kernel-optimizer/driver-result-v2',",
                     "    'request_digest': request['request_digest'],",
                     "    'target_id': request['target_id'],",
                     "    'execution_id': request['execution_id'],",
-                    "    'variant_digest': request['variant']['digest'],",
-                    "    'role': request['role'],",
-                    "    'mode': request['mode'],",
+                    "    'subject_digests': [",
+                    "        {'role': subject['role'], 'digest': subject['variant']['digest']}",
+                    "        for subject in request['subjects']",
+                    "    ],",
                     "    'case_id': request['case']['id'],",
                     "    'artifacts': [],",
                     "    'cleanup': {'status': 'confirmed', 'live_tasks': []},",
@@ -93,32 +95,35 @@ class V14Project:
                     "        'driver_version': 'none',",
                     "        'cuda_runtime_version': 'none',",
                     "        'frameworks': {},",
-                    "        'container': {'kind': 'none', 'identity': 'none'},",
+                    "        'runtime_provenance': {",
+                    "            'kind': 'host', 'identity': behavior.get('runtime_identity', 'fixture-host'),",
+                    "            'lineage_complete': True, 'lineage': [], 'components': [],",
+                    "        },",
                     "    },",
+                    "    'acquisition': request['acquisition'],",
+                    "    'evidence': {'correctness': [], 'measurements': []},",
                     "}",
-                    "if request['mode'] in {'correctness', 'combined'}:",
+                    "for subject in request['subjects']:",
+                    "    role = subject['role']",
                     "    correctness_status = behavior.get('correctness_by_role', {}).get(",
-                    "        request['role'], behavior['correctness']",
+                    "        role, behavior['correctness']",
                     "    )",
                     "    correctness_metric = (",
                     "        (1.0 if correctness_status == 'passed' else 0.0)",
-                    "        if request['role'] in behavior.get('correctness_by_role', {})",
+                    "        if role in behavior.get('correctness_by_role', {})",
                     "        else behavior['correctness_metric']",
                     "    )",
-                    "    result['correctness'] = {",
-                    "        'status': correctness_status,",
-                    "        'metrics': {'exact_match': correctness_metric},",
-                    "    }",
-                    "if request['mode'] in {'measure', 'combined'}:",
-                    "    samples = behavior['samples'][request['role']]",
-                    "    result['measurements'] = {",
-                    "        'primary': {",
-                    "            'name': 'latency_ms',",
-                    "            'unit': 'ms',",
-                    "            'samples': samples,",
+                    "    result['evidence']['correctness'].append({",
+                    "        'role': role,",
+                    "        'result': {'status': correctness_status, 'metrics': {'exact_match': correctness_metric}},",
+                    "    })",
+                    "    result['evidence']['measurements'].append({",
+                    "        'role': role,",
+                    "        'result': {",
+                    "            'primary': {'name': 'latency_ms', 'unit': 'ms', 'samples': behavior['samples'][role]},",
+                    "            'constraints': behavior.get('constraints', []),",
                     "        },",
-                    "        'constraints': behavior.get('constraints', []),",
-                    "    }",
+                    "    })",
                     "output = Path(request['output_path'])",
                     "temporary = output.with_suffix(output.suffix + '.tmp')",
                     "temporary.write_text(json.dumps(result, sort_keys=True), encoding='utf-8')",
@@ -138,6 +143,7 @@ class V14Project:
         original_samples=None,
         candidate_samples=None,
         constraints=None,
+        runtime_identity: str = "fixture-host",
     ) -> None:
         write_json(
             self.behavior,
@@ -151,6 +157,7 @@ class V14Project:
                 "correctness_by_role": (
                     {} if correctness_by_role is None else correctness_by_role
                 ),
+                "runtime_identity": runtime_identity,
                 "constraints": [] if constraints is None else constraints,
                 "samples": {
                     "original": [10.0, 10.1] if original_samples is None else original_samples,
@@ -162,7 +169,7 @@ class V14Project:
 
     def readiness_input(self) -> dict:
         return {
-            "format_version": "cuda-kernel-optimizer/readiness-input-v1",
+            "format_version": "cuda-kernel-optimizer/readiness-input-v2",
             "operation": "check",
             "artifact_root": str(self.artifact_root),
             "target_mode": "optimization",
@@ -197,8 +204,11 @@ class V14Project:
             "driver": {
                 "command": [sys.executable, str(self.driver)],
                 "request_argument": "--request",
-                "execution_mode": "combined",
-                "protocol_version": "cuda-kernel-optimizer/driver-v1",
+                "evidence_capabilities": [
+                    "single_variant_combined",
+                    "paired_same_process_combined",
+                ],
+                "protocol_version": "cuda-kernel-optimizer/driver-v2",
                 "profiler_capabilities": [],
                 "side_effects": [],
                 "cleanup_contract": {
@@ -216,7 +226,6 @@ class V14Project:
                 "bootstrap_samples": 100,
             },
             "smoke": {
-                "mode": "combined",
                 "case_id": "main",
                 "resources": {"host_id": "local-test", "gpu_uuids": []},
                 "runtime_limits": {
@@ -243,7 +252,7 @@ class V14Project:
 
     def baseline_input(self) -> dict:
         return {
-            "format_version": "cuda-kernel-optimizer/evaluator-input-v1",
+            "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
             "operation": "baseline",
             "artifact_root": str(self.artifact_root),
             "target_ref": self.target_ref(),
@@ -262,7 +271,7 @@ class V14Project:
 
     def experiment_input(self, baseline_ref: dict) -> dict:
         return {
-            "format_version": "cuda-kernel-optimizer/evaluator-input-v1",
+            "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
             "operation": "experiment",
             "artifact_root": str(self.artifact_root),
             "target_ref": self.target_ref(),
@@ -313,11 +322,23 @@ class V14Project:
             ],
             "change_scope": ["implementation.json"],
             "max_risk": "low",
+            "comparison_contract": {
+                "relationship": "implementation_equivalence",
+                "additional_gates": [],
+                "diagnostics": [],
+                "acquisition": {
+                    "lifecycle": "isolated_process",
+                    "shared_state": [],
+                    "rebuilt_state": ["process"],
+                    "rationale": "fixture variants run in isolated processes",
+                },
+            },
+            "material_premises": [],
         }
 
     def screen_input(self, experiment_ref: dict) -> dict:
         return {
-            "format_version": "cuda-kernel-optimizer/evaluator-input-v1",
+            "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
             "operation": "screen",
             "artifact_root": str(self.artifact_root),
             "target_ref": self.target_ref(),
@@ -350,6 +371,17 @@ class V14Project:
         value = self.target_input({"id": "unused", "sha256": "0" * 64})
         value["operation"] = "final_audit"
         value.pop("experiment_ref")
+        value["comparison_contract"] = {
+            "relationship": "implementation_equivalence",
+            "additional_gates": [],
+            "diagnostics": [],
+            "acquisition": {
+                "lifecycle": "isolated_process",
+                "shared_state": [],
+                "rebuilt_state": ["process"],
+                "rationale": "fixture variants run in isolated processes",
+            },
+        }
         return value
 
     def knowledge_input(self) -> dict:

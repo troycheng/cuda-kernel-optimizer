@@ -23,9 +23,9 @@ import time
 from pathlib import Path
 
 
-INPUT_VERSION = "cuda-kernel-optimizer/evaluator-input-v1"
-RESULT_VERSION = "cuda-kernel-optimizer/evaluator-result-v1"
-TOOL_IDENTITY_VERSION = "cuda-kernel-optimizer/evaluator-tool-v1"
+INPUT_VERSION = "cuda-kernel-optimizer/evaluator-input-v2"
+RESULT_VERSION = "cuda-kernel-optimizer/evaluator-result-v2"
+TOOL_IDENTITY_VERSION = "cuda-kernel-optimizer/evaluator-tool-v2"
 
 _BASELINE_REQUIRED = {
     "format_version",
@@ -63,6 +63,8 @@ _EXPERIMENT_FIELDS = {
     "promote_if",
     "change_scope",
     "max_risk",
+    "comparison_contract",
+    "material_premises",
 }
 _INVOCATION_REF_FIELDS = {"invocation_id", "sha256"}
 _SOURCE_FIELDS = {"kind", "path"}
@@ -72,6 +74,22 @@ _COST_FIELDS = {"screen", "target"}
 _COST_RANGE_FIELDS = {"p50_seconds", "p90_seconds", "gpu_count", "basis"}
 _EFFECT_FIELDS = {"value", "unit"}
 _CONDITION_FIELDS = {"kind"}
+_COMPARISON_FIELDS = {
+    "relationship",
+    "additional_gates",
+    "diagnostics",
+    "acquisition",
+}
+_GATE_FIELDS = {"metric", "operator", "value"}
+_ACQUISITION_FIELDS = {"lifecycle", "shared_state", "rebuilt_state", "rationale"}
+_PREMISE_FIELDS = {
+    "statement",
+    "component",
+    "version",
+    "status",
+    "source",
+    "decision_effect",
+}
 _SCREEN_REQUIRED = {
     "format_version",
     "operation",
@@ -89,7 +107,9 @@ _SCREEN_REQUIRED = {
 _SCREEN_OPTIONAL = {"absolute_deadline", "retry_of"}
 _TARGET_REQUIRED = set(_SCREEN_REQUIRED)
 _TARGET_OPTIONAL = set(_SCREEN_OPTIONAL)
-_FINAL_AUDIT_REQUIRED = _TARGET_REQUIRED - {"experiment_ref"}
+_FINAL_AUDIT_REQUIRED = (_TARGET_REQUIRED - {"experiment_ref"}) | {
+    "comparison_contract"
+}
 _FINAL_AUDIT_OPTIONAL = set(_SCREEN_OPTIONAL)
 _EXPERIMENT_REF_FIELDS = {"id", "sha256"}
 _SCREEN_SAMPLING_FIELDS = {"case_ids", "pairs", "seed"}
@@ -507,6 +527,95 @@ def _tool_identity() -> dict:
     return identity
 
 
+def _baseline_evidence_plan(sampling_design: dict) -> dict:
+    steps = [
+        {
+            "call_index": index,
+            "case_id": case_id,
+            "pair_index": None,
+            "order": None,
+            "roles": ["original"],
+            "acquisition": {
+                "lifecycle": "isolated_process",
+                "shared_state": [],
+                "rebuilt_state": ["process"],
+            },
+        }
+        for index, case_id in enumerate(sampling_design["case_ids"])
+    ]
+    return {
+        "driver_calls": len(steps),
+        "full_lifecycle_starts": len(steps),
+        "steps": steps,
+    }
+
+
+def _comparison_evidence_plan(
+    sampling_design: dict,
+    comparison_contract: dict,
+    *,
+    reference_role: str,
+    include_restore_checks: bool = False,
+) -> dict:
+    acquisition = comparison_contract["acquisition"]
+    steps = []
+    for pair_index, order in enumerate(sampling_design["orders"]):
+        for case_id in sampling_design["case_ids"]:
+            ordered_roles = (
+                [reference_role, "candidate"]
+                if order == "AB"
+                else ["candidate", reference_role]
+            )
+            role_groups = (
+                [ordered_roles]
+                if acquisition["lifecycle"] == "same_process"
+                else [[role] for role in ordered_roles]
+            )
+            for roles in role_groups:
+                steps.append(
+                    {
+                        "call_index": len(steps),
+                        "case_id": case_id,
+                        "pair_index": pair_index,
+                        "order": order,
+                        "roles": roles,
+                        "acquisition": {
+                            "lifecycle": acquisition["lifecycle"],
+                            "shared_state": (
+                                acquisition["shared_state"]
+                                if acquisition["lifecycle"] == "same_process"
+                                else []
+                            ),
+                            "rebuilt_state": acquisition["rebuilt_state"],
+                        },
+                    }
+                )
+    restore_steps = []
+    if include_restore_checks:
+        restore_steps = [
+            {
+                "call_index": len(steps) + index,
+                "case_id": case_id,
+                "pair_index": None,
+                "order": None,
+                "roles": ["original"],
+                "acquisition": {
+                    "lifecycle": "isolated_process",
+                    "shared_state": [],
+                    "rebuilt_state": ["process"],
+                },
+            }
+            for index, case_id in enumerate(sampling_design["case_ids"])
+        ]
+    return {
+        "driver_calls": len(steps),
+        "full_lifecycle_starts": len(steps),
+        "steps": steps,
+        "conditional_restore_calls": len(restore_steps),
+        "conditional_restore_steps": restore_steps,
+    }
+
+
 def _frozen_baseline_request(request: dict, target: dict) -> dict:
     frozen = {
         "operation": "baseline",
@@ -518,6 +627,7 @@ def _frozen_baseline_request(request: dict, target: dict) -> dict:
             "constraints": target["constraints"],
         },
         "sampling_design": request["sampling_design"],
+        "evidence_plan": _baseline_evidence_plan(request["sampling_design"]),
         "resources": request["resources"],
         "cleanup": target["driver"]["cleanup_contract"],
         "tool_identity": _tool_identity(),
@@ -605,6 +715,163 @@ def _conditions(value, label: str) -> list[dict]:
         normalized.append(
             {"kind": _text(item["kind"], f"{label}[{index}].kind", maximum=128)}
         )
+    return normalized
+
+
+def _acceptance_rule(value, label: str) -> dict:
+    rule = _closed(value, _GATE_FIELDS, set(), label)
+    operator = rule["operator"]
+    if operator not in {"greater_or_equal", "less_or_equal", "equal"}:
+        raise EvaluatorError(
+            "invalid_evaluator_input", f"{label}.operator is unsupported"
+        )
+    return {
+        "metric": _text(rule["metric"], f"{label}.metric", maximum=128),
+        "operator": operator,
+        "value": _finite(rule["value"], f"{label}.value"),
+    }
+
+
+def _comparison_contract(value, *, target: dict) -> dict:
+    contract = _closed(
+        value,
+        _COMPARISON_FIELDS,
+        set(),
+        "comparison_contract",
+    )
+    relationship = contract["relationship"]
+    if relationship not in {
+        "implementation_equivalence",
+        "artifact_fidelity",
+        "deployment_effect",
+    }:
+        raise EvaluatorError(
+            "invalid_evaluator_input",
+            "comparison_contract.relationship is unsupported",
+        )
+    gates_value = contract["additional_gates"]
+    if type(gates_value) is not list:
+        raise EvaluatorError(
+            "invalid_evaluator_input",
+            "comparison_contract.additional_gates must be a list",
+        )
+    gates = [
+        _acceptance_rule(item, f"comparison_contract.additional_gates[{index}]")
+        for index, item in enumerate(gates_value)
+    ]
+    gate_metrics = [item["metric"] for item in gates]
+    if len(gate_metrics) != len(set(gate_metrics)):
+        raise EvaluatorError(
+            "invalid_evaluator_input",
+            "comparison_contract gate metrics must be unique",
+        )
+    diagnostics = _string_list(
+        contract["diagnostics"],
+        "comparison_contract.diagnostics",
+    )
+    target_metric = target["correctness"]["acceptance"]["metric"]
+    if target_metric in gate_metrics:
+        raise EvaluatorError(
+            "invalid_evaluator_input",
+            "comparison_contract cannot duplicate the Target correctness gate",
+        )
+    if set(diagnostics) & (set(gate_metrics) | {target_metric}):
+        raise EvaluatorError(
+            "invalid_evaluator_input",
+            "a correctness metric cannot be both a gate and diagnostic",
+        )
+    acquisition = _closed(
+        contract["acquisition"],
+        _ACQUISITION_FIELDS,
+        set(),
+        "comparison_contract.acquisition",
+    )
+    lifecycle = acquisition["lifecycle"]
+    if lifecycle not in {"isolated_process", "same_process"}:
+        raise EvaluatorError(
+            "invalid_evaluator_input",
+            "comparison_contract acquisition lifecycle is unsupported",
+        )
+    shared_state = _string_list(
+        acquisition["shared_state"],
+        "comparison_contract.acquisition.shared_state",
+    )
+    rebuilt_state = _string_list(
+        acquisition["rebuilt_state"],
+        "comparison_contract.acquisition.rebuilt_state",
+    )
+    if set(shared_state) & set(rebuilt_state):
+        raise EvaluatorError(
+            "invalid_evaluator_input",
+            "comparison state cannot be both shared and rebuilt",
+        )
+    if lifecycle == "isolated_process" and shared_state:
+        raise EvaluatorError(
+            "invalid_evaluator_input",
+            "isolated comparison cannot declare shared process state",
+        )
+    if lifecycle == "same_process" and not shared_state:
+        raise EvaluatorError(
+            "invalid_evaluator_input",
+            "same-process comparison must declare shared state",
+        )
+    capabilities = set(target["driver"]["evidence_capabilities"])
+    if (
+        lifecycle == "same_process"
+        and "paired_same_process_combined" not in capabilities
+    ):
+        raise EvaluatorError(
+            "invalid_evaluator_input",
+            "driver cannot satisfy the same-process comparison contract",
+        )
+    return {
+        "relationship": relationship,
+        "additional_gates": gates,
+        "diagnostics": diagnostics,
+        "acquisition": {
+            "lifecycle": lifecycle,
+            "shared_state": shared_state,
+            "rebuilt_state": rebuilt_state,
+            "rationale": _text(
+                acquisition["rationale"],
+                "comparison_contract.acquisition.rationale",
+            ),
+        },
+    }
+
+
+def _material_premises(value) -> list[dict]:
+    if type(value) is not list:
+        raise EvaluatorError(
+            "invalid_evaluator_input", "material_premises must be a list"
+        )
+    normalized = []
+    for index, item in enumerate(value):
+        premise = _closed(
+            item,
+            _PREMISE_FIELDS,
+            set(),
+            f"material_premises[{index}]",
+        )
+        status = premise["status"]
+        if status not in {
+            "primary_source_claim",
+            "source_inference",
+            "runtime_observation",
+            "unresolved_hypothesis",
+        }:
+            raise EvaluatorError(
+                "invalid_evaluator_input",
+                f"material_premises[{index}].status is unsupported",
+            )
+        normalized_premise = {"status": status}
+        for field in _PREMISE_FIELDS - {"status"}:
+            normalized_premise[field] = _text(
+                premise[field],
+                f"material_premises[{index}].{field}",
+                maximum=128 if field in {"component", "version"} else 4096,
+            )
+        normalized.append(normalized_premise)
     return normalized
 
 
@@ -845,6 +1112,11 @@ def create_experiment(value) -> dict:
         raise EvaluatorError(
             "invalid_evaluator_input", "max_risk is unsupported"
         )
+    comparison_contract = _comparison_contract(
+        request["comparison_contract"],
+        target=target,
+    )
+    material_premises = _material_premises(request["material_premises"])
     reference_variant, reference_selection_ref = _current_reference(root, target)
 
     staging_parent = root / ".staging"
@@ -926,11 +1198,13 @@ def create_experiment(value) -> dict:
             "change_scope": change_scope,
             "changed_paths": changed_paths,
             "max_risk": request["max_risk"],
+            "comparison_contract": comparison_contract,
+            "material_premises": material_premises,
         }
         experiment_id = "exp-" + hashlib.sha256(_canonical_bytes(core)).hexdigest()
         record = {
             "record_type": "experiment",
-            "format_version": "cuda-kernel-optimizer/experiment-v1",
+            "format_version": "cuda-kernel-optimizer/experiment-v2",
             "id": experiment_id,
             **core,
         }
@@ -1100,7 +1374,13 @@ def _frozen_screen_request(
         "screen_design": experiment["screen_design"],
         "cheapest_falsifier": experiment["cheapest_falsifier"],
         "reject_if": experiment["reject_if"],
+        "comparison_contract": experiment["comparison_contract"],
         "sampling_design": request["sampling_design"],
+        "evidence_plan": _comparison_evidence_plan(
+            request["sampling_design"],
+            experiment["comparison_contract"],
+            reference_role="reference",
+        ),
         "validity_requirements": target["validity_requirements"],
         "resources": request["resources"],
         "cleanup": target["driver"]["cleanup_contract"],
@@ -1170,6 +1450,11 @@ def _comparison_input(
             request["target_ref"],
         )
         _load_baseline(root, experiment["baseline_ref"], request["target_ref"])
+    comparison_contract = (
+        experiment["comparison_contract"]
+        if experiment is not None
+        else _comparison_contract(request["comparison_contract"], target=target)
+    )
     sampling = _closed(
         request["sampling_design"],
         _SCREEN_SAMPLING_FIELDS,
@@ -1214,6 +1499,7 @@ def _comparison_input(
             "orders": DESIGN.balanced_pair_orders(pairs, seed=seed),
         },
         "resources": resources,
+        "comparison_contract": comparison_contract,
     }
     for field in (
         "operation_timeout_seconds",
@@ -1299,6 +1585,24 @@ def _screen_gate_refs(root: Path, experiment: dict) -> list[dict]:
     for invocation_id, record in records.items():
         result = record["result"]
         payload = record["result_payload"]
+        correctness_rejection = (
+            type(result) is dict
+            and result.get("verdict") == "rejected"
+            and result.get("stop_reason") == "correctness_failed"
+            and any(
+                type(receipt) is dict
+                and receipt.get("role") == "candidate"
+                and receipt.get("status") == "valid"
+                and receipt.get("passed") is False
+                for receipt in result.get("correctness_receipts", [])
+            )
+        )
+        performance_evidence_valid = (
+            type(result) is dict
+            and result.get("measurement_validity") == "valid"
+            and result.get("performance_receipt", {}).get("reference_status")
+            == "current"
+        )
         if (
             type(result) is not dict
             or payload is None
@@ -1306,10 +1610,8 @@ def _screen_gate_refs(root: Path, experiment: dict) -> list[dict]:
             or result.get("experiment_ref") != experiment_ref
             or result.get("target_ref") != experiment["target_ref"]
             or result.get("execution_status") != "succeeded"
-            or result.get("measurement_validity") != "valid"
             or result.get("cleanup_status") != "confirmed"
-            or result.get("performance_receipt", {}).get("reference_status")
-            != "current"
+            or not (correctness_rejection or performance_evidence_valid)
         ):
             continue
         reference = {
@@ -1411,6 +1713,13 @@ def _frozen_formal_request(
             "constraints": target["constraints"],
         },
         "sampling_design": request["sampling_design"],
+        "comparison_contract": request["comparison_contract"],
+        "evidence_plan": _comparison_evidence_plan(
+            request["sampling_design"],
+            request["comparison_contract"],
+            reference_role="original" if experiment is None else "reference",
+            include_restore_checks=experiment is None,
+        ),
         "validity_requirements": target["validity_requirements"],
         "resources": request["resources"],
         "cleanup": target["driver"]["cleanup_contract"],
@@ -1503,13 +1812,13 @@ def _driver_call(
     request: dict,
     target: dict,
     driver_inputs: dict,
-    variant: dict,
-    role: str,
-    mode: str,
-    case_id: str,
-    index: int,
-) -> tuple[dict | None, dict, dict]:
-    call_dir = invocation_dir / "driver" / f"{index:04d}-{mode}-{case_id}"
+    subjects: list[dict],
+    step: dict,
+) -> tuple[dict | None, dict, dict, bool]:
+    index = step["call_index"]
+    case_id = step["case_id"]
+    roles = "-".join(subject["role"] for subject in subjects)
+    call_dir = invocation_dir / "driver" / f"{index:04d}-{roles}-{case_id}"
     call_dir.mkdir(parents=True)
     output_dir = call_dir / "output"
     output_dir.mkdir()
@@ -1519,14 +1828,17 @@ def _driver_call(
         execution_id=invocation_dir.name,
         operation=request["operation"],
         driver=request["driver"],
-        variant=variant,
+        subjects=subjects,
         test_suite=driver_inputs["test_suite"],
         correctness=driver_inputs["correctness"],
         objective=driver_inputs["objective"],
-        role=role,
-        mode=mode,
+        acquisition=step["acquisition"],
         case={"id": case_id},
-        sampling=request["sampling_design"],
+        sampling={
+            **request["sampling_design"],
+            "pair_index": step["pair_index"],
+            "order": step["order"],
+        },
         output_path=output_path,
     )
     request_path = call_dir / "request.json"
@@ -1544,7 +1856,7 @@ def _driver_call(
         return None, command_result, {
             "request": driver_request,
             "command_result": command_result,
-        }
+        }, False
     try:
         evidence_ref = STORE.freeze_path(
             os.environ["CKO_ARTIFACT_ROOT"],
@@ -1571,16 +1883,19 @@ def _driver_call(
         return None, invalid, {
             "request": driver_request,
             "command_result": invalid,
-        }
+        }, False
     try:
         driver_result = ADAPTER.validate_driver_result(
             frozen_output / "result.json",
             driver_request,
             bundle_manifest=output_manifest,
         )
-        if "measurements" in driver_result:
+        for subject in subjects:
+            subject_evidence = ADAPTER.evidence_for_role(
+                driver_result, subject["role"]
+            )
             ADAPTER.validate_measurement_contract(
-                driver_result["measurements"],
+                subject_evidence["measurements"],
                 driver_request["objective"],
                 driver_request["sampling"],
             )
@@ -1595,24 +1910,14 @@ def _driver_call(
         return None, invalid, {
             "request": driver_request,
             "command_result": invalid,
-        }
-    if driver_result["environment"] != target["environment"]["runtime"]:
-        invalid = {
-            **command_result,
-            "status": "failed",
-            "stop_reason": "environment_identity_changed",
-            "stderr": "driver environment does not match the frozen Target",
-        }
-        return None, invalid, {
-            "request": driver_request,
-            "command_result": invalid,
-        }
+        }, False
+    environment_matches = driver_result["environment"] == target["environment"]["runtime"]
     return driver_result, command_result, {
         "request": driver_request,
         "command_result": command_result,
         "driver_output_ref": evidence_ref,
         "driver_artifacts": driver_result["artifacts"],
-    }
+    }, environment_matches
 
 
 def _base_result(request: dict, started_epoch: float) -> dict:
@@ -1636,7 +1941,9 @@ def _base_result(request: dict, started_epoch: float) -> dict:
             "acceptance": request["objective"]["primary_metric"],
             "evidence_refs": [],
         },
-        "skipped_expensive_stages": [],
+        "evidence_plan": request["evidence_plan"],
+        "completed_driver_calls": 0,
+        "skipped_evidence_steps": [],
         "command_receipts": [],
     }
 
@@ -1651,7 +1958,7 @@ def _command_failure(
     result: dict,
     command_result: dict,
     *,
-    skipped: list[str],
+    skipped: list[int],
     started_mono: float,
 ) -> dict:
     status = command_result["status"]
@@ -1664,7 +1971,7 @@ def _command_failure(
     )
     result["stop_reason"] = command_result["stop_reason"]
     result["cleanup_status"] = command_result["cleanup_status"]
-    result["skipped_expensive_stages"] = skipped
+    result["skipped_evidence_steps"] = skipped
     return _finish(result, started_mono=started_mono)
 
 
@@ -1678,7 +1985,7 @@ def _run_baseline_worker(
     started_mono = time.monotonic()
     result = _base_result(request, started_epoch)
     target = _load_target(artifact_root, request["target_ref"])
-    driver = ADAPTER.verify_driver(request["driver"])
+    ADAPTER.verify_driver(request["driver"])
     original = target["original"]
     workspace = invocation_dir / "workspace"
     workspace.mkdir()
@@ -1688,145 +1995,73 @@ def _run_baseline_worker(
     variant = ADAPTER.materialize_variant(
         artifact_root, workspace, original, "original"
     )
-    cases = request["sampling_design"]["case_ids"]
-    call_index = 0
     measurements = []
     correctness_receipts = []
-
-    if driver["execution_mode"] == "combined":
-        modes = ("combined",)
-    else:
-        modes = ("correctness", "measure")
-    if modes == ("correctness", "measure"):
-        for case_id in cases:
-            driver_result, command_result, receipt = _driver_call(
-                invocation_dir=invocation_dir,
-                request=request,
-                target=target,
-                driver_inputs=driver_inputs,
-                variant=variant,
-                role="original",
-                mode="correctness",
-                case_id=case_id,
-                index=call_index,
+    steps = request["evidence_plan"]["steps"]
+    for position, step in enumerate(steps):
+        driver_result, command_result, receipt, environment_matches = _driver_call(
+            invocation_dir=invocation_dir,
+            request=request,
+            target=target,
+            driver_inputs=driver_inputs,
+            subjects=[{"role": "original", "variant": variant}],
+            step=step,
+        )
+        result["command_receipts"].append(receipt)
+        if driver_result is None:
+            return _command_failure(
+                result,
+                command_result,
+                skipped=[item["call_index"] for item in steps[position + 1 :]],
+                started_mono=started_mono,
             )
-            call_index += 1
-            result["command_receipts"].append(receipt)
-            if driver_result is None:
-                return _command_failure(
-                    result,
-                    command_result,
-                    skipped=["measure"],
-                    started_mono=started_mono,
-                )
-            correctness = driver_result["correctness"]
-            correctness_gate = ADAPTER.evaluate_correctness(
-                correctness,
-                target["correctness"]["acceptance"],
-            )
-            correctness_receipts.append(
-                {
-                    "variant": original,
-                    "case_id": case_id,
-                    "status": "valid",
-                    "passed": correctness_gate["passed"],
-                    "acceptance": target["correctness"]["acceptance"],
-                    "metrics": correctness["metrics"],
-                    "gate": correctness_gate,
-                    "evidence_refs": [receipt["driver_output_ref"]],
-                }
-            )
-            if not correctness_gate["passed"]:
-                result["correctness_receipts"] = correctness_receipts
-                result["execution_status"] = "succeeded"
-                result["measurement_validity"] = "invalid"
-                result["verdict"] = "failed"
-                result["stop_reason"] = "correctness_failed"
-                result["skipped_expensive_stages"] = ["measure"]
-                return _finish(result, started_mono=started_mono)
-
-        for case_id in cases:
-            driver_result, command_result, receipt = _driver_call(
-                invocation_dir=invocation_dir,
-                request=request,
-                target=target,
-                driver_inputs=driver_inputs,
-                variant=variant,
-                role="original",
-                mode="measure",
-                case_id=case_id,
-                index=call_index,
-            )
-            call_index += 1
-            result["command_receipts"].append(receipt)
-            if driver_result is None:
-                result["correctness_receipts"] = correctness_receipts
-                return _command_failure(
-                    result,
-                    command_result,
-                    skipped=[],
-                    started_mono=started_mono,
-                )
-            measurements.append(
-                {
-                    "case_id": case_id,
-                    **driver_result["measurements"],
-                    "evidence_ref": receipt["driver_output_ref"],
-                }
-            )
-    else:
-        for case_id in cases:
-            driver_result, command_result, receipt = _driver_call(
-                invocation_dir=invocation_dir,
-                request=request,
-                target=target,
-                driver_inputs=driver_inputs,
-                variant=variant,
-                role="original",
-                mode="combined",
-                case_id=case_id,
-                index=call_index,
-            )
-            call_index += 1
-            result["command_receipts"].append(receipt)
-            if driver_result is None:
-                return _command_failure(
-                    result,
-                    command_result,
-                    skipped=[],
-                    started_mono=started_mono,
-                )
-            correctness = driver_result["correctness"]
-            correctness_gate = ADAPTER.evaluate_correctness(
-                correctness,
-                target["correctness"]["acceptance"],
-            )
-            correctness_receipts.append(
-                {
-                    "variant": original,
-                    "case_id": case_id,
-                    "status": "valid",
-                    "passed": correctness_gate["passed"],
-                    "acceptance": target["correctness"]["acceptance"],
-                    "metrics": correctness["metrics"],
-                    "gate": correctness_gate,
-                    "evidence_refs": [receipt["driver_output_ref"]],
-                }
-            )
-            if not correctness_gate["passed"]:
-                result["correctness_receipts"] = correctness_receipts
-                result["execution_status"] = "succeeded"
-                result["measurement_validity"] = "invalid"
-                result["verdict"] = "failed"
-                result["stop_reason"] = "correctness_failed"
-                return _finish(result, started_mono=started_mono)
-            measurements.append(
-                {
-                    "case_id": case_id,
-                    **driver_result["measurements"],
-                    "evidence_ref": receipt["driver_output_ref"],
-                }
-            )
+        result["completed_driver_calls"] += 1
+        evidence = ADAPTER.evidence_for_role(driver_result, "original")
+        correctness_gate = ADAPTER.evaluate_correctness(
+            evidence["correctness"],
+            target["correctness"]["acceptance"],
+        )
+        correctness_receipts.append(
+            {
+                "variant": original,
+                "case_id": step["case_id"],
+                "status": "valid",
+                "passed": correctness_gate["passed"],
+                "acceptance": target["correctness"]["acceptance"],
+                "metrics": evidence["correctness"]["metrics"],
+                "gate": correctness_gate,
+                "evidence_refs": [receipt["driver_output_ref"]],
+            }
+        )
+        if not correctness_gate["passed"]:
+            result["correctness_receipts"] = correctness_receipts
+            result["execution_status"] = "succeeded"
+            result["measurement_validity"] = "invalid"
+            result["verdict"] = "failed"
+            result["stop_reason"] = "correctness_failed"
+            result["skipped_evidence_steps"] = [
+                item["call_index"] for item in steps[position + 1 :]
+            ]
+            return _finish(result, started_mono=started_mono)
+        if not environment_matches:
+            result["correctness_receipts"] = correctness_receipts
+            result["execution_status"] = "succeeded"
+            result["verdict"] = "not_evaluated"
+            result["stop_reason"] = "environment_identity_changed"
+            result["skipped_evidence_steps"] = [
+                item["call_index"] for item in steps[position + 1 :]
+            ]
+            result["runtime_attribution_scope"] = driver_result["environment"][
+                "runtime_provenance"
+            ]["attribution_scope"]
+            return _finish(result, started_mono=started_mono)
+        measurements.append(
+            {
+                "case_id": step["case_id"],
+                **evidence["measurements"],
+                "evidence_ref": receipt["driver_output_ref"],
+            }
+        )
 
     primary = target["primary_metric"]
     result["correctness_receipts"] = correctness_receipts
@@ -1842,6 +2077,9 @@ def _run_baseline_worker(
     result["measurement_validity"] = "valid"
     result["verdict"] = "passed"
     result["stop_reason"] = "completed"
+    result["runtime_attribution_scope"] = target["environment"]["runtime"][
+        "runtime_provenance"
+    ]["attribution_scope"]
     return _finish(result, started_mono=started_mono)
 
 
@@ -1874,8 +2112,7 @@ def _formal_binding_matches(
     )
 
 
-def _measurement_values(driver_result: dict, target: dict) -> dict:
-    measurements = driver_result["measurements"]
+def _measurement_values(measurements: dict, target: dict) -> dict:
     observed = measurements["primary"]
     observed_constraints = {
         constraint["name"]: constraint
@@ -1966,301 +2203,40 @@ def _comparison_statistics(
     return primary_statistics, constraint_statistics
 
 
-def _run_screen_worker(
-    *,
+def _comparison_binding_matches(
     artifact_root: Path,
-    invocation_dir: Path,
+    target: dict,
     request: dict,
+) -> bool:
+    if request["operation"] == "screen":
+        return _current_reference_matches(artifact_root, target, request)
+    return _formal_binding_matches(artifact_root, target, request)
+
+
+def _finish_stale_comparison(
+    result: dict,
+    *,
+    request: dict,
+    started_mono: float,
+    commands_started: bool,
+    remaining_steps: list[int],
 ) -> dict:
-    started_epoch = time.time()
-    started_mono = time.monotonic()
-    result = _base_result(request, started_epoch)
-    result["experiment_ref"] = request["experiment_ref"]
-    target = _load_target(artifact_root, request["target_ref"])
-    driver = ADAPTER.verify_driver(request["driver"])
-    reference_frozen, candidate_frozen = request["variant_refs"]
-    workspace = invocation_dir / "workspace"
-    workspace.mkdir()
-    driver_inputs = ADAPTER.materialize_target_inputs(
-        artifact_root, workspace, target
-    )
-    reference = ADAPTER.materialize_variant(
-        artifact_root, workspace, reference_frozen, "reference"
-    )
-    candidate = ADAPTER.materialize_variant(
-        artifact_root, workspace, candidate_frozen, "candidate"
-    )
-    if not _current_reference_matches(artifact_root, target, request):
-        result["execution_status"] = "invalid"
-        result["stop_reason"] = "stale_reference"
-        result["skipped_expensive_stages"] = ["correctness", "paired_measurement"]
-        return _finish(result, started_mono=started_mono)
-
-    call_index = 0
-    correctness_receipts = []
-    cases = request["sampling_design"]["case_ids"]
-    if driver["execution_mode"] == "separate":
-        for case_id in cases:
-            driver_result, command_result, receipt = _driver_call(
-                invocation_dir=invocation_dir,
-                request=request,
-                target=target,
-                driver_inputs=driver_inputs,
-                variant=candidate,
-                role="candidate",
-                mode="correctness",
-                case_id=case_id,
-                index=call_index,
-            )
-            call_index += 1
-            result["command_receipts"].append(receipt)
-            if driver_result is None:
-                return _command_failure(
-                    result,
-                    command_result,
-                    skipped=["paired_measurement"],
-                    started_mono=started_mono,
-                )
-            correctness = driver_result["correctness"]
-            correctness_gate = ADAPTER.evaluate_correctness(
-                correctness,
-                target["correctness"]["acceptance"],
-            )
-            correctness_receipts.append(
-                {
-                    "variant": candidate_frozen,
-                    "case_id": case_id,
-                    "status": "valid",
-                    "passed": correctness_gate["passed"],
-                    "acceptance": target["correctness"]["acceptance"],
-                    "metrics": correctness["metrics"],
-                    "gate": correctness_gate,
-                    "evidence_refs": [receipt["driver_output_ref"]],
-                }
-            )
-            if not correctness_gate["passed"]:
-                result["correctness_receipts"] = correctness_receipts
-                result["execution_status"] = "succeeded"
-                result["measurement_validity"] = "valid"
-                result["verdict"] = "rejected"
-                result["stop_reason"] = "correctness_failed"
-                result["skipped_expensive_stages"] = ["paired_measurement"]
-                return _finish(result, started_mono=started_mono)
-        if not _current_reference_matches(artifact_root, target, request):
-            result["correctness_receipts"] = correctness_receipts
-            result["execution_status"] = "succeeded"
-            result["stop_reason"] = "stale_reference"
-            result["skipped_expensive_stages"] = ["paired_measurement"]
-            return _finish(result, started_mono=started_mono)
-
-    pairs = []
-    for pair_index, order in enumerate(request["sampling_design"]["orders"]):
-        for case_id in cases:
-            values = {}
-            pair_evidence = []
-            roles = (
-                (("reference", reference), ("candidate", candidate))
-                if order == "AB"
-                else (("candidate", candidate), ("reference", reference))
-            )
-            for role, variant in roles:
-                mode = (
-                    "measure"
-                    if driver["execution_mode"] == "separate"
-                    else "combined"
-                )
-                driver_result, command_result, receipt = _driver_call(
-                    invocation_dir=invocation_dir,
-                    request=request,
-                    target=target,
-                    driver_inputs=driver_inputs,
-                    variant=variant,
-                    role=role,
-                    mode=mode,
-                    case_id=case_id,
-                    index=call_index,
-                )
-                call_index += 1
-                result["command_receipts"].append(receipt)
-                if driver_result is None:
-                    result["correctness_receipts"] = correctness_receipts
-                    return _command_failure(
-                        result,
-                        command_result,
-                        skipped=[],
-                        started_mono=started_mono,
-                    )
-                if driver["execution_mode"] == "combined":
-                    correctness = driver_result["correctness"]
-                    correctness_gate = ADAPTER.evaluate_correctness(
-                        correctness,
-                        target["correctness"]["acceptance"],
-                    )
-                    correctness_receipts.append(
-                        {
-                            "variant": (
-                                reference_frozen
-                                if role == "reference"
-                                else candidate_frozen
-                            ),
-                            "case_id": case_id,
-                            "status": "valid",
-                            "passed": correctness_gate["passed"],
-                            "acceptance": target["correctness"]["acceptance"],
-                            "metrics": correctness["metrics"],
-                            "gate": correctness_gate,
-                            "evidence_refs": [receipt["driver_output_ref"]],
-                        }
-                    )
-                    if not correctness_gate["passed"]:
-                        result["correctness_receipts"] = correctness_receipts
-                        result["execution_status"] = "succeeded"
-                        result["measurement_validity"] = "valid"
-                        result["verdict"] = "rejected"
-                        result["stop_reason"] = "correctness_failed"
-                        return _finish(result, started_mono=started_mono)
-                values[role] = _measurement_values(driver_result, target)
-                pair_evidence.append(receipt["driver_output_ref"])
-            pairs.append(
-                {
-                    "pair_index": pair_index,
-                    "case_id": case_id,
-                    "order": order,
-                    "reference": values["reference"]["primary"],
-                    "candidate": values["candidate"]["primary"],
-                    "constraints": {
-                        name: {
-                            "reference": values["reference"]["constraints"][name],
-                            "candidate": values["candidate"]["constraints"][name],
-                        }
-                        for name in values["reference"]["constraints"]
-                    },
-                    "valid": True,
-                    "evidence_refs": pair_evidence,
-                }
-            )
-
-    statistics_result, constraint_statistics = _comparison_statistics(
-        pairs,
-        target=target,
-        objective=request["objective"],
-        validity_requirements=request["validity_requirements"],
-        seed=request["sampling_design"]["seed"],
-    )
-    result["correctness_receipts"] = correctness_receipts
-    result["performance_receipt"] = {
-        "status": "valid",
-        "reference": reference_frozen,
-        "candidate": candidate_frozen,
-        "reference_status": (
-            "current"
-            if _current_reference_matches(artifact_root, target, request)
-            else "stale_reference"
-        ),
-        "acceptance": request["objective"]["minimum_effect"],
-        "pairs": pairs,
-        "statistics": statistics_result,
-        "constraint_statistics": constraint_statistics,
-        "evidence_refs": [
-            evidence
-            for pair in pairs
-            for evidence in pair["evidence_refs"]
-        ],
-    }
-    if result["performance_receipt"]["reference_status"] != "current":
-        result["execution_status"] = "succeeded"
+    result["skipped_evidence_steps"] = remaining_steps
+    if request["operation"] == "screen":
+        result["execution_status"] = "succeeded" if commands_started else "invalid"
         result["measurement_validity"] = "invalid"
         result["verdict"] = "not_evaluated"
         result["stop_reason"] = "stale_reference"
-    else:
-        result["execution_status"] = "succeeded"
-        result["measurement_validity"] = "valid"
-        result["screen_claim_status"] = (
-            "confirmed"
-            if statistics_result["status"] == "confirmed_win"
-            else "falsified"
-            if statistics_result["status"] == "confirmed_loss"
-            else "inconclusive"
-        )
-        reject_kinds = {condition["kind"] for condition in request["reject_if"]}
-        if any(item["status"] == "failed" for item in constraint_statistics):
-            result["verdict"] = "rejected"
-            result["stop_reason"] = "constraint_failed"
-        elif (
-            result["screen_claim_status"] == "falsified"
-            and "screen_claim_falsified" in reject_kinds
-        ):
-            result["verdict"] = "rejected"
-            result["stop_reason"] = "screen_claim_falsified"
-        elif (
-            request["screen_design"]["kind"] == "conservative_bound"
-            and statistics_result["ci_high_pct"] is not None
-            and statistics_result["ci_high_pct"]
-            < request["objective"]["minimum_effect"]["value"]
-        ):
-            result["verdict"] = "rejected"
-            result["stop_reason"] = "screen_upper_bound_below_minimum"
-        else:
-            result["verdict"] = "inconclusive"
-            result["stop_reason"] = "completed"
-    return _finish(result, started_mono=started_mono)
-
-
-def _correctness_receipt(
-    *,
-    frozen_variant: dict,
-    case_id: str,
-    target: dict,
-    driver_result: dict,
-    evidence_ref: dict,
-) -> dict:
-    correctness = driver_result["correctness"]
-    gate = ADAPTER.evaluate_correctness(
-        correctness,
-        target["correctness"]["acceptance"],
+        return _finish(result, started_mono=started_mono)
+    return _finish_stale_formal(
+        result,
+        started_mono=started_mono,
+        commands_started=commands_started,
+        skipped=remaining_steps,
     )
-    return {
-        "variant": frozen_variant,
-        "case_id": case_id,
-        "status": "valid",
-        "passed": gate["passed"],
-        "acceptance": target["correctness"]["acceptance"],
-        "metrics": correctness["metrics"],
-        "gate": gate,
-        "evidence_refs": [evidence_ref],
-    }
 
 
-def _finish_stale_formal(
-    result: dict,
-    *,
-    started_mono: float,
-    commands_started: bool,
-    skipped: list[str],
-) -> dict:
-    _mark_stale_formal_result(result, skipped=skipped)
-    result["execution_status"] = "succeeded" if commands_started else "invalid"
-    return _finish(result, started_mono=started_mono)
-
-
-def _mark_stale_formal_result(
-    result: dict,
-    *,
-    skipped: list[str],
-) -> None:
-    result["measurement_validity"] = "invalid"
-    result["verdict"] = "not_evaluated"
-    result["stop_reason"] = "stale_reference"
-    result["reference_status"] = "stale_reference"
-    result["skipped_expensive_stages"] = skipped
-    performance = result.get("performance_receipt")
-    if type(performance) is dict and "reference_status" in performance:
-        performance["reference_status"] = "stale_reference"
-    if result["operation"] == "final_audit":
-        result["restore_supported"] = False
-
-
-def _run_formal_worker(
+def _run_comparison_worker(
     *,
     artifact_root: Path,
     invocation_dir: Path,
@@ -2269,32 +2245,41 @@ def _run_formal_worker(
     started_epoch = time.time()
     started_mono = time.monotonic()
     result = _base_result(request, started_epoch)
+    result["comparison_contract"] = request["comparison_contract"]
     result["reference_selection_ref"] = request["reference_selection_ref"]
-    if request["operation"] == "target":
+    if request["operation"] in {"screen", "target"}:
         result["experiment_ref"] = request["experiment_ref"]
+    if request["operation"] == "target":
         result["screen_result_refs"] = request["screen_result_refs"]
-    else:
+    if request["operation"] == "final_audit":
         result["restore_supported"] = False
-    target = _load_target(artifact_root, request["target_ref"])
-    driver = ADAPTER.verify_driver(request["driver"])
-    reference_frozen, candidate_frozen = request["variant_refs"]
 
-    resource_result = RUNTIME.acquire_resources(
-        request["resources"]["gpu_uuids"]
-    )
+    target = _load_target(artifact_root, request["target_ref"])
+    ADAPTER.verify_driver(request["driver"])
+    reference_frozen, candidate_frozen = request["variant_refs"]
+    reference_role = "original" if request["operation"] == "final_audit" else "reference"
+    frozen_by_role = {
+        reference_role: reference_frozen,
+        "candidate": candidate_frozen,
+    }
+
+    steps = request["evidence_plan"]["steps"]
+    restore_steps = request["evidence_plan"].get("conditional_restore_steps", [])
+    resource_result = RUNTIME.acquire_resources(request["resources"]["gpu_uuids"])
     if resource_result["status"] != "acquired":
         return _command_failure(
             result,
             resource_result,
-            skipped=["correctness", "paired_measurement"],
+            skipped=[step["call_index"] for step in steps],
             started_mono=started_mono,
         )
-    if not _formal_binding_matches(artifact_root, target, request):
-        return _finish_stale_formal(
+    if not _comparison_binding_matches(artifact_root, target, request):
+        return _finish_stale_comparison(
             result,
+            request=request,
             started_mono=started_mono,
             commands_started=False,
-            skipped=["correctness", "paired_measurement"],
+            remaining_steps=[step["call_index"] for step in steps],
         )
     result["reference_status"] = "current"
 
@@ -2303,212 +2288,191 @@ def _run_formal_worker(
     driver_inputs = ADAPTER.materialize_target_inputs(
         artifact_root, workspace, target
     )
-    reference = ADAPTER.materialize_variant(
-        artifact_root, workspace, reference_frozen, "reference"
-    )
-    candidate = ADAPTER.materialize_variant(
-        artifact_root, workspace, candidate_frozen, "candidate"
-    )
-    if request["operation"] == "final_audit":
-        correctness_plan = (
-            ("original", reference_frozen, reference),
-            ("candidate", candidate_frozen, candidate),
-        )
-    else:
-        correctness_plan = (
-            ("candidate", candidate_frozen, candidate),
-            ("reference", reference_frozen, reference),
-        )
+    materialized_by_role = {
+        reference_role: ADAPTER.materialize_variant(
+            artifact_root,
+            workspace,
+            reference_frozen,
+            reference_role,
+        ),
+        "candidate": ADAPTER.materialize_variant(
+            artifact_root,
+            workspace,
+            candidate_frozen,
+            "candidate",
+        ),
+    }
+
     correctness_receipts = []
-    call_index = 0
-    commands_started = False
-    correctness_mode = (
-        "correctness"
-        if driver["execution_mode"] == "separate"
-        else "combined"
-    )
-    cases = request["sampling_design"]["case_ids"]
-    for role, frozen_variant, materialized_variant in correctness_plan:
-        for case_id in cases:
-            if not _formal_binding_matches(artifact_root, target, request):
-                result["correctness_receipts"] = correctness_receipts
-                return _finish_stale_formal(
-                    result,
-                    started_mono=started_mono,
-                    commands_started=commands_started,
-                    skipped=["paired_measurement"],
-                )
-            driver_result, command_result, receipt = _driver_call(
-                invocation_dir=invocation_dir,
+    pair_values = {}
+    pair_evidence = {}
+    correctness_failed = False
+    skipped_for_correctness = []
+    pending_steps = list(steps)
+    restore_only = False
+    while pending_steps:
+        step = pending_steps.pop(0)
+        remaining = [step["call_index"]] + [
+            item["call_index"] for item in pending_steps
+        ]
+        if not _comparison_binding_matches(artifact_root, target, request):
+            result["correctness_receipts"] = correctness_receipts
+            return _finish_stale_comparison(
+                result,
                 request=request,
-                target=target,
-                driver_inputs=driver_inputs,
-                variant=materialized_variant,
-                role=role,
-                mode=correctness_mode,
-                case_id=case_id,
-                index=call_index,
+                started_mono=started_mono,
+                commands_started=result["completed_driver_calls"] > 0,
+                remaining_steps=skipped_for_correctness + remaining,
             )
-            commands_started = True
-            call_index += 1
-            result["command_receipts"].append(receipt)
-            if driver_result is None:
-                result["correctness_receipts"] = correctness_receipts
-                return _command_failure(
-                    result,
-                    command_result,
-                    skipped=["paired_measurement"],
-                    started_mono=started_mono,
-                )
+        subjects = [
+            {
+                "role": role,
+                "variant": materialized_by_role[role],
+            }
+            for role in step["roles"]
+        ]
+        driver_result, command_result, receipt, environment_matches = _driver_call(
+            invocation_dir=invocation_dir,
+            request=request,
+            target=target,
+            driver_inputs=driver_inputs,
+            subjects=subjects,
+            step=step,
+        )
+        result["command_receipts"].append(receipt)
+        if driver_result is None:
+            result["correctness_receipts"] = correctness_receipts
+            return _command_failure(
+                result,
+                command_result,
+                skipped=skipped_for_correctness + remaining[1:],
+                started_mono=started_mono,
+            )
+        result["completed_driver_calls"] += 1
+        evidence_ref = receipt["driver_output_ref"]
+        key = (step["pair_index"], step["case_id"])
+        if not restore_only:
+            pair_values.setdefault(key, {})
+            pair_evidence.setdefault(key, []).append(evidence_ref)
+
+        step_failed = False
+        original_failed = False
+        for role in step["roles"]:
+            evidence = ADAPTER.evidence_for_role(driver_result, role)
             correctness = _correctness_receipt(
-                frozen_variant=frozen_variant,
-                case_id=case_id,
+                frozen_variant=frozen_by_role[role],
+                role=role,
+                case_id=step["case_id"],
                 target=target,
-                driver_result=driver_result,
-                evidence_ref=receipt["driver_output_ref"],
+                correctness=evidence["correctness"],
+                comparison_contract=request["comparison_contract"],
+                evidence_ref=evidence_ref,
             )
             correctness_receipts.append(correctness)
-            if not correctness["passed"]:
-                result["correctness_receipts"] = correctness_receipts
-                if not _formal_binding_matches(
-                    artifact_root,
+            step_failed = step_failed or not correctness["passed"]
+            original_failed = original_failed or (
+                role == "original" and not correctness["passed"]
+            )
+            if not restore_only:
+                pair_values[key][role] = _measurement_values(
+                    evidence["measurements"],
                     target,
-                    request,
-                ):
-                    return _finish_stale_formal(
-                        result,
-                        started_mono=started_mono,
-                        commands_started=True,
-                        skipped=["paired_measurement"],
-                    )
-                result["execution_status"] = "succeeded"
-                result["measurement_validity"] = "valid"
-                result["verdict"] = "rejected"
-                result["stop_reason"] = "correctness_failed"
-                result["skipped_expensive_stages"] = ["paired_measurement"]
-                if request["operation"] == "final_audit":
-                    original_passed = all(
-                        any(
-                            item["variant"] == reference_frozen
-                            and item["case_id"] == expected_case
-                            and item["passed"]
-                            for item in correctness_receipts
-                        )
-                        for expected_case in cases
-                    )
-                    result["restore_supported"] = (
-                        frozen_variant == candidate_frozen and original_passed
-                    )
-                return _finish(result, started_mono=started_mono)
-
-    if not _formal_binding_matches(artifact_root, target, request):
-        result["correctness_receipts"] = correctness_receipts
-        return _finish_stale_formal(
-            result,
-            started_mono=started_mono,
-            commands_started=True,
-            skipped=["paired_measurement"],
+                )
+        correctness_failed = correctness_failed or step_failed
+        if not environment_matches:
+            result["correctness_receipts"] = correctness_receipts
+            result["execution_status"] = "succeeded"
+            result["verdict"] = "not_evaluated"
+            result["stop_reason"] = "environment_identity_changed"
+            result["skipped_evidence_steps"] = skipped_for_correctness + remaining[1:]
+            result["runtime_attribution_scope"] = driver_result["environment"][
+                "runtime_provenance"
+            ]["attribution_scope"]
+            return _finish(result, started_mono=started_mono)
+        if not step_failed:
+            continue
+        if request["operation"] != "final_audit":
+            result["correctness_receipts"] = correctness_receipts
+            result["execution_status"] = "succeeded"
+            result["measurement_validity"] = "invalid"
+            result["verdict"] = "rejected"
+            result["stop_reason"] = "correctness_failed"
+            result["skipped_evidence_steps"] = remaining[1:]
+            result["runtime_attribution_scope"] = target["environment"]["runtime"][
+                "runtime_provenance"
+            ]["attribution_scope"]
+            return _finish(result, started_mono=started_mono)
+        skipped_for_correctness.extend(remaining[1:])
+        if restore_only or original_failed:
+            break
+        passed_original_cases = {
+            receipt["case_id"]
+            for receipt in correctness_receipts
+            if receipt["role"] == "original" and receipt["passed"]
+        }
+        missing_original_cases = (
+            set(request["sampling_design"]["case_ids"]) - passed_original_cases
         )
+        pending_steps = [
+            step
+            for step in restore_steps
+            if step["case_id"] in missing_original_cases
+        ]
+        restore_only = True
+
+    result["correctness_receipts"] = correctness_receipts
+    result["skipped_evidence_steps"] = skipped_for_correctness
+    result["runtime_attribution_scope"] = target["environment"]["runtime"][
+        "runtime_provenance"
+    ]["attribution_scope"]
+    if correctness_failed:
+        result["execution_status"] = "succeeded"
+        result["measurement_validity"] = "invalid"
+        result["verdict"] = "rejected"
+        result["stop_reason"] = "correctness_failed"
+        if request["operation"] == "final_audit":
+            original_passed = all(
+                any(
+                    receipt["role"] == "original"
+                    and receipt["case_id"] == case_id
+                    and receipt["passed"]
+                    for receipt in correctness_receipts
+                )
+                for case_id in request["sampling_design"]["case_ids"]
+            )
+            candidate_failed = any(
+                receipt["role"] == "candidate" and not receipt["passed"]
+                for receipt in correctness_receipts
+            )
+            result["restore_supported"] = original_passed and candidate_failed
+        return _finish(result, started_mono=started_mono)
 
     pairs = []
     for pair_index, order in enumerate(request["sampling_design"]["orders"]):
-        for case_id in cases:
-            values = {}
-            pair_evidence = []
-            roles = (
-                (("reference", reference), ("candidate", candidate))
-                if order == "AB"
-                else (("candidate", candidate), ("reference", reference))
-            )
-            for role, variant in roles:
-                if not _formal_binding_matches(artifact_root, target, request):
-                    result["correctness_receipts"] = correctness_receipts
-                    return _finish_stale_formal(
-                        result,
-                        started_mono=started_mono,
-                        commands_started=True,
-                        skipped=["remaining_paired_measurement"],
-                    )
-                mode = (
-                    "measure"
-                    if driver["execution_mode"] == "separate"
-                    else "combined"
+        for case_id in request["sampling_design"]["case_ids"]:
+            key = (pair_index, case_id)
+            values = pair_values.get(key, {})
+            if set(values) != {reference_role, "candidate"}:
+                raise EvaluatorError(
+                    "evidence_plan_incomplete",
+                    "comparison evidence plan did not produce both subjects",
                 )
-                driver_result, command_result, receipt = _driver_call(
-                    invocation_dir=invocation_dir,
-                    request=request,
-                    target=target,
-                    driver_inputs=driver_inputs,
-                    variant=variant,
-                    role=role,
-                    mode=mode,
-                    case_id=case_id,
-                    index=call_index,
-                )
-                call_index += 1
-                result["command_receipts"].append(receipt)
-                if driver_result is None:
-                    result["correctness_receipts"] = correctness_receipts
-                    return _command_failure(
-                        result,
-                        command_result,
-                        skipped=[],
-                        started_mono=started_mono,
-                    )
-                if driver["execution_mode"] == "combined":
-                    frozen_variant = (
-                        reference_frozen
-                        if role == "reference"
-                        else candidate_frozen
-                    )
-                    correctness = _correctness_receipt(
-                        frozen_variant=frozen_variant,
-                        case_id=case_id,
-                        target=target,
-                        driver_result=driver_result,
-                        evidence_ref=receipt["driver_output_ref"],
-                    )
-                    correctness_receipts.append(correctness)
-                    if not correctness["passed"]:
-                        result["correctness_receipts"] = correctness_receipts
-                        if not _formal_binding_matches(
-                            artifact_root,
-                            target,
-                            request,
-                        ):
-                            return _finish_stale_formal(
-                                result,
-                                started_mono=started_mono,
-                                commands_started=True,
-                                skipped=["remaining_paired_measurement"],
-                            )
-                        result["execution_status"] = "succeeded"
-                        result["measurement_validity"] = "valid"
-                        result["verdict"] = "rejected"
-                        result["stop_reason"] = "correctness_failed"
-                        if request["operation"] == "final_audit":
-                            result["restore_supported"] = (
-                                frozen_variant == candidate_frozen
-                            )
-                        return _finish(result, started_mono=started_mono)
-                values[role] = _measurement_values(driver_result, target)
-                pair_evidence.append(receipt["driver_output_ref"])
             pairs.append(
                 {
                     "pair_index": pair_index,
                     "case_id": case_id,
                     "order": order,
-                    "reference": values["reference"]["primary"],
+                    "reference": values[reference_role]["primary"],
                     "candidate": values["candidate"]["primary"],
                     "constraints": {
                         name: {
-                            "reference": values["reference"]["constraints"][name],
+                            "reference": values[reference_role]["constraints"][name],
                             "candidate": values["candidate"]["constraints"][name],
                         }
-                        for name in values["reference"]["constraints"]
+                        for name in values[reference_role]["constraints"]
                     },
                     "valid": True,
-                    "evidence_refs": pair_evidence,
+                    "evidence_refs": pair_evidence[key],
                 }
             )
 
@@ -2521,10 +2485,9 @@ def _run_formal_worker(
     )
     reference_status = (
         "current"
-        if _formal_binding_matches(artifact_root, target, request)
+        if _comparison_binding_matches(artifact_root, target, request)
         else "stale_reference"
     )
-    result["correctness_receipts"] = correctness_receipts
     result["performance_receipt"] = {
         "status": "valid",
         "reference": reference_frozen,
@@ -2541,11 +2504,12 @@ def _run_formal_worker(
         ],
     }
     if reference_status != "current":
-        return _finish_stale_formal(
+        return _finish_stale_comparison(
             result,
+            request=request,
             started_mono=started_mono,
             commands_started=True,
-            skipped=[],
+            remaining_steps=[],
         )
 
     constraint_failed = any(
@@ -2556,6 +2520,37 @@ def _run_formal_worker(
     )
     result["execution_status"] = "succeeded"
     result["measurement_validity"] = "valid"
+    if request["operation"] == "screen":
+        result["screen_claim_status"] = (
+            "confirmed"
+            if primary_statistics["status"] == "confirmed_win"
+            else "falsified"
+            if primary_statistics["status"] == "confirmed_loss"
+            else "inconclusive"
+        )
+        reject_kinds = {condition["kind"] for condition in request["reject_if"]}
+        if constraint_failed:
+            result["verdict"] = "rejected"
+            result["stop_reason"] = "constraint_failed"
+        elif (
+            result["screen_claim_status"] == "falsified"
+            and "screen_claim_falsified" in reject_kinds
+        ):
+            result["verdict"] = "rejected"
+            result["stop_reason"] = "screen_claim_falsified"
+        elif (
+            request["screen_design"]["kind"] == "conservative_bound"
+            and primary_statistics["ci_high_pct"] is not None
+            and primary_statistics["ci_high_pct"]
+            < request["objective"]["minimum_effect"]["value"]
+        ):
+            result["verdict"] = "rejected"
+            result["stop_reason"] = "screen_upper_bound_below_minimum"
+        else:
+            result["verdict"] = "inconclusive"
+            result["stop_reason"] = "completed"
+        return _finish(result, started_mono=started_mono)
+
     if (
         primary_statistics["status"] == "confirmed_win"
         and not constraint_failed
@@ -2574,9 +2569,7 @@ def _run_formal_worker(
     ):
         result["verdict"] = "rejected"
         result["stop_reason"] = (
-            "constraint_failed"
-            if constraint_failed
-            else "minimum_effect_not_met"
+            "constraint_failed" if constraint_failed else "minimum_effect_not_met"
         )
     else:
         result["verdict"] = "inconclusive"
@@ -2584,6 +2577,81 @@ def _run_formal_worker(
     if request["operation"] == "final_audit":
         result["restore_supported"] = result["verdict"] == "rejected"
     return _finish(result, started_mono=started_mono)
+
+
+def _correctness_receipt(
+    *,
+    frozen_variant: dict,
+    role: str,
+    case_id: str,
+    target: dict,
+    correctness: dict,
+    comparison_contract: dict,
+    evidence_ref: dict,
+) -> dict:
+    target_gate = ADAPTER.evaluate_correctness(
+        correctness,
+        target["correctness"]["acceptance"],
+    )
+    additional_gates = []
+    if role == "candidate":
+        additional_gates = [
+            ADAPTER.evaluate_correctness(correctness, rule)
+            for rule in comparison_contract["additional_gates"]
+        ]
+    diagnostics = {}
+    if role == "candidate":
+        for metric in comparison_contract["diagnostics"]:
+            if metric not in correctness["metrics"]:
+                raise ValueError(
+                    f"declared correctness diagnostic is missing: {metric}"
+                )
+            diagnostics[metric] = correctness["metrics"][metric]
+    passed = target_gate["passed"] and all(
+        gate["passed"] for gate in additional_gates
+    )
+    return {
+        "variant": frozen_variant,
+        "role": role,
+        "case_id": case_id,
+        "status": "valid",
+        "passed": passed,
+        "acceptance": target["correctness"]["acceptance"],
+        "metrics": correctness["metrics"],
+        "gate": target_gate,
+        "additional_gates": additional_gates,
+        "diagnostics": diagnostics,
+        "evidence_refs": [evidence_ref],
+    }
+
+
+def _finish_stale_formal(
+    result: dict,
+    *,
+    started_mono: float,
+    commands_started: bool,
+    skipped: list[int],
+) -> dict:
+    _mark_stale_formal_result(result, skipped=skipped)
+    result["execution_status"] = "succeeded" if commands_started else "invalid"
+    return _finish(result, started_mono=started_mono)
+
+
+def _mark_stale_formal_result(
+    result: dict,
+    *,
+    skipped: list[int],
+) -> None:
+    result["measurement_validity"] = "invalid"
+    result["verdict"] = "not_evaluated"
+    result["stop_reason"] = "stale_reference"
+    result["reference_status"] = "stale_reference"
+    result["skipped_evidence_steps"] = skipped
+    performance = result.get("performance_receipt")
+    if type(performance) is dict and "reference_status" in performance:
+        performance["reference_status"] = "stale_reference"
+    if result["operation"] == "final_audit":
+        result["restore_supported"] = False
 
 
 def _worker_main() -> int:
@@ -2596,9 +2664,8 @@ def _worker_main() -> int:
             result = _base_result(request, time.time())
             result["execution_status"] = "invalid"
             result["stop_reason"] = "tool_identity_changed"
-            result["skipped_expensive_stages"] = [
-                "correctness",
-                "paired_measurement",
+            result["skipped_evidence_steps"] = [
+                step["call_index"] for step in request["evidence_plan"]["steps"]
             ]
             result = _finish(result, started_mono=started_mono)
         elif request.get("operation") == "baseline":
@@ -2607,14 +2674,8 @@ def _worker_main() -> int:
                 invocation_dir=invocation_dir,
                 request=request,
             )
-        elif request.get("operation") == "screen":
-            result = _run_screen_worker(
-                artifact_root=artifact_root,
-                invocation_dir=invocation_dir,
-                request=request,
-            )
-        elif request.get("operation") in {"target", "final_audit"}:
-            result = _run_formal_worker(
+        elif request.get("operation") in {"screen", "target", "final_audit"}:
+            result = _run_comparison_worker(
                 artifact_root=artifact_root,
                 invocation_dir=invocation_dir,
                 request=request,
@@ -2644,7 +2705,9 @@ def _worker_main() -> int:
                 "status": "not_run",
                 "evidence_refs": [],
             },
-            "skipped_expensive_stages": [],
+            "evidence_plan": request.get("evidence_plan", {}),
+            "completed_driver_calls": 0,
+            "skipped_evidence_steps": [],
             "command_receipts": [],
             "diagnostic": {
                 "error_type": type(error).__name__[:128],
@@ -2673,7 +2736,7 @@ def _worker_main() -> int:
         except STORE.StaleReferenceError:
             _mark_stale_formal_result(
                 result,
-                skipped=result.get("skipped_expensive_stages", []),
+                skipped=result.get("skipped_evidence_steps", []),
             )
     STORE.create_regular_json(invocation_dir / "result.json", result)
     return 0

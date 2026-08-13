@@ -24,18 +24,28 @@ def load_module():
     return module
 
 
-def request(*, phenomena, max_results=5, max_context_bytes=8192, claim_layer="kernel"):
+def request(
+    *,
+    phenomena,
+    max_results=5,
+    max_context_bytes=8192,
+    claim_layer="kernel",
+    gpu_architecture="sm_120",
+    cuda_version="12.9",
+    frameworks=None,
+    mechanism_keys=None,
+):
     return {
         "format_version": "cuda-kernel-optimizer/knowledge-input-v1",
         "operation": "query",
         "identity": {
-            "gpu_architecture": "sm_120",
-            "cuda_version": "12.9",
-            "frameworks": {"triton": "3.4.0"},
+            "gpu_architecture": gpu_architecture,
+            "cuda_version": cuda_version,
+            "frameworks": frameworks or {"triton": "3.4.0"},
             "phenomena": phenomena,
             "claim_layer": claim_layer,
         },
-        "filters": {"mechanism_keys": []},
+        "filters": {"mechanism_keys": mechanism_keys or []},
         "limits": {
             "max_results": max_results,
             "max_context_bytes": max_context_bytes,
@@ -44,16 +54,26 @@ def request(*, phenomena, max_results=5, max_context_bytes=8192, claim_layer="ke
 
 
 class KnowledgeQueryTests(unittest.TestCase):
-    def test_migrated_registry_keeps_all_content_kinds_and_closed_sources(self):
+    def test_registry_is_smaller_and_separates_epistemic_roles(self):
         cards = json.loads(CARDS.read_text(encoding="utf-8"))
         sources = json.loads(SOURCES.read_text(encoding="utf-8"))
-        self.assertEqual(cards["schema_version"], "cuda-kernel-optimizer/knowledge-cards-v1")
-        self.assertEqual(sources["schema_version"], "cuda-kernel-optimizer/knowledge-sources-v1")
-        self.assertEqual(len(cards["cards"]), 106)
+        self.assertEqual(cards["schema_version"], "cuda-kernel-optimizer/knowledge-cards-v2")
+        self.assertEqual(sources["schema_version"], "cuda-kernel-optimizer/knowledge-sources-v2")
+        self.assertLess(len(cards["cards"]), 106)
+        self.assertLess(CARDS.stat().st_size, 200_000)
         self.assertEqual(
             {card["content_kind"] for card in cards["cards"]},
-            {"capability", "diagnostic", "method", "workload_method", "local_case"},
+            {"technical_contract", "heuristic"},
         )
+        for card in cards["cards"]:
+            self.assertNotIn("details", card)
+            self.assertNotIn(None, card["match_terms"])
+            self.assertNotIn("Does None", card["distinguishing_question"])
+            if card["content_kind"] == "technical_contract":
+                self.assertEqual(
+                    set(card["contract"]),
+                    {"proposition", "non_claims", "decision_impact"},
+                )
         source_ids = {source["id"] for source in sources["sources"]}
         self.assertTrue(all(set(card["source_ids"]).issubset(source_ids) for card in cards["cards"]))
 
@@ -68,7 +88,109 @@ class KnowledgeQueryTests(unittest.TestCase):
             len({item["mechanism_key"] for item in result["matches"]}),
             len(result["matches"]),
         )
-        self.assertTrue(any(item["content_kind"] == "method" for item in result["matches"]))
+        self.assertTrue(any(item["content_kind"] == "heuristic" for item in result["matches"]))
+
+    def test_pdl_contract_uses_the_documented_compute_capability_boundary(self):
+        for architecture in ("sm_90", "sm_120", "sm_122"):
+            with self.subTest(architecture=architecture):
+                result = load_module().query(
+                    request(
+                        phenomena=[],
+                        mechanism_keys=["latency.pdl_overlap"],
+                        gpu_architecture=architecture,
+                        frameworks={"cuda": "12.9"},
+                    )
+                )
+                self.assertEqual(
+                    result["matches"][0]["applicability"],
+                    {"relation": "compatible", "mismatches": [], "limitations": []},
+                )
+        result = load_module().query(
+            request(
+                phenomena=[],
+                mechanism_keys=["latency.pdl_overlap"],
+                gpu_architecture="sm_89",
+                frameworks={"cuda": "12.9"},
+            )
+        )
+        self.assertEqual(
+            result["matches"][0]["applicability"]["relation"],
+            "incompatible",
+        )
+
+        patch_release = load_module().query(request(
+            phenomena=[], mechanism_keys=["latency.pdl_overlap"],
+            gpu_architecture="sm_90", cuda_version="12.9.3", frameworks={"cuda": "12.9.3"},
+        ))
+        newer_unreviewed = load_module().query(request(
+            phenomena=[], mechanism_keys=["latency.pdl_overlap"],
+            gpu_architecture="sm_130", cuda_version="13.3", frameworks={"cuda": "13.3"},
+        ))
+        self.assertEqual(patch_release["matches"][0]["applicability"]["relation"], "compatible")
+        self.assertEqual(newer_unreviewed["matches"][0]["applicability"]["relation"], "related")
+
+        result = load_module().query(
+            request(
+                phenomena=[],
+                mechanism_keys=["latency.pdl_overlap"],
+                gpu_architecture="future_architecture",
+                frameworks={"cuda": "12.9"},
+            )
+        )
+        self.assertEqual(len(result["matches"]), 1)
+        match = result["matches"][0]
+        self.assertEqual(match["content_kind"], "technical_contract")
+        self.assertEqual(match["applicability"]["relation"], "related")
+        self.assertIn("compute capability 9.0", match["contract"]["proposition"])
+        self.assertIn("cudaGridDependencySynchronize", match["contract"]["proposition"])
+        self.assertNotIn("decision", match)
+        self.assertNotIn("premise_resolved", match)
+        source = next(item for item in match["sources"] if item["id"] == "nvidia-cuda-pdl")
+        self.assertIn("programmatic-dependent-launch", source["url"])
+        self.assertTrue(source["locator"])
+
+    def test_explicit_query_returns_identity_mismatch_without_rejecting_mechanism(self):
+        result = load_module().query(
+            request(
+                phenomena=["an unrelated observation must not hide an explicit mechanism"],
+                mechanism_keys=["workload.communication.collective"],
+                claim_layer="serving",
+                gpu_architecture="sm_90",
+                frameworks={"nccl": "2.27.3"},
+            )
+        )
+        self.assertEqual(len(result["matches"]), 1)
+        match = result["matches"][0]
+        self.assertEqual(match["applicability"]["relation"], "related")
+        self.assertEqual(match["applicability"]["limitations"][0]["field"], "frameworks.nccl")
+        self.assertNotIn("unsupported", json.dumps(match).lower())
+
+    def test_contract_without_enumerated_component_versions_is_only_related(self):
+        result = load_module().query(
+            request(
+                phenomena=[],
+                mechanism_keys=["triton.compiler-hints"],
+                frameworks={"triton": "3.4.0"},
+            )
+        )
+        match = result["matches"][0]
+        self.assertEqual(match["applicability"]["relation"], "related")
+        self.assertEqual(
+            match["applicability"]["limitations"][0]["field"],
+            "frameworks.triton",
+        )
+
+    def test_documented_version_families_match_patch_releases(self):
+        cutlass = load_module().query(request(
+            phenomena=[], mechanism_keys=["cutlass.blackwell-architecture-boundary"],
+            frameworks={"cutlass": "4.7.0"},
+        ))
+        nccl = load_module().query(request(
+            phenomena=[], mechanism_keys=["workload.communication.collective"],
+            claim_layer="serving", frameworks={"nccl": "2.30.5"},
+        ))
+        self.assertEqual(cutlass["matches"][0]["applicability"]["relation"], "compatible")
+        self.assertEqual(nccl["matches"][0]["applicability"]["relation"], "compatible")
 
     def test_empty_match_is_successful_and_has_no_side_effect(self):
         result = load_module().query(request(phenomena=["not.a.known.phenomenon"]))
@@ -79,8 +201,13 @@ class KnowledgeQueryTests(unittest.TestCase):
     def test_claim_layer_filters_workload_cards(self):
         kernel = load_module().query(request(phenomena=["GPU idle gaps"], claim_layer="kernel"))
         workload = load_module().query(request(phenomena=["GPU idle gaps"], claim_layer="workload"))
-        self.assertFalse(any(item["id"] == "workload.framework.launch-gaps" for item in kernel["matches"]))
-        self.assertTrue(any(item["id"] == "workload.framework.launch-gaps" for item in workload["matches"]))
+        kernel_contract = next(
+            item for item in kernel["matches"] if item["id"] == "contract.nsys.time-utilization"
+        )
+        self.assertEqual(kernel_contract["applicability"]["relation"], "incompatible")
+        self.assertTrue(
+            any(item["id"] == "contract.nsys.time-utilization" for item in workload["matches"])
+        )
 
     def test_matching_card_exposes_only_a_digest_bound_playbook_reference(self):
         result = load_module().query(

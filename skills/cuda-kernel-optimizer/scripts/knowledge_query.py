@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Return a bounded, identity-compatible set of local knowledge cards."""
+"""Return bounded local knowledge material with identity applicability."""
 
 from __future__ import annotations
 
@@ -14,10 +14,7 @@ from pathlib import Path, PurePosixPath
 
 
 INPUT_VERSION = "cuda-kernel-optimizer/knowledge-input-v1"
-REFERENCE_DIR = Path(__file__).resolve().parent.parent / "references"
-KNOWLEDGE_DIR = REFERENCE_DIR / "knowledge"
-CARDS_PATH = KNOWLEDGE_DIR / "cards.json"
-SOURCES_PATH = KNOWLEDGE_DIR / "sources.json"
+KNOWLEDGE_DIR = Path(__file__).resolve().parent.parent / "references" / "knowledge"
 
 _COMMON_INPUT_FIELDS = {"format_version", "operation", "filters", "limits"}
 _DETACHED_INPUT_FIELDS = _COMMON_INPUT_FIELDS | {"identity"}
@@ -37,6 +34,9 @@ _FILTER_FIELDS = {"mechanism_keys"}
 _LIMIT_FIELDS = {"max_results", "max_context_bytes"}
 _TARGET_REF_FIELDS = {"id", "sha256"}
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+_GPU_ARCHITECTURE = re.compile(r"(?:sm|compute)_?(\d{2,3})[a-z]?\Z", re.IGNORECASE)
+_COMPUTE_CAPABILITY = re.compile(r"(\d+)\.(\d+)\Z")
 
 
 class KnowledgeError(ValueError):
@@ -132,11 +132,8 @@ def _knowledge_json(filename: str) -> tuple[dict, str]:
 
 
 def _validated_playbook(card: dict) -> dict | None:
-    details = card.get("details")
-    if type(details) is not dict:
-        return None
-    relative = details.get("playbook")
-    expected = details.get("playbook_sha256")
+    relative = card.get("playbook")
+    expected = card.get("playbook_sha256")
     if relative is None and expected is None:
         return None
     reference = PurePosixPath(str(relative))
@@ -316,13 +313,13 @@ def _load_knowledge() -> tuple[list[dict], dict[str, dict], dict]:
     source_document, sources_sha256 = _knowledge_json("sources.json")
     if (
         card_document.get("schema_version")
-        != "cuda-kernel-optimizer/knowledge-cards-v1"
+        != "cuda-kernel-optimizer/knowledge-cards-v2"
         or type(card_document.get("cards")) is not list
     ):
         raise KnowledgeError("knowledge card registry version is unsupported")
     if (
         source_document.get("schema_version")
-        != "cuda-kernel-optimizer/knowledge-sources-v1"
+        != "cuda-kernel-optimizer/knowledge-sources-v2"
         or type(source_document.get("sources")) is not list
     ):
         raise KnowledgeError("knowledge source registry version is unsupported")
@@ -333,10 +330,19 @@ def _load_knowledge() -> tuple[list[dict], dict[str, dict], dict]:
         source_id = _text(source.get("id"), "knowledge source id", maximum=256)
         if source_id in sources:
             raise KnowledgeError("knowledge source ids must be unique")
-        if source.get("status") != "verified":
-            raise KnowledgeError(f"knowledge source is not verified: {source_id}")
-        if _SHA256.fullmatch(str(source.get("summary_sha256", ""))) is None:
+        if source.get("status") != "reviewed":
+            raise KnowledgeError(f"knowledge source is not reviewed: {source_id}")
+        summary = _text(source.get("summary"), f"{source_id}.summary")
+        if source.get("summary_sha256") != hashlib.sha256(
+            summary.encode("utf-8")
+        ).hexdigest():
             raise KnowledgeError(f"knowledge source digest is invalid: {source_id}")
+        for field in ("title", "source_kind", "version", "url", "locator"):
+            _text(source.get(field), f"{source_id}.{field}")
+        if not source["url"].startswith("https://"):
+            raise KnowledgeError(f"knowledge source URL is invalid: {source_id}")
+        if _DATE.fullmatch(str(source.get("last_reviewed", ""))) is None:
+            raise KnowledgeError(f"knowledge source verification date is invalid: {source_id}")
         sources[source_id] = source
     cards = []
     seen = set()
@@ -360,6 +366,21 @@ def _load_knowledge() -> tuple[list[dict], dict[str, dict], dict]:
             )
         if not isinstance(card.get("priority"), int):
             raise KnowledgeError(f"knowledge card priority is invalid: {card_id}")
+        content_kind = card.get("content_kind")
+        if content_kind not in {"technical_contract", "heuristic", "practice_case"}:
+            raise KnowledgeError(f"knowledge card content kind is invalid: {card_id}")
+        if content_kind == "technical_contract":
+            contract = _closed(
+                card.get("contract"),
+                {"proposition", "non_claims", "decision_impact"},
+                f"{card_id}.contract",
+            )
+            _text(contract["proposition"], f"{card_id}.contract.proposition")
+            _strings(contract["non_claims"], f"{card_id}.contract.non_claims")
+            _strings(
+                contract["decision_impact"],
+                f"{card_id}.contract.decision_impact",
+            )
         if mechanism:
             cards.append(card)
     provenance = {
@@ -386,28 +407,92 @@ def _observation_ids(card: dict) -> set[str]:
     return identifiers
 
 
-def _identity_matches(card: dict, identity: dict) -> bool:
+def _compute_capability(value: str) -> tuple[int, int] | None:
+    architecture = _GPU_ARCHITECTURE.fullmatch(value)
+    if architecture is None:
+        return None
+    digits = int(architecture[1])
+    return digits // 10, digits % 10
+def _version_matches(actual: str, allowed: list[str]) -> bool:
+    return any(
+        actual == pattern or (pattern.endswith(".x") and (actual == pattern[:-2] or actual.startswith(pattern[:-1])))
+        for pattern in allowed
+    )
+def _applicability(card: dict, identity: dict) -> dict:
     constraints = card.get("identity_constraints")
     if type(constraints) is not dict:
         raise KnowledgeError(
             f"knowledge card identity constraints are invalid: {card.get('id')}"
         )
+    mismatches = []
+    limitations = []
+
+    def mismatch(field: str, expected, actual) -> None:
+        mismatches.append({"field": field, "expected": expected, "actual": actual})
+
     architectures = constraints.get("gpu_architecture", [])
+    if type(architectures) is not list or any(
+        not isinstance(value, str) or not value for value in architectures
+    ):
+        raise KnowledgeError(
+            f"knowledge card architecture constraints are invalid: {card.get('id')}"
+        )
     if architectures and identity["gpu_architecture"] not in architectures:
-        return False
+        mismatch("gpu_architecture", architectures, identity["gpu_architecture"])
+    minimum_capability = constraints.get("minimum_compute_capability")
+    if minimum_capability is not None:
+        minimum_match = _COMPUTE_CAPABILITY.fullmatch(str(minimum_capability))
+        if minimum_match is None or architectures:
+            raise KnowledgeError(
+                f"knowledge card compute capability constraint is invalid: {card.get('id')}"
+            )
+        actual = _compute_capability(identity["gpu_architecture"])
+        if actual is None:
+            limitations.append(
+                {"field": "gpu_architecture", "reason": "target architecture cannot be compared with the minimum compute capability", "actual": identity["gpu_architecture"]}
+            )
+        elif actual < (int(minimum_match.group(1)), int(minimum_match.group(2))):
+            mismatch(
+                "minimum_compute_capability",
+                minimum_capability,
+                f"{actual[0]}.{actual[1]}",
+            )
     cuda_versions = constraints.get("cuda_runtime_version", [])
-    if cuda_versions and identity["cuda_version"] not in cuda_versions:
-        return False
+    if type(cuda_versions) is not list or any(
+        not isinstance(value, str) or not value for value in cuda_versions
+    ):
+        raise KnowledgeError(
+            f"knowledge card CUDA constraints are invalid: {card.get('id')}"
+        )
+    if cuda_versions and not _version_matches(identity["cuda_version"], cuda_versions):
+        limitations.append({"field": "cuda_version", "reason": "material does not enumerate this version", "actual": identity["cuda_version"]})
     framework_constraints = constraints.get("framework_versions", {})
     if type(framework_constraints) is not dict:
         raise KnowledgeError(
             f"knowledge card framework constraints are invalid: {card.get('id')}"
         )
     for name, allowed in framework_constraints.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or type(allowed) is not list
+            or any(not isinstance(value, str) or not value for value in allowed)
+        ):
+            raise KnowledgeError(
+                f"knowledge card framework constraints are invalid: {card.get('id')}"
+            )
         if name not in identity["frameworks"]:
-            return False
-        if allowed and identity["frameworks"][name] not in allowed:
-            return False
+            mismatch(f"frameworks.{name}", allowed, None)
+        elif not allowed and card.get("content_kind") == "technical_contract":
+            limitations.append(
+                {
+                    "field": f"frameworks.{name}",
+                    "reason": "material does not enumerate compatible versions",
+                    "actual": identity["frameworks"][name],
+                }
+            )
+        elif allowed and not _version_matches(identity["frameworks"][name], allowed):
+            limitations.append({"field": f"frameworks.{name}", "reason": "material does not enumerate this version", "actual": identity["frameworks"][name]})
     claim_layers = constraints.get("claim_layers", [])
     if (
         type(claim_layers) is not list
@@ -417,8 +502,17 @@ def _identity_matches(card: dict, identity: dict) -> bool:
             f"knowledge card claim layers are invalid: {card.get('id')}"
         )
     if claim_layers and identity["claim_layer"] not in claim_layers:
-        return False
-    return True
+        mismatch("claim_layer", claim_layers, identity["claim_layer"])
+    relation = (
+        "incompatible"
+        if mismatches
+        else ("related" if limitations else "compatible")
+    )
+    return {
+        "relation": relation,
+        "mismatches": mismatches,
+        "limitations": limitations,
+    }
 
 
 def _phenomena_match(card: dict, phenomena: list[str]) -> bool:
@@ -435,30 +529,46 @@ def _phenomena_match(card: dict, phenomena: list[str]) -> bool:
     return False
 
 
-def _projection(card: dict, sources: dict[str, dict]) -> dict:
+def _projection(card: dict, sources: dict[str, dict], applicability: dict) -> dict:
     projected = {
         "id": card["id"],
         "mechanism_key": card["mechanism_key"],
         "status": card.get("status"),
+        "content_kind": card["content_kind"],
         "priority": card["priority"],
         "mechanism": card.get("mechanism"),
         "distinguishing_question": card.get("distinguishing_question"),
-        "cheapest_falsifier": card.get("cheapest_falsifier"),
         "required_evidence": card.get("required_evidence", []),
         "counter_signals": card.get("counter_signals", []),
         "invalidators": card.get("invalidators", []),
-        "local_cases": card.get("local_cases", []),
-        "content_kind": card.get("content_kind"),
+        "identity_constraints": card["identity_constraints"],
+        "applicability": applicability,
         "sources": [
             {
                 "id": source_id,
                 "title": sources[source_id]["title"],
+                "source_kind": sources[source_id]["source_kind"],
                 "version": sources[source_id]["version"],
-                "last_verified": sources[source_id]["last_verified"],
+                "last_reviewed": sources[source_id]["last_reviewed"],
+                "url": sources[source_id]["url"],
+                "locator": sources[source_id]["locator"],
             }
             for source_id in card["source_ids"]
         ],
     }
+    if card["content_kind"] == "technical_contract":
+        projected["contract"] = card["contract"]
+    elif card["content_kind"] == "heuristic":
+        projected["cheapest_falsifier"] = card.get("cheapest_falsifier")
+        for field in (
+            "applies_when",
+            "competing_explanations",
+            "positive_signals",
+        ):
+            if card.get(field):
+                projected[field] = card[field]
+    elif card.get("local_cases"):
+        projected["local_cases"] = card["local_cases"]
     playbook = _validated_playbook(card)
     if playbook is not None:
         projected["playbook"] = playbook
@@ -472,26 +582,33 @@ def query(value) -> dict:
     candidates = [
         card
         for card in cards
-        if (not mechanism_filter or card["mechanism_key"] in mechanism_filter)
-        and _identity_matches(card, request["identity"])
-        and _phenomena_match(card, request["identity"]["phenomena"])
+        if (
+            card["mechanism_key"] in mechanism_filter
+            if mechanism_filter
+            else _phenomena_match(card, request["identity"]["phenomena"])
+        )
     ]
-    candidates.sort(
-        key=lambda card: (
-            card["priority"],
-            card["mechanism_key"],
-            card["id"],
+    ranked = [
+        (card, _applicability(card, request["identity"]))
+        for card in candidates
+    ]
+    ranked.sort(
+        key=lambda item: (
+            {"compatible": 0, "related": 1, "incompatible": 2}[item[1]["relation"]],
+            item[0]["priority"],
+            item[0]["mechanism_key"],
+            item[0]["id"],
         )
     )
     matches = []
     seen_mechanisms = set()
     context_bytes = 2
-    for card in candidates:
+    for card, applicability in ranked:
         if len(matches) >= request["max_results"]:
             break
         if card["mechanism_key"] in seen_mechanisms:
             continue
-        projected = _projection(card, sources)
+        projected = _projection(card, sources, applicability)
         proposed = matches + [projected]
         size = len(_canonical_bytes(proposed))
         if size > request["max_context_bytes"]:
@@ -503,7 +620,7 @@ def query(value) -> dict:
         "status": "completed",
         "matches": matches,
         "context_bytes": context_bytes,
-        "truncated": len(matches) < len(candidates),
+        "truncated": len(matches) < len(ranked),
         "provenance": provenance,
         "identity_source": request["identity_source"],
     }

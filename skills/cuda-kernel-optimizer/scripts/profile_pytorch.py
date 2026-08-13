@@ -175,7 +175,7 @@ def _target(root: Path, reference) -> dict:
     if (
         type(target) is not dict
         or target.get("record_type") != "target"
-        or target.get("format_version") != "cuda-kernel-optimizer/target-v1"
+        or target.get("format_version") != "cuda-kernel-optimizer/target-v2"
         or target.get("id") != _text(reference["id"], "target_ref.id")
         or target.get("target_mode") != "diagnostic"
     ):
@@ -462,8 +462,8 @@ def _collect_worker(request: dict, root: Path, invocation: Path, result: dict) -
     driver_output.mkdir()
     driver_request = ADAPTER.build_driver_request(
         target_id=resolved["target"]["id"], execution_id=os.environ["CKO_INVOCATION_ID"], operation="profile_pytorch_collect",
-        driver=resolved["driver"], variant=variant, test_suite=inputs["test_suite"], correctness=inputs["correctness"], objective=inputs["objective"],
-        role=resolved["role"], mode="measure" if resolved["driver"]["execution_mode"] == "separate" else "combined", case={"id": resolved["case_id"]},
+        driver=resolved["driver"], subjects=[{"role": resolved["role"], "variant": variant}], test_suite=inputs["test_suite"], correctness=inputs["correctness"], objective=inputs["objective"],
+        acquisition={"lifecycle": "isolated_process", "shared_state": [], "rebuilt_state": ["process"]}, case={"id": resolved["case_id"]},
         sampling={"kind": "pytorch_chrome_trace_v1"}, output_path=driver_output / "result.json",
     )
     request_path = workspace / "driver-request.json"

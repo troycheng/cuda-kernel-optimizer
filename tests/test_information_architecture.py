@@ -186,7 +186,7 @@ class InformationArchitectureTests(unittest.TestCase):
             for name in checker.DRIVER_TEMPLATES:
                 (templates / name).write_text("{}\n", encoding="utf-8")
             (knowledge / "sources.json").write_text(
-                '{"sources":[{"id":"source-a","status":"verified",'
+                '{"sources":[{"id":"source-a","status":"reviewed",'
                 '"summary_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}\n',
                 encoding="utf-8",
             )
@@ -215,7 +215,7 @@ class InformationArchitectureTests(unittest.TestCase):
             playbook = playbooks / "a.md"
             playbook.write_text("# playbook\n", encoding="utf-8")
             (knowledge / "sources.json").write_text(
-                '{"sources":[{"id":"source-a","status":"verified",'
+                '{"sources":[{"id":"source-a","status":"reviewed",'
                 '"summary_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}\n',
                 encoding="utf-8",
             )
@@ -279,8 +279,8 @@ class InformationArchitectureTests(unittest.TestCase):
             encoding="utf-8"
         )
         for marker in (
-            "cuda-kernel-optimizer/readiness-input-v1",
-            "cuda-kernel-optimizer/evaluator-input-v1",
+            "cuda-kernel-optimizer/readiness-input-v2",
+            "cuda-kernel-optimizer/evaluator-input-v2",
             "cuda-kernel-optimizer/ncu-input-v1",
             "cuda-kernel-optimizer/nsys-input-v1",
             "cuda-kernel-optimizer/pytorch-input-v1",
@@ -343,7 +343,7 @@ class InformationArchitectureTests(unittest.TestCase):
                 },
             )
             self.assertTrue(source["url"].startswith("https://"))
-            self.assertIn("last_verified", source)
+            self.assertIn("last_reviewed", source)
 
     def test_generated_python_artifacts_are_not_part_of_the_skill(self) -> None:
         tracked = subprocess.run(

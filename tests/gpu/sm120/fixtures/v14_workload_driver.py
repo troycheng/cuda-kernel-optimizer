@@ -44,9 +44,14 @@ def _environment(torch, triton) -> dict:
             "pytorch": str(torch.__version__),
             "triton": str(triton.__version__),
         },
-        "container": {
-            "kind": "docker-image",
+        "runtime_provenance": {
+            "kind": "container",
             "identity": os.environ["CUDA_E2E_IMAGE_ID"],
+            "lineage_complete": True,
+            "lineage": [
+                {"kind": "base", "identity": os.environ["CUDA_E2E_IMAGE_ID"]}
+            ],
+            "components": [],
         },
     }
 
@@ -60,7 +65,6 @@ def main() -> int:
     import torch
     import triton
 
-    module = _load_kernel(request["variant"]["locator"])
     suite = json.loads(
         Path(request["test_suite"]["locator"]).read_text(encoding="utf-8")
     )
@@ -75,40 +79,55 @@ def main() -> int:
     if reference.get("expression") != "x*x+1":
         raise ValueError("unsupported correctness reference")
     tolerance = float(reference["atol"])
-    state = module.setup(N=int(case["size"]), seed=int(case["seed"]))
-    inputs = state["inputs"]
-    module.run_kernel(**inputs)
-    torch.cuda.synchronize()
-
+    repetitions = int(
+        request["sampling"].get(
+            "samples_per_case",
+            request["sampling"].get("repetitions", 5),
+        )
+    )
+    if repetitions < 1:
+        raise ValueError("sampling repetitions must be positive")
     result = {
-        "protocol_version": "cuda-kernel-optimizer/driver-result-v1",
+        "protocol_version": "cuda-kernel-optimizer/driver-result-v2",
         "request_digest": request["request_digest"],
         "target_id": request["target_id"],
         "execution_id": request["execution_id"],
-        "variant_digest": request["variant"]["digest"],
-        "role": request["role"],
-        "mode": request["mode"],
+        "subject_digests": [
+            {"role": subject["role"], "digest": subject["variant"]["digest"]}
+            for subject in request["subjects"]
+        ],
         "case_id": request["case"].get("id"),
         "artifacts": [],
         "cleanup": {"status": "confirmed", "live_tasks": []},
         "driver_identity": request["driver_identity"],
         "environment": _environment(torch, triton),
+        "acquisition": request["acquisition"],
+        "evidence": {"correctness": [], "measurements": []},
     }
-    if request["mode"] in {"correctness", "combined"}:
+    for subject in request["subjects"]:
+        module = _load_kernel(subject["variant"]["locator"])
+        state = module.setup(N=int(case["size"]), seed=int(case["seed"]))
+        inputs = state["inputs"]
+        module.run_kernel(**inputs)
+        torch.cuda.synchronize()
         expected = inputs["x"] * inputs["x"] + 1.0
         maximum_error = float((inputs["out"] - expected).abs().max().item())
-        result["correctness"] = {
-            "status": "passed" if maximum_error <= tolerance else "failed",
-            "metrics": {
-                "exact_match": 1.0 if maximum_error <= tolerance else 0.0
+        result["evidence"]["correctness"].append(
+            {
+                "role": subject["role"],
+                "result": {
+                    "status": "passed" if maximum_error <= tolerance else "failed",
+                    "metrics": {
+                        "exact_match": 1.0 if maximum_error <= tolerance else 0.0
+                    },
+                },
             },
-        }
-    if request["mode"] in {"measure", "combined"}:
+        )
         for _ in range(5):
             module.run_kernel(**inputs)
         torch.cuda.synchronize()
         samples = []
-        for _ in range(5):
+        for _ in range(repetitions):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
@@ -117,14 +136,19 @@ def main() -> int:
             end.record()
             end.synchronize()
             samples.append(float(start.elapsed_time(end)) / 50.0)
-        result["measurements"] = {
-            "primary": {
-                "name": "latency_ms",
-                "unit": "ms",
-                "samples": samples,
+        result["evidence"]["measurements"].append(
+            {
+                "role": subject["role"],
+                "result": {
+                    "primary": {
+                        "name": "latency_ms",
+                        "unit": "ms",
+                        "samples": samples,
+                    },
+                    "constraints": [],
+                },
             },
-            "constraints": [],
-        }
+        )
 
     output = Path(request["output_path"])
     temporary = output.with_suffix(output.suffix + ".tmp")

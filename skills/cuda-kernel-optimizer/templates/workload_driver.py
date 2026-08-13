@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""Copyable V1.4 command-driver skeleton.
+"""Copyable V2 workload-driver skeleton.
 
-The optimizer writes a closed request and invokes this file as:
-
-    python3 workload_driver.py --request /absolute/request.json
-
-Implement the three functions below for the real workload.  Do not infer GPU,
-driver, framework, container, correctness, or measurement facts: return only
-facts the workload actually observed.  This skeleton deliberately refuses to
-write a result until those functions are implemented.
+Implement the workload-specific hooks below. One invocation returns correctness
+and measurements for every requested subject. A two-subject request must keep
+both runs inside this process and preserve the declared shared state.
 """
 
 from __future__ import annotations
@@ -24,19 +19,14 @@ import stat
 from pathlib import Path, PurePosixPath
 
 
-DRIVER_PROTOCOL = "cuda-kernel-optimizer/driver-v1"
-REQUEST_PROTOCOL = "cuda-kernel-optimizer/driver-request-v1"
-RESULT_PROTOCOL = "cuda-kernel-optimizer/driver-result-v1"
+DRIVER_PROTOCOL = "cuda-kernel-optimizer/driver-v2"
+REQUEST_PROTOCOL = "cuda-kernel-optimizer/driver-request-v2"
+RESULT_PROTOCOL = "cuda-kernel-optimizer/driver-result-v2"
 
 _REQUEST_FIELDS = {
     "protocol_version", "request_digest", "target_id", "execution_id",
-    "operation", "variant", "test_suite", "correctness", "objective",
-    "role", "mode", "case", "sampling", "output_path", "driver_identity",
-}
-_RESULT_BASE_FIELDS = {
-    "protocol_version", "request_digest", "target_id", "execution_id",
-    "variant_digest", "role", "mode", "case_id", "artifacts", "cleanup",
-    "driver_identity", "environment",
+    "operation", "subjects", "test_suite", "correctness", "objective",
+    "acquisition", "case", "sampling", "output_path", "driver_identity",
 }
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_JSON_BYTES = 4 * 1024 * 1024
@@ -48,54 +38,44 @@ class DriverError(ValueError):
     pass
 
 
-def run_correctness(request: dict) -> dict:
-    """Return {"status": "passed"|"failed", "metrics": {name: finite_number}}.
+def prepare_acquisition(request: dict):
+    """Create state shared by subjects in this one driver invocation."""
+    return None
 
-    TODO: run the user's actual precision/correctness check.  Do not report
-    "passed" merely because a command exited successfully.
+
+def run_subject_evidence(request: dict, subject: dict, shared_state) -> dict:
+    """Return one subject's correctness and measurements from the real workload.
+
+    Return:
+      {
+        "correctness": {"status": "passed"|"failed", "metrics": {...}},
+        "measurements": {
+          "primary": {"name": ..., "unit": ..., "samples": [...]},
+          "constraints": [...]
+        }
+      }
+
+    Resolve request["case"]["id"] from the frozen test suite. Correctness and
+    measurement should come from the same workload execution whenever the
+    workload permits. For a same_process request, reuse shared_state and do not
+    launch an independent top-level service for each subject.
     """
-    raise NotImplementedError("TODO: implement run_correctness for this workload")
-
-
-def run_measurements(request: dict) -> dict:
-    """Return primary and constraint sample arrays from the real workload.
-
-    Resolve the full frozen case from request["case"]["id"].  For readiness,
-    return request["sampling"]["repetitions"] samples; for baseline, return
-    request["sampling"]["samples_per_case"] samples.  Primary and constraint
-    names and units must exactly match request["objective"].  Put extra
-    diagnostics in declared artifacts or logs, not measurements.constraints.
-    """
-    raise NotImplementedError("TODO: implement run_measurements for this workload")
+    raise NotImplementedError("TODO: implement run_subject_evidence for this workload")
 
 
 def collect_environment(request: dict) -> dict:
-    """Return the exact environment object observed for this invocation.
-
-    TODO: obtain the real GPU, driver, CUDA runtime, framework, and container
-    identity.  Never insert placeholders or values copied from another host.
-    """
+    """Return the runtime identity actually used by this invocation."""
     raise NotImplementedError("TODO: implement collect_environment for this workload")
 
 
-def cleanup(request: dict) -> dict:
-    """Return {"status": "confirmed", "live_tasks": []} only after cleanup.
-
-    TODO: terminate and verify every child task started by this driver.  Every
-    task must remain in the Invocation process group.  Do not claim
-    confirmation while any task may remain alive.
-    """
-    raise NotImplementedError("TODO: implement cleanup for this workload")
-
-
-def collect_artifacts(request: dict) -> list[dict]:
-    """Return raw invocation files as kind, relative_path, and sha256 records.
-
-    Paths are relative to the result file's directory.  A driver that declares
-    ``pytorch_chrome_trace_v1`` must return exactly one
-    ``pytorch_chrome_trace`` artifact for profiler collection operations.
-    """
+def collect_artifacts(request: dict, shared_state) -> list[dict]:
+    """Return raw files as kind, relative_path and sha256 records."""
     return []
+
+
+def cleanup(request: dict, shared_state) -> dict:
+    """Confirm that all child tasks created by this invocation are gone."""
+    raise NotImplementedError("TODO: implement cleanup for this workload")
 
 
 def _closed(value, fields: set[str], label: str) -> dict:
@@ -104,7 +84,9 @@ def _closed(value, fields: set[str], label: str) -> dict:
     missing = fields - set(value)
     unknown = set(value) - fields
     if missing or unknown:
-        raise DriverError(f"{label} has missing={sorted(missing)} unknown={sorted(unknown)}")
+        raise DriverError(
+            f"{label} has missing={sorted(missing)} unknown={sorted(unknown)}"
+        )
     return value
 
 
@@ -124,60 +106,29 @@ def _sha256(value, label: str) -> str:
 def _finite(value, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise DriverError(f"{label} must be a finite number")
-    value = float(value)
-    if not math.isfinite(value):
+    number = float(value)
+    if not math.isfinite(number):
         raise DriverError(f"{label} must be a finite number")
-    return value
+    return number
 
 
 def _json_value(value, label: str):
     try:
-        return json.loads(json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False))
+        return json.loads(
+            json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
+        )
     except (TypeError, ValueError, OverflowError) as error:
         raise DriverError(f"{label} must be finite JSON") from error
 
 
 def _canonical_bytes(value: dict) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
-
-
-def _read_request(path) -> dict:
-    target = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
-    descriptor = None
-    try:
-        metadata = os.lstat(target)
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            raise DriverError("request must be a regular non-symlink file")
-        if metadata.st_size > _MAX_JSON_BYTES:
-            raise DriverError("request exceeds the byte limit")
-        descriptor = os.open(
-            target,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-        )
-        chunks = []
-        total = 0
-        while True:
-            chunk = os.read(descriptor, min(1024 * 1024, _MAX_JSON_BYTES + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > _MAX_JSON_BYTES:
-                raise DriverError("request exceeds the byte limit")
-        raw = b"".join(chunks)
-        value = json.loads(
-            raw.decode("utf-8"),
-            object_pairs_hook=lambda pairs: _unique_object(pairs, "request"),
-            parse_constant=lambda token: (_ for _ in ()).throw(DriverError(f"request contains non-finite number: {token}")),
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise DriverError("request is invalid JSON") from error
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    if type(value) is not dict:
-        raise DriverError("request root must be an object")
-    return value
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 def _unique_object(pairs, label: str) -> dict:
@@ -189,6 +140,68 @@ def _unique_object(pairs, label: str) -> dict:
     return value
 
 
+def _read_request(path) -> dict:
+    target = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    descriptor = None
+    try:
+        metadata = os.lstat(target)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise DriverError("request must be a regular non-symlink file")
+        if metadata.st_size > _MAX_JSON_BYTES:
+            raise DriverError("request exceeds the byte limit")
+        descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, _MAX_JSON_BYTES + 1 - total),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _MAX_JSON_BYTES:
+                raise DriverError("request exceeds the byte limit")
+        raw = b"".join(chunks)
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=lambda pairs: _unique_object(pairs, "request"),
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                DriverError(f"request contains non-finite number: {token}")
+            ),
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise DriverError("request is invalid JSON") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if type(value) is not dict:
+        raise DriverError("request root must be an object")
+    return value
+
+
+def _string_list(value, label: str) -> list[str]:
+    if type(value) is not list or any(
+        not isinstance(item, str) or not item for item in value
+    ):
+        raise DriverError(f"{label} must be a string list")
+    if len(value) != len(set(value)):
+        raise DriverError(f"{label} must not contain duplicates")
+    return list(value)
+
+
+def _validate_variant(value, label: str) -> dict:
+    value = _closed(value, {"kind", "digest", "locator"}, label)
+    if value["kind"] not in {"source_snapshot", "artifact", "deployment"}:
+        raise DriverError(f"{label}.kind is unsupported")
+    return {
+        "kind": value["kind"],
+        "digest": _sha256(value["digest"], f"{label}.digest"),
+        "locator": _text(value["locator"], f"{label}.locator"),
+    }
+
+
 def _validate_request(value: dict) -> dict:
     request = _closed(value, _REQUEST_FIELDS, "request")
     if request["protocol_version"] != REQUEST_PROTOCOL:
@@ -197,106 +210,198 @@ def _validate_request(value: dict) -> dict:
         _sha256(request[field], field)
     for field in ("target_id", "execution_id", "operation", "output_path"):
         _text(request[field], field)
-    variant = _closed(request["variant"], {"kind", "digest", "locator"}, "request.variant")
-    if variant["kind"] not in {"source_snapshot", "artifact", "deployment"}:
-        raise DriverError("request.variant.kind is unsupported")
-    _sha256(variant["digest"], "request.variant.digest")
-    _text(variant["locator"], "request.variant.locator")
-    suite = _closed(request["test_suite"], {"digest", "locator", "case_ids"}, "request.test_suite")
+
+    subjects = request["subjects"]
+    if type(subjects) is not list or len(subjects) not in {1, 2}:
+        raise DriverError("request.subjects must contain one or two subjects")
+    roles = set()
+    normalized_subjects = []
+    for index, subject in enumerate(subjects):
+        subject = _closed(subject, {"role", "variant"}, f"request.subjects[{index}]")
+        role = subject["role"]
+        if role not in {"original", "reference", "candidate"} or role in roles:
+            raise DriverError("request subject roles must be unique and supported")
+        roles.add(role)
+        normalized_subjects.append(
+            {
+                "role": role,
+                "variant": _validate_variant(
+                    subject["variant"], f"request.subjects[{index}].variant"
+                ),
+            }
+        )
+
+    acquisition = _closed(
+        request["acquisition"],
+        {"lifecycle", "shared_state", "rebuilt_state"},
+        "request.acquisition",
+    )
+    shared = _string_list(acquisition["shared_state"], "request.acquisition.shared_state")
+    rebuilt = _string_list(
+        acquisition["rebuilt_state"], "request.acquisition.rebuilt_state"
+    )
+    if set(shared) & set(rebuilt):
+        raise DriverError("acquisition state cannot be both shared and rebuilt")
+    if len(subjects) == 1 and (
+        acquisition["lifecycle"] != "isolated_process" or shared
+    ):
+        raise DriverError("single-subject acquisition must be isolated")
+    if len(subjects) == 2 and (
+        acquisition["lifecycle"] != "same_process" or not shared
+    ):
+        raise DriverError("paired acquisition must be same-process with shared state")
+
+    suite = _closed(
+        request["test_suite"], {"digest", "locator", "case_ids"}, "request.test_suite"
+    )
     _sha256(suite["digest"], "request.test_suite.digest")
     _text(suite["locator"], "request.test_suite.locator")
-    if type(suite["case_ids"]) is not list or not suite["case_ids"]:
-        raise DriverError("request.test_suite.case_ids must be a non-empty string list")
-    if len(suite["case_ids"]) != len(set(suite["case_ids"])):
-        raise DriverError("request.test_suite.case_ids must not contain duplicates")
-    for index, case_id in enumerate(suite["case_ids"]):
-        _text(case_id, f"request.test_suite.case_ids[{index}]")
-    correctness = _closed(request["correctness"], {"reference", "method", "acceptance"}, "request.correctness")
-    reference = _closed(correctness["reference"], {"digest", "locator"}, "request.correctness.reference")
+    case_ids = _string_list(suite["case_ids"], "request.test_suite.case_ids")
+    if not case_ids:
+        raise DriverError("request.test_suite.case_ids must not be empty")
+
+    correctness = _closed(
+        request["correctness"],
+        {"reference", "method", "acceptance"},
+        "request.correctness",
+    )
+    reference = _closed(
+        correctness["reference"],
+        {"digest", "locator"},
+        "request.correctness.reference",
+    )
     _sha256(reference["digest"], "request.correctness.reference.digest")
     _text(reference["locator"], "request.correctness.reference.locator")
     _text(correctness["method"], "request.correctness.method")
-    objective = _closed(request["objective"], {"primary_metric", "constraints"}, "request.objective")
-    _json_value(correctness["acceptance"], "request.correctness.acceptance")
-    _json_value(objective["primary_metric"], "request.objective.primary_metric")
-    _json_value(objective["constraints"], "request.objective.constraints")
-    if request["role"] not in {"original", "reference", "candidate"}:
-        raise DriverError("request.role is unsupported")
-    if request["mode"] not in {"correctness", "measure", "combined"}:
-        raise DriverError("request.mode is unsupported")
+    objective = _closed(
+        request["objective"], {"primary_metric", "constraints"}, "request.objective"
+    )
+    for label, item in (
+        ("request.correctness.acceptance", correctness["acceptance"]),
+        ("request.objective.primary_metric", objective["primary_metric"]),
+        ("request.objective.constraints", objective["constraints"]),
+        ("request.case", request["case"]),
+        ("request.sampling", request["sampling"]),
+    ):
+        _json_value(item, label)
     if type(request["case"]) is not dict or type(request["sampling"]) is not dict:
         raise DriverError("request.case and request.sampling must be objects")
-    _json_value(request["case"], "request.case")
-    _json_value(request["sampling"], "request.sampling")
-    core = {key: request[key] for key in _REQUEST_FIELDS if key != "request_digest"}
+
+    normalized = dict(request)
+    normalized["subjects"] = normalized_subjects
+    normalized["acquisition"] = {
+        "lifecycle": acquisition["lifecycle"],
+        "shared_state": shared,
+        "rebuilt_state": rebuilt,
+    }
+    core = {key: normalized[key] for key in _REQUEST_FIELDS if key != "request_digest"}
     if hashlib.sha256(_canonical_bytes(core)).hexdigest() != request["request_digest"]:
         raise DriverError("request_digest does not match request identity")
-    return request
+    return normalized
 
 
-def _metrics(value: object, label: str) -> dict:
+def _metrics(value, label: str) -> dict:
     if type(value) is not dict:
         raise DriverError(f"{label} must be an object")
-    return {_text(name, f"{label} name", 128): _finite(metric, f"{label}.{name}") for name, metric in value.items()}
+    return {
+        _text(name, f"{label} name", 128): _finite(metric, f"{label}.{name}")
+        for name, metric in value.items()
+    }
 
 
-def _validate_correctness(value: object) -> dict:
+def _validate_correctness(value) -> dict:
     value = _closed(value, {"status", "metrics"}, "correctness")
     if value["status"] not in {"passed", "failed"}:
         raise DriverError("correctness.status is unsupported")
-    return {"status": value["status"], "metrics": _metrics(value["metrics"], "correctness.metrics")}
+    return {
+        "status": value["status"],
+        "metrics": _metrics(value["metrics"], "correctness.metrics"),
+    }
 
 
-def _samples(value: object, label: str) -> list[float]:
+def _samples(value, label: str) -> list[float]:
     if type(value) is not list or not value:
         raise DriverError(f"{label} must be a non-empty number list")
     return [_finite(item, f"{label}[{index}]") for index, item in enumerate(value)]
 
 
-def _validate_measurements(value: object) -> dict:
+def _validate_measurements(value) -> dict:
     value = _closed(value, {"primary", "constraints"}, "measurements")
-    primary = _closed(value["primary"], {"name", "unit", "samples"}, "measurements.primary")
+    primary = _closed(
+        value["primary"], {"name", "unit", "samples"}, "measurements.primary"
+    )
     if type(value["constraints"]) is not list:
         raise DriverError("measurements.constraints must be a list")
     constraints = []
     names = set()
     for index, item in enumerate(value["constraints"]):
-        item = _closed(item, {"name", "unit", "samples"}, f"measurements.constraints[{index}]")
+        item = _closed(
+            item,
+            {"name", "unit", "samples"},
+            f"measurements.constraints[{index}]",
+        )
         name = _text(item["name"], f"measurements.constraints[{index}].name", 128)
         if name in names:
-            raise DriverError("measurements.constraints names must be unique")
+            raise DriverError("measurements constraint names must be unique")
         names.add(name)
-        constraints.append({"name": name, "unit": _text(item["unit"], f"measurements.constraints[{index}].unit", 64), "samples": _samples(item["samples"], f"measurements.constraints[{index}].samples")})
+        constraints.append(
+            {
+                "name": name,
+                "unit": _text(item["unit"], "constraint unit", 64),
+                "samples": _samples(item["samples"], "constraint samples"),
+            }
+        )
     return {
-        "primary": {"name": _text(primary["name"], "measurements.primary.name", 128), "unit": _text(primary["unit"], "measurements.primary.unit", 64), "samples": _samples(primary["samples"], "measurements.primary.samples")},
+        "primary": {
+            "name": _text(primary["name"], "measurements.primary.name", 128),
+            "unit": _text(primary["unit"], "measurements.primary.unit", 64),
+            "samples": _samples(primary["samples"], "measurements.primary.samples"),
+        },
         "constraints": constraints,
     }
 
 
-def _validate_environment(value: object) -> dict:
-    fields = {"gpu_uuids", "gpu_models", "gpu_architectures", "driver_version", "cuda_runtime_version", "frameworks", "container"}
+def _validate_environment(value) -> dict:
+    fields = {
+        "gpu_uuids", "gpu_models", "gpu_architectures", "driver_version",
+        "cuda_runtime_version", "frameworks", "runtime_provenance",
+    }
     value = _closed(value, fields, "environment")
     for field in ("gpu_uuids", "gpu_models", "gpu_architectures"):
-        if type(value[field]) is not list or any(not isinstance(item, str) or not item for item in value[field]):
-            raise DriverError(f"environment.{field} must be a string list")
-    if len(value["gpu_uuids"]) != len(set(value["gpu_uuids"])):
-        raise DriverError("environment.gpu_uuids must be unique")
-    if len(value["gpu_models"]) != len(value["gpu_uuids"]) or len(value["gpu_architectures"]) != len(value["gpu_uuids"]):
+        _string_list(value[field], f"environment.{field}")
+    if (
+        len(value["gpu_models"]) != len(value["gpu_uuids"])
+        or len(value["gpu_architectures"]) != len(value["gpu_uuids"])
+    ):
         raise DriverError("environment GPU arrays must align")
     if type(value["frameworks"]) is not dict:
         raise DriverError("environment.frameworks must be an object")
     for name, version in value["frameworks"].items():
         _text(name, "environment.frameworks name", 128)
         _text(version, f"environment.frameworks.{name}", 256)
-    container = _closed(value["container"], {"kind", "identity"}, "environment.container")
-    return {
-        "gpu_uuids": list(value["gpu_uuids"]), "gpu_models": list(value["gpu_models"]),
-        "gpu_architectures": list(value["gpu_architectures"]),
-        "driver_version": _text(value["driver_version"], "environment.driver_version", 256),
-        "cuda_runtime_version": _text(value["cuda_runtime_version"], "environment.cuda_runtime_version", 256),
-        "frameworks": dict(sorted(value["frameworks"].items())),
-        "container": {"kind": _text(container["kind"], "environment.container.kind"), "identity": _text(container["identity"], "environment.container.identity")},
-    }
+    provenance = _closed(
+        value["runtime_provenance"],
+        {"kind", "identity", "lineage_complete", "lineage", "components"},
+        "environment.runtime_provenance",
+    )
+    if provenance["kind"] not in {"host", "container"}:
+        raise DriverError("runtime provenance kind is unsupported")
+    if type(provenance["lineage_complete"]) is not bool:
+        raise DriverError("runtime provenance lineage_complete must be boolean")
+    if type(provenance["lineage"]) is not list or type(provenance["components"]) is not list:
+        raise DriverError("runtime provenance lineage and components must be lists")
+    if provenance["kind"] == "host" and (
+        not provenance["lineage_complete"] or provenance["lineage"]
+    ):
+        raise DriverError("host runtime provenance must be complete without image lineage")
+    return _json_value(value, "environment")
+
+
+def _validate_cleanup(value) -> dict:
+    value = _closed(value, {"status", "live_tasks"}, "cleanup")
+    if value != {"status": "confirmed", "live_tasks": []}:
+        raise DriverError("cleanup must be confirmed with no live tasks")
+    return value
 
 
 def _artifact_digest(root: Path, parts: tuple[str, ...]) -> str:
@@ -332,7 +437,7 @@ def _artifact_digest(root: Path, parts: tuple[str, ...]) -> str:
             os.close(descriptor)
 
 
-def _validate_artifacts(value: object, output_path: str) -> list[dict]:
+def _validate_artifacts(value, output_path: str) -> list[dict]:
     if type(value) is not list or len(value) > _MAX_ARTIFACTS:
         raise DriverError("result.artifacts must be a bounded list")
     root = Path(output_path).parent
@@ -344,13 +449,7 @@ def _validate_artifacts(value: object, output_path: str) -> list[dict]:
             {"kind", "relative_path", "sha256"},
             f"result.artifacts[{index}]",
         )
-        kind = _text(item["kind"], f"result.artifacts[{index}].kind", 128)
-        relative = _text(
-            item["relative_path"],
-            f"result.artifacts[{index}].relative_path",
-        )
-        if "\\" in relative or "\x00" in relative:
-            raise DriverError("artifact path must be a canonical POSIX relative path")
+        relative = _text(item["relative_path"], "artifact relative_path")
         path = PurePosixPath(relative)
         if (
             path.is_absolute()
@@ -358,73 +457,35 @@ def _validate_artifacts(value: object, output_path: str) -> list[dict]:
             or any(part in {"", ".", ".."} for part in path.parts)
             or str(path) != relative
             or relative in seen
+            or relative == "result.json"
         ):
-            raise DriverError("artifact path must be unique and relative")
+            raise DriverError("artifact relative_path is invalid or reserved")
         seen.add(relative)
-        actual = _artifact_digest(root, path.parts)
-        expected = _sha256(item["sha256"], f"result.artifacts[{index}].sha256")
-        if actual != expected:
+        expected = _sha256(item["sha256"], "artifact sha256")
+        if _artifact_digest(root, path.parts) != expected:
             raise DriverError("artifact digest does not match")
         normalized.append(
-            {"kind": kind, "relative_path": relative, "sha256": expected}
+            {
+                "kind": _text(item["kind"], "artifact kind", 128),
+                "relative_path": relative,
+                "sha256": expected,
+            }
         )
     return normalized
-
-
-def _validate_result(value: object, request: dict) -> dict:
-    required = set(_RESULT_BASE_FIELDS)
-    if request["mode"] in {"correctness", "combined"}:
-        required.add("correctness")
-    if request["mode"] in {"measure", "combined"}:
-        required.add("measurements")
-    value = _closed(value, required, "result")
-    if value["protocol_version"] != RESULT_PROTOCOL:
-        raise DriverError("result protocol_version is unsupported")
-    expected = {
-        "request_digest": request["request_digest"], "target_id": request["target_id"],
-        "execution_id": request["execution_id"], "variant_digest": request["variant"]["digest"],
-        "role": request["role"], "mode": request["mode"], "case_id": request["case"].get("id"),
-        "driver_identity": request["driver_identity"],
-    }
-    for field, expected_value in expected.items():
-        if value[field] != expected_value:
-            raise DriverError(f"result {field} does not match request")
-    artifacts = _validate_artifacts(value["artifacts"], request["output_path"])
-    _validate_cleanup(value["cleanup"])
-    result = {field: _json_value(value[field], f"result.{field}") for field in _RESULT_BASE_FIELDS}
-    result["artifacts"] = artifacts
-    result["environment"] = _validate_environment(value["environment"])
-    if "correctness" in required:
-        result["correctness"] = _validate_correctness(value["correctness"])
-    if "measurements" in required:
-        result["measurements"] = _validate_measurements(value["measurements"])
-    return result
-
-
-def _validate_cleanup(value: object) -> dict:
-    cleanup = _closed(value, {"status", "live_tasks"}, "cleanup")
-    if cleanup["status"] != "confirmed" or type(cleanup["live_tasks"]) is not list or cleanup["live_tasks"]:
-        raise DriverError("cleanup must be confirmed with no live tasks")
-    return {"status": "confirmed", "live_tasks": []}
 
 
 def _atomic_json(path, value: dict) -> None:
     target = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
     parent = os.open(
         target.parent,
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
     )
     temporary = f".{target.name}.{secrets.token_hex(8)}.tmp"
     descriptor = None
     try:
         descriptor = os.open(
             temporary,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
             0o600,
             dir_fd=parent,
         )
@@ -460,31 +521,60 @@ def _atomic_json(path, value: dict) -> None:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Run one closed workload-driver request.")
+    parser = argparse.ArgumentParser(description="Run one V2 workload evidence request.")
     parser.add_argument("--request", required=True)
     args = parser.parse_args(argv)
     try:
         request = _validate_request(_read_request(args.request))
-        result = None
+        shared_state = prepare_acquisition(request)
+        evidence = {"correctness": [], "measurements": []}
         primary_error = None
         try:
+            for subject in request["subjects"]:
+                observed = _closed(
+                    run_subject_evidence(request, subject, shared_state),
+                    {"correctness", "measurements"},
+                    f"evidence for {subject['role']}",
+                )
+                evidence["correctness"].append(
+                    {
+                        "role": subject["role"],
+                        "result": _validate_correctness(observed["correctness"]),
+                    }
+                )
+                evidence["measurements"].append(
+                    {
+                        "role": subject["role"],
+                        "result": _validate_measurements(observed["measurements"]),
+                    }
+                )
             result = {
                 "protocol_version": RESULT_PROTOCOL,
-                "request_digest": request["request_digest"], "target_id": request["target_id"],
-                "execution_id": request["execution_id"], "variant_digest": request["variant"]["digest"],
-                "role": request["role"], "mode": request["mode"], "case_id": request["case"].get("id"),
-                "artifacts": collect_artifacts(request),
+                "request_digest": request["request_digest"],
+                "target_id": request["target_id"],
+                "execution_id": request["execution_id"],
+                "subject_digests": [
+                    {
+                        "role": subject["role"],
+                        "digest": subject["variant"]["digest"],
+                    }
+                    for subject in request["subjects"]
+                ],
+                "case_id": request["case"].get("id"),
+                "artifacts": _validate_artifacts(
+                    collect_artifacts(request, shared_state),
+                    request["output_path"],
+                ),
                 "driver_identity": request["driver_identity"],
+                "environment": _validate_environment(collect_environment(request)),
+                "acquisition": request["acquisition"],
+                "evidence": evidence,
             }
-            if request["mode"] in {"correctness", "combined"}:
-                result["correctness"] = run_correctness(request)
-            if request["mode"] in {"measure", "combined"}:
-                result["measurements"] = run_measurements(request)
-            result["environment"] = collect_environment(request)
         except BaseException as error:
             primary_error = error
+            result = None
         try:
-            cleanup_result = _validate_cleanup(cleanup(request))
+            cleanup_result = _validate_cleanup(cleanup(request, shared_state))
         except BaseException as error:
             if primary_error is not None:
                 raise DriverError(f"{primary_error}; cleanup failed: {error}") from error
@@ -493,7 +583,7 @@ def main(argv=None) -> int:
             raise primary_error
         assert result is not None
         result["cleanup"] = cleanup_result
-        _atomic_json(request["output_path"], _validate_result(result, request))
+        _atomic_json(request["output_path"], result)
     except (DriverError, NotImplementedError, OSError, ValueError) as error:
         print(json.dumps({"status": "rejected", "error": str(error)[:1024]}, sort_keys=True))
         return 2

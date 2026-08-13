@@ -2,17 +2,17 @@
 
 ## Correctness before performance
 
-Every Candidate is checked against the Target's expected outputs, tolerances, or accuracy criteria before its performance samples are interpreted. A failed or missing correctness result blocks profiling and formal measurement for that candidate.
+Every driver call records correctness and measurements together, but performance samples are interpreted only after the Target gate and any Experiment-specific invariant gates pass. A failed or missing gate invalidates the affected performance result and prevents later expensive evidence calls. A final audit may continue only far enough to establish whether the original can be restored safely.
 
 ## Paired measurement
 
-Original, Candidate, and Champion comparisons use the same frozen workload, environment identity, and sampling design. Raw ordered samples remain available. Point estimates are reported with uncertainty and constraints; a positive point estimate alone is not a passing result.
+Original, Candidate, and Champion comparisons use the same frozen workload, runtime identity, comparison contract, and sampling design. The contract states what relationship is being tested, which state is shared or rebuilt, and whether subjects run in isolated processes or the same process. Raw ordered samples remain available. Point estimates are reported with uncertainty and constraints; a positive point estimate alone is not a passing result.
 
 Shared-host or serving measurements also retain queue, clock, temperature, cache, concurrency, and traffic observations when available. Predeclared contamination rules determine which pairs are comparable.
 
 ## Immutable identity
 
-Target, Variant, Experiment, tool executable, profiler artifact, and result identities are content-bound. A source, binary, report, tool, or environment change invalidates the affected comparison. Symlinks, path traversal, mutable sibling files, and unknown report dialects fail closed.
+Target, Variant, Experiment, tool executable, profiler artifact, and result identities are content-bound. A source, binary, report, tool, or runtime change invalidates the affected comparison. Container evidence records the final runtime identity plus confirmed base, overlay, and component identities. Incomplete lineage narrows attribution to that frozen runtime instead of guessing an upstream source. Symlinks, path traversal, mutable sibling files, and unknown report dialects fail closed.
 
 ## Profiler limits
 

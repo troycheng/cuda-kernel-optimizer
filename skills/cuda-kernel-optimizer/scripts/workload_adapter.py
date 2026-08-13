@@ -20,14 +20,18 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 
-DRIVER_PROTOCOL = "cuda-kernel-optimizer/driver-v1"
-REQUEST_PROTOCOL = "cuda-kernel-optimizer/driver-request-v1"
-RESULT_PROTOCOL = "cuda-kernel-optimizer/driver-result-v1"
+DRIVER_PROTOCOL = "cuda-kernel-optimizer/driver-v2"
+REQUEST_PROTOCOL = "cuda-kernel-optimizer/driver-request-v2"
+RESULT_PROTOCOL = "cuda-kernel-optimizer/driver-result-v2"
+
+_SINGLE_CAPABILITY = "single_variant_combined"
+_PAIRED_CAPABILITY = "paired_same_process_combined"
+_EVIDENCE_CAPABILITIES = {_SINGLE_CAPABILITY, _PAIRED_CAPABILITY}
 
 _DRIVER_FIELDS = {
     "command",
     "request_argument",
-    "execution_mode",
+    "evidence_capabilities",
     "protocol_version",
     "profiler_capabilities",
     "side_effects",
@@ -40,12 +44,11 @@ _REQUEST_FIELDS = {
     "target_id",
     "execution_id",
     "operation",
-    "variant",
+    "subjects",
     "test_suite",
     "correctness",
     "objective",
-    "role",
-    "mode",
+    "acquisition",
     "case",
     "sampling",
     "output_path",
@@ -56,16 +59,21 @@ _RESULT_BASE_FIELDS = {
     "request_digest",
     "target_id",
     "execution_id",
-    "variant_digest",
-    "role",
-    "mode",
+    "subject_digests",
     "case_id",
     "artifacts",
     "cleanup",
     "driver_identity",
     "environment",
+    "acquisition",
+    "evidence",
 }
 _VARIANT_FIELDS = {"kind", "digest", "locator"}
+_SUBJECT_FIELDS = {"role", "variant"}
+_SUBJECT_DIGEST_FIELDS = {"role", "digest"}
+_ACQUISITION_FIELDS = {"lifecycle", "shared_state", "rebuilt_state"}
+_EVIDENCE_FIELDS = {"correctness", "measurements"}
+_ROLE_EVIDENCE_FIELDS = {"role", "result"}
 _CLEANUP_RESULT_FIELDS = {"status", "live_tasks"}
 _CORRECTNESS_FIELDS = {"status", "metrics"}
 _MEASUREMENTS_FIELDS = {"primary", "constraints"}
@@ -81,19 +89,30 @@ _ENVIRONMENT_FIELDS = {
     "driver_version",
     "cuda_runtime_version",
     "frameworks",
-    "container",
+    "runtime_provenance",
 }
-_CONTAINER_FIELDS = {"kind", "identity"}
+_RUNTIME_PROVENANCE_FIELDS = {
+    "kind",
+    "identity",
+    "lineage_complete",
+    "lineage",
+    "components",
+}
+_LINEAGE_FIELDS = {"kind", "identity"}
+_COMPONENT_FIELDS = {"name", "identity"}
 _CONSTRAINT_MEASUREMENT_FIELDS = {"name", "unit", "samples"}
 _ARTIFACT_FIELDS = {"kind", "relative_path", "sha256"}
 _PROFILE_RECEIPT_FIELDS = {
     "variant",
+    "role",
     "case_id",
     "status",
     "passed",
     "acceptance",
     "metrics",
     "gate",
+    "additional_gates",
+    "diagnostics",
     "evidence_refs",
 }
 _PROFILE_GATE_FIELDS = {
@@ -159,6 +178,16 @@ def _text(value, label: str, *, maximum: int = 4096) -> str:
     if not isinstance(value, str) or not value or len(value) > maximum:
         raise ValueError(f"{label} must be a non-empty bounded string")
     return value
+
+
+def _string_list(value, label: str) -> list[str]:
+    if type(value) is not list or any(
+        not isinstance(item, str) or not item for item in value
+    ):
+        raise ValueError(f"{label} must be a string list")
+    if len(value) != len(set(value)):
+        raise ValueError(f"{label} must not contain duplicates")
+    return list(value)
 
 
 def _sha256(value, label: str) -> str:
@@ -275,8 +304,19 @@ def validate_driver(value) -> dict:
     )
     if not request_argument.startswith("-"):
         raise ValueError("driver.request_argument must be an option")
-    if driver["execution_mode"] not in {"separate", "combined"}:
-        raise ValueError("driver.execution_mode must be separate or combined")
+    capabilities = driver["evidence_capabilities"]
+    if (
+        type(capabilities) is not list
+        or any(item not in _EVIDENCE_CAPABILITIES for item in capabilities)
+        or len(capabilities) != len(set(capabilities))
+    ):
+        raise ValueError(
+            "driver.evidence_capabilities must be a unique supported string list"
+        )
+    if _SINGLE_CAPABILITY not in capabilities:
+        raise ValueError(
+            "driver.evidence_capabilities must include single_variant_combined"
+        )
     profiler_capabilities = driver["profiler_capabilities"]
     if (
         type(profiler_capabilities) is not list
@@ -314,7 +354,7 @@ def validate_driver(value) -> dict:
     normalized = {
         "command": command,
         "request_argument": request_argument,
-        "execution_mode": driver["execution_mode"],
+        "evidence_capabilities": sorted(capabilities),
         "protocol_version": DRIVER_PROTOCOL,
         "profiler_capabilities": sorted(profiler_capabilities),
         "side_effects": normalized_side_effects,
@@ -454,24 +494,83 @@ def materialize_target_inputs(
     }
 
 
+def _acquisition(value, *, subject_count: int) -> dict:
+    acquisition = _closed(dict(value), _ACQUISITION_FIELDS, "acquisition")
+    lifecycle = acquisition["lifecycle"]
+    if lifecycle not in {"isolated_process", "same_process"}:
+        raise ValueError("acquisition.lifecycle is unsupported")
+    shared_state = _string_list(acquisition["shared_state"], "acquisition.shared_state")
+    rebuilt_state = _string_list(
+        acquisition["rebuilt_state"], "acquisition.rebuilt_state"
+    )
+    if set(shared_state) & set(rebuilt_state):
+        raise ValueError("acquisition state cannot be both shared and rebuilt")
+    if subject_count == 1:
+        if lifecycle != "isolated_process" or shared_state:
+            raise ValueError(
+                "single-subject acquisition must use isolated_process with no shared state"
+            )
+    elif lifecycle != "same_process" or not shared_state:
+        raise ValueError(
+            "two-subject acquisition must use same_process with declared shared state"
+        )
+    return {
+        "lifecycle": lifecycle,
+        "shared_state": shared_state,
+        "rebuilt_state": rebuilt_state,
+    }
+
+
+def _subjects(value) -> list[dict]:
+    if type(value) is not list or len(value) not in {1, 2}:
+        raise ValueError("subjects must contain one or two variants")
+    normalized = []
+    roles = set()
+    for index, item in enumerate(value):
+        subject = _closed(dict(item), _SUBJECT_FIELDS, f"subjects[{index}]")
+        role = subject["role"]
+        if role not in {"original", "reference", "candidate"} or role in roles:
+            raise ValueError("subjects roles must be unique and supported")
+        roles.add(role)
+        normalized.append({"role": role, "variant": validate_variant(subject["variant"])})
+    if len(normalized) == 2 and roles not in (
+        {"reference", "candidate"},
+        {"original", "candidate"},
+    ):
+        raise ValueError("paired subjects must compare candidate with reference or original")
+    return normalized
+
+
 def build_driver_request(
     *,
     target_id: str,
     execution_id: str,
     operation: str,
     driver: Mapping,
-    variant: Mapping,
+    subjects: Sequence[Mapping],
     test_suite: Mapping,
     correctness: Mapping,
     objective: Mapping,
-    role: str,
-    mode: str,
+    acquisition: Mapping,
     case: Mapping,
     sampling: Mapping,
     output_path,
 ) -> dict:
     frozen_driver = verify_driver(driver)
-    normalized_variant = validate_variant(variant)
+    normalized_subjects = _subjects(list(subjects))
+    normalized_acquisition = _acquisition(
+        acquisition,
+        subject_count=len(normalized_subjects),
+    )
+    required_capability = (
+        _PAIRED_CAPABILITY
+        if len(normalized_subjects) == 2
+        else _SINGLE_CAPABILITY
+    )
+    if required_capability not in frozen_driver["evidence_capabilities"]:
+        raise ValueError(
+            f"driver lacks required evidence capability: {required_capability}"
+        )
     test_suite = _closed(dict(test_suite), _TEST_SUITE_FIELDS, "test_suite")
     test_suite = {
         "digest": _sha256(test_suite["digest"], "test_suite.digest"),
@@ -521,26 +620,17 @@ def build_driver_request(
             objective["constraints"], "objective.constraints"
         ),
     }
-    if role not in {"original", "reference", "candidate"}:
-        raise ValueError("driver role is unsupported")
-    if mode not in {"correctness", "measure", "combined"}:
-        raise ValueError("driver mode is unsupported")
-    if frozen_driver["execution_mode"] == "separate" and mode == "combined":
-        raise ValueError("separate driver cannot run combined mode")
-    if frozen_driver["execution_mode"] == "combined" and mode != "combined":
-        raise ValueError("combined driver requires combined mode")
     target = Path(os.path.abspath(os.path.expanduser(os.fspath(output_path))))
     core = {
         "protocol_version": REQUEST_PROTOCOL,
         "target_id": _text(target_id, "target_id", maximum=128),
         "execution_id": _text(execution_id, "execution_id", maximum=128),
         "operation": _text(operation, "operation", maximum=64),
-        "variant": normalized_variant,
+        "subjects": normalized_subjects,
         "test_suite": test_suite,
         "correctness": correctness,
         "objective": objective,
-        "role": role,
-        "mode": mode,
+        "acquisition": normalized_acquisition,
         "case": _json_copy(case, "case"),
         "sampling": _json_copy(sampling, "sampling"),
         "output_path": str(target),
@@ -658,7 +748,7 @@ def _profile_target(root: Path, reference) -> dict:
     if (
         target.get("record_type") != "target"
         or target.get("format_version")
-        != "cuda-kernel-optimizer/target-v1"
+        != "cuda-kernel-optimizer/target-v2"
         or target.get("id") != expected_id
         or target.get("target_mode") != "optimization"
     ):
@@ -728,7 +818,7 @@ def _profile_experiment(
     if (
         experiment.get("record_type") != "experiment"
         or experiment.get("format_version")
-        != "cuda-kernel-optimizer/experiment-v1"
+        != "cuda-kernel-optimizer/experiment-v2"
         or experiment.get("id") != experiment_id
         or experiment.get("target_ref") != target_ref
         or experiment.get("baseline_ref") != baseline_ref
@@ -832,6 +922,7 @@ def _profile_correctness(
     experiment_ref: dict,
     candidate: dict,
     target: dict,
+    experiment: dict,
     case_id: str,
 ) -> dict:
     normalized = _invocation_reference(
@@ -852,6 +943,8 @@ def _profile_correctness(
         or result.get("target_ref") != target_ref
         or result.get("experiment_ref") != experiment_ref
         or result.get("execution_status") != "succeeded"
+        or result.get("measurement_validity") != "valid"
+        or result.get("stop_reason") == "correctness_failed"
         or result.get("cleanup_status") != "confirmed"
     ):
         raise ValueError("correctness_ref is not bound to this candidate")
@@ -874,6 +967,8 @@ def _profile_correctness(
             f"correctness receipt[{index}]",
         )
         if receipt["variant"] != candidate or receipt["case_id"] != case_id:
+            continue
+        if receipt["role"] != "candidate":
             continue
         if receipt["status"] != "valid" or receipt["passed"] is not True:
             continue
@@ -898,6 +993,32 @@ def _profile_correctness(
         )
         if gate != computed or not computed["passed"]:
             raise ValueError("correctness receipt gate is not a passing result")
+        contract = experiment["comparison_contract"]
+        computed_additional = [
+            evaluate_correctness(
+                {
+                    "status": gate["driver_status"],
+                    "metrics": receipt["metrics"],
+                },
+                rule,
+            )
+            for rule in contract["additional_gates"]
+        ]
+        if (
+            receipt["additional_gates"] != computed_additional
+            or not all(item["passed"] for item in computed_additional)
+        ):
+            raise ValueError("correctness receipt additional gates are invalid")
+        expected_diagnostics = {
+            name: receipt["metrics"][name]
+            for name in contract["diagnostics"]
+            if name in receipt["metrics"]
+        }
+        if (
+            len(expected_diagnostics) != len(contract["diagnostics"])
+            or receipt["diagnostics"] != expected_diagnostics
+        ):
+            raise ValueError("correctness receipt diagnostics are invalid")
         if type(receipt["evidence_refs"]) is not list or len(receipt["evidence_refs"]) != 1:
             raise ValueError("correctness receipt must contain one content-bound evidence_ref")
         _profile_evidence_ref(
@@ -906,9 +1027,9 @@ def _profile_correctness(
             result.get("command_receipts"),
         )
         matches.append(receipt)
-    if len(matches) != 1:
+    if not matches:
         raise ValueError(
-            "correctness_ref does not contain one passing candidate receipt"
+            "correctness_ref does not contain passing candidate evidence"
         )
     return normalized
 
@@ -989,6 +1110,7 @@ def resolve_profile_collection(
             experiment_ref=normalized_experiment_ref,
             candidate=variant,
             target=target,
+            experiment=experiment,
             case_id=case_id,
         )
     else:
@@ -1020,7 +1142,7 @@ def _analysis_target(root: Path, reference) -> tuple[dict, dict]:
     )
     if (
         target.get("record_type") != "target"
-        or target.get("format_version") != "cuda-kernel-optimizer/target-v1"
+        or target.get("format_version") != "cuda-kernel-optimizer/target-v2"
         or target.get("id") != normalized["id"]
         or target.get("target_mode") not in {"optimization", "diagnostic"}
     ):
@@ -1118,7 +1240,7 @@ def resolve_analysis_artifact(*, artifact_root, target_ref, artifact_ref) -> dic
     if (
         result.get("record_type") != "invocation_result"
         or result.get("format_version")
-        != "cuda-kernel-optimizer/evaluator-result-v1"
+        != "cuda-kernel-optimizer/evaluator-result-v2"
         or result.get("operation")
         not in {"baseline", "screen", "target", "final_audit"}
         or result.get("target_ref") != normalized_target_ref
@@ -1152,7 +1274,8 @@ def resolve_analysis_artifact(*, artifact_root, target_ref, artifact_ref) -> dic
         or driver_request.get("execution_id") != invocation_ref["invocation_id"]
         or driver_request.get("target_id") != normalized_target_ref["id"]
         or driver_request.get("operation") != result["operation"]
-        or driver_request.get("role") not in {"original", "reference", "candidate"}
+        or type(driver_request.get("subjects")) is not list
+        or len(driver_request["subjects"]) != 1
     ):
         raise ValueError("selected driver receipt is not invocation-bound")
     relative_path = "/".join(
@@ -1200,8 +1323,9 @@ def resolve_analysis_artifact(*, artifact_root, target_ref, artifact_ref) -> dic
         raise ValueError("selected driver artifact member is not manifest-bound")
     artifact = {**artifact, "size_bytes": members[0]["size_bytes"]}
     variants = result.get("variant_refs")
-    role = driver_request.get("role")
-    request_variant = driver_request.get("variant")
+    subject = driver_request["subjects"][0]
+    role = subject.get("role")
+    request_variant = subject.get("variant")
     matches = []
     if type(variants) is list and type(request_variant) is dict:
         matches = [
@@ -1238,7 +1362,7 @@ def resolve_analysis_artifact(*, artifact_root, target_ref, artifact_ref) -> dic
         if (
             experiment.get("record_type") != "experiment"
             or experiment.get("format_version")
-            != "cuda-kernel-optimizer/experiment-v1"
+            != "cuda-kernel-optimizer/experiment-v2"
             or experiment.get("id") != experiment_ref["id"]
             or experiment.get("target_ref") != normalized_target_ref
             or experiment.get("candidate") != matches[0]
@@ -1499,8 +1623,86 @@ def _validate_environment(value) -> dict:
         raise ValueError("driver environment frameworks must map names to versions")
     if len(frameworks) > _MAX_FRAMEWORKS:
         raise ValueError("driver environment exceeds the framework limit")
-    container = _closed(
-        environment["container"], _CONTAINER_FIELDS, "driver environment container"
+    provenance = _closed(
+        environment["runtime_provenance"],
+        _RUNTIME_PROVENANCE_FIELDS,
+        "driver environment runtime_provenance",
+    )
+    if provenance["kind"] not in {"host", "container"}:
+        raise ValueError("driver runtime_provenance.kind is unsupported")
+    if type(provenance["lineage_complete"]) is not bool:
+        raise ValueError("driver runtime_provenance.lineage_complete must be boolean")
+    lineage_value = provenance["lineage"]
+    if type(lineage_value) is not list:
+        raise ValueError("driver runtime_provenance.lineage must be a list")
+    lineage = []
+    lineage_keys = set()
+    base_count = 0
+    for index, item in enumerate(lineage_value):
+        entry = _closed(
+            item,
+            _LINEAGE_FIELDS,
+            f"driver runtime_provenance.lineage[{index}]",
+        )
+        kind = _text(
+            entry["kind"],
+            f"driver runtime_provenance.lineage[{index}].kind",
+            maximum=64,
+        )
+        if kind not in {"base", "overlay"}:
+            raise ValueError("driver runtime provenance lineage kind is unsupported")
+        identity = _text(
+            entry["identity"],
+            f"driver runtime_provenance.lineage[{index}].identity",
+        )
+        key = (kind, identity)
+        if key in lineage_keys:
+            raise ValueError("driver runtime provenance lineage must be unique")
+        lineage_keys.add(key)
+        base_count += kind == "base"
+        lineage.append({"kind": kind, "identity": identity})
+    if provenance["kind"] == "host":
+        if lineage:
+            raise ValueError("host runtime provenance cannot contain image lineage")
+        if not provenance["lineage_complete"]:
+            raise ValueError("host runtime provenance must be complete")
+    if provenance["kind"] == "container" and provenance["lineage_complete"]:
+        if base_count != 1:
+            raise ValueError(
+                "complete container provenance must contain exactly one base identity"
+            )
+    components_value = provenance["components"]
+    if type(components_value) is not list:
+        raise ValueError("driver runtime_provenance.components must be a list")
+    components = []
+    component_names = set()
+    for index, item in enumerate(components_value):
+        component = _closed(
+            item,
+            _COMPONENT_FIELDS,
+            f"driver runtime_provenance.components[{index}]",
+        )
+        name = _text(
+            component["name"],
+            f"driver runtime_provenance.components[{index}].name",
+            maximum=128,
+        )
+        if name in component_names:
+            raise ValueError("driver runtime provenance component names must be unique")
+        component_names.add(name)
+        components.append(
+            {
+                "name": name,
+                "identity": _text(
+                    component["identity"],
+                    f"driver runtime_provenance.components[{index}].identity",
+                ),
+            }
+        )
+    attribution_scope = (
+        "identified_runtime"
+        if provenance["kind"] == "host" or provenance["lineage_complete"]
+        else "frozen_runtime_only"
     )
     return {
         "gpu_uuids": list(gpu_uuids),
@@ -1517,12 +1719,16 @@ def _validate_environment(value) -> dict:
             maximum=256,
         ),
         "frameworks": dict(sorted(frameworks.items())),
-        "container": {
-            "kind": _text(container["kind"], "driver environment container.kind"),
+        "runtime_provenance": {
+            "kind": provenance["kind"],
             "identity": _text(
-                container["identity"],
-                "driver environment container.identity",
+                provenance["identity"],
+                "driver environment runtime_provenance.identity",
             ),
+            "lineage_complete": provenance["lineage_complete"],
+            "lineage": lineage,
+            "components": components,
+            "attribution_scope": attribution_scope,
         },
     }
 
@@ -1689,34 +1895,100 @@ def evaluate_correctness(correctness: Mapping, acceptance: Mapping) -> dict:
     }
 
 
+def _role_evidence(value, *, subjects: list[dict], kind: str) -> list[dict]:
+    if type(value) is not list:
+        raise ValueError(f"driver evidence {kind} must be a list")
+    expected_roles = [subject["role"] for subject in subjects]
+    if len(value) != len(expected_roles):
+        raise ValueError(f"driver evidence {kind} must cover every subject")
+    normalized = []
+    seen = set()
+    for index, item in enumerate(value):
+        entry = _closed(
+            item,
+            _ROLE_EVIDENCE_FIELDS,
+            f"driver evidence {kind}[{index}]",
+        )
+        role = entry["role"]
+        if role not in expected_roles or role in seen:
+            raise ValueError(f"driver evidence {kind} roles do not match subjects")
+        seen.add(role)
+        result = (
+            _validate_correctness(entry["result"])
+            if kind == "correctness"
+            else _validate_measurements(entry["result"])
+        )
+        normalized.append({"role": role, "result": result})
+    if seen != set(expected_roles):
+        raise ValueError(f"driver evidence {kind} omits a subject")
+    return sorted(normalized, key=lambda item: expected_roles.index(item["role"]))
+
+
+def evidence_for_role(driver_result: Mapping, role: str) -> dict:
+    evidence = driver_result.get("evidence")
+    if type(evidence) is not dict:
+        raise ValueError("driver result evidence is unavailable")
+    resolved = {}
+    for kind in ("correctness", "measurements"):
+        entries = evidence.get(kind)
+        if type(entries) is not list:
+            raise ValueError(f"driver result evidence {kind} is unavailable")
+        matches = [entry["result"] for entry in entries if entry.get("role") == role]
+        if len(matches) != 1:
+            raise ValueError(f"driver result evidence does not bind role: {role}")
+        resolved[kind] = matches[0]
+    return resolved
+
+
 def validate_driver_result(path, expected_request: Mapping, *, bundle_manifest=None) -> dict:
-    """Validate one driver result against the exact request that produced it."""
+    """Validate one evidence bundle against the exact request that produced it."""
     request = _closed(
         dict(expected_request), _REQUEST_FIELDS, "expected driver request"
     )
-    result = _strict_json(path)
-    required = set(_RESULT_BASE_FIELDS)
-    mode = request["mode"]
-    if mode in {"correctness", "combined"}:
-        required.add("correctness")
-    if mode in {"measure", "combined"}:
-        required.add("measurements")
-    result = _closed(result, required, "driver result")
+    subjects = _subjects(request["subjects"])
+    acquisition = _acquisition(
+        request["acquisition"],
+        subject_count=len(subjects),
+    )
+    result = _closed(_strict_json(path), _RESULT_BASE_FIELDS, "driver result")
     if result["protocol_version"] != RESULT_PROTOCOL:
         raise ValueError("driver result protocol_version is unsupported")
     expected_echoes = {
         "request_digest": request["request_digest"],
         "target_id": request["target_id"],
         "execution_id": request["execution_id"],
-        "variant_digest": request["variant"]["digest"],
-        "role": request["role"],
-        "mode": request["mode"],
         "case_id": request["case"].get("id"),
         "driver_identity": request["driver_identity"],
+        "acquisition": acquisition,
     }
     for field, expected in expected_echoes.items():
         if result[field] != expected:
             raise ValueError(f"driver result {field} does not match request")
+    subject_digests = result["subject_digests"]
+    if type(subject_digests) is not list or len(subject_digests) != len(subjects):
+        raise ValueError("driver result subject_digests must cover every subject")
+    normalized_subject_digests = []
+    seen_roles = set()
+    expected_by_role = {
+        subject["role"]: subject["variant"]["digest"] for subject in subjects
+    }
+    for index, item in enumerate(subject_digests):
+        entry = _closed(
+            item,
+            _SUBJECT_DIGEST_FIELDS,
+            f"driver result subject_digests[{index}]",
+        )
+        role = entry["role"]
+        digest = _sha256(
+            entry["digest"],
+            f"driver result subject_digests[{index}].digest",
+        )
+        if role in seen_roles or expected_by_role.get(role) != digest:
+            raise ValueError("driver result subject identity does not match request")
+        seen_roles.add(role)
+        normalized_subject_digests.append({"role": role, "digest": digest})
+    if seen_roles != set(expected_by_role):
+        raise ValueError("driver result subject identity omits a subject")
     manifest_files = None
     manifest_directories = None
     if bundle_manifest is not None:
@@ -1767,13 +2039,20 @@ def validate_driver_result(path, expected_request: Mapping, *, bundle_manifest=N
     normalized = {
         field: _json_copy(result[field], f"driver result {field}")
         for field in _RESULT_BASE_FIELDS
+        if field not in {"environment", "evidence", "subject_digests"}
     }
     normalized["artifacts"] = artifacts
     normalized["environment"] = _validate_environment(result["environment"])
-    if "correctness" in required:
-        normalized["correctness"] = _validate_correctness(result["correctness"])
-    if "measurements" in required:
-        normalized["measurements"] = _validate_measurements(result["measurements"])
+    normalized["subject_digests"] = normalized_subject_digests
+    evidence = _closed(result["evidence"], _EVIDENCE_FIELDS, "driver evidence")
+    normalized["evidence"] = {
+        "correctness": _role_evidence(
+            evidence["correctness"], subjects=subjects, kind="correctness"
+        ),
+        "measurements": _role_evidence(
+            evidence["measurements"], subjects=subjects, kind="measurements"
+        ),
+    }
     return normalized
 
 
@@ -1783,6 +2062,7 @@ __all__ = [
     "RESULT_PROTOCOL",
     "build_argv",
     "build_driver_request",
+    "evidence_for_role",
     "evaluate_correctness",
     "materialize_target_inputs",
     "materialize_variant",

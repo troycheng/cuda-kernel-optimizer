@@ -57,7 +57,7 @@ class CompilerProject:
             )
         target = {
             "record_type": "target",
-            "format_version": "cuda-kernel-optimizer/target-v1",
+            "format_version": "cuda-kernel-optimizer/target-v2",
             "id": "target-compiler",
             "target_mode": "diagnostic",
             "diagnostic_materials": records,

@@ -108,7 +108,7 @@ class SassProject:
         }
         target = {
             "record_type": "target",
-            "format_version": "cuda-kernel-optimizer/target-v1",
+            "format_version": "cuda-kernel-optimizer/target-v2",
             "id": "target-sass",
             "target_mode": "diagnostic",
             "diagnostic_materials": [material],
@@ -371,7 +371,7 @@ class SassCheckTests(unittest.TestCase):
             ))
             receipt_index = next(
                 index for index, receipt in enumerate(screened["command_receipts"])
-                if receipt["request"]["role"] == "candidate"
+                if receipt["request"]["subjects"][0]["role"] == "candidate"
             )
             target = json.loads((project.artifact_root / "target.json").read_text("utf-8"))
             request = {

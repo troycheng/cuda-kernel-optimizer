@@ -1,40 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "CUDA Kernel Optimizer driver request v1",
+  "title": "CUDA Kernel Optimizer driver request v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "protocol_version",
-    "request_digest",
-    "target_id",
-    "execution_id",
-    "operation",
-    "variant",
-    "test_suite",
-    "correctness",
-    "objective",
-    "role",
-    "mode",
-    "case",
-    "sampling",
-    "output_path",
-    "driver_identity"
+    "protocol_version", "request_digest", "target_id", "execution_id",
+    "operation", "subjects", "test_suite", "correctness", "objective",
+    "acquisition", "case", "sampling", "output_path", "driver_identity"
   ],
   "properties": {
-    "protocol_version": {"const": "cuda-kernel-optimizer/driver-request-v1"},
+    "protocol_version": {"const": "cuda-kernel-optimizer/driver-request-v2"},
     "request_digest": {"$ref": "#/$defs/sha256"},
     "target_id": {"$ref": "#/$defs/text"},
     "execution_id": {"$ref": "#/$defs/text"},
     "operation": {"$ref": "#/$defs/text"},
-    "variant": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "digest", "locator"],
-      "properties": {
-        "kind": {"enum": ["source_snapshot", "artifact", "deployment"]},
-        "digest": {"$ref": "#/$defs/sha256"},
-        "locator": {"$ref": "#/$defs/text"}
-      }
+    "subjects": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/subject"}
     },
     "test_suite": {
       "type": "object",
@@ -70,21 +54,52 @@
       }
     },
     "objective": {
-      "description": "The exact primary and constraint measurement contract that the result must close.",
       "type": "object",
       "additionalProperties": false,
       "required": ["primary_metric", "constraints"],
       "properties": {"primary_metric": {}, "constraints": {}}
     },
-    "role": {"enum": ["original", "reference", "candidate"]},
-    "mode": {"enum": ["correctness", "measure", "combined"]},
-    "case": {"type": "object", "description": "V1 supplies an id; resolve the full case from the frozen test suite."},
-    "sampling": {"type": "object", "description": "Open V1 sampling instruction. Readiness uses repetitions; baseline uses samples_per_case."},
+    "acquisition": {"$ref": "#/$defs/acquisition"},
+    "case": {"type": "object"},
+    "sampling": {"type": "object"},
     "output_path": {"$ref": "#/$defs/text"},
     "driver_identity": {"$ref": "#/$defs/sha256"}
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "text": {"type": "string", "minLength": 1, "maxLength": 4096}
+    "text": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "variant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "digest", "locator"],
+      "properties": {
+        "kind": {"enum": ["source_snapshot", "artifact", "deployment"]},
+        "digest": {"$ref": "#/$defs/sha256"},
+        "locator": {"$ref": "#/$defs/text"}
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "variant"],
+      "properties": {
+        "role": {"enum": ["original", "reference", "candidate"]},
+        "variant": {"$ref": "#/$defs/variant"}
+      }
+    },
+    "acquisition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lifecycle", "shared_state", "rebuilt_state"],
+      "properties": {
+        "lifecycle": {"enum": ["isolated_process", "same_process"]},
+        "shared_state": {
+          "type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/text"}
+        },
+        "rebuilt_state": {
+          "type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/text"}
+        }
+      }
+    }
   }
 }

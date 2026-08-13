@@ -20,8 +20,8 @@ import time
 from pathlib import Path
 
 
-INPUT_VERSION = "cuda-kernel-optimizer/readiness-input-v1"
-TARGET_VERSION = "cuda-kernel-optimizer/target-v1"
+INPUT_VERSION = "cuda-kernel-optimizer/readiness-input-v2"
+TARGET_VERSION = "cuda-kernel-optimizer/target-v2"
 
 _INPUT_FIELDS = {
     "format_version",
@@ -70,7 +70,7 @@ _CONSTRAINT_FIELDS = {
 }
 _ENVIRONMENT_FIELDS = {"gpu_uuids", "required_tools"}
 _VALIDITY_FIELDS = {"minimum_pairs", "confidence", "bootstrap_samples"}
-_SMOKE_FIELDS = {"mode", "case_id", "resources", "runtime_limits"}
+_SMOKE_FIELDS = {"case_id", "resources", "runtime_limits"}
 _MATERIAL_FIELDS = {"kind", "path", "tool", "tool_version", "dialect"}
 _UNAVAILABLE_REASON = "diagnostic_mode"
 
@@ -372,16 +372,10 @@ def _validate_input(value) -> dict:
         "validity_requirements.bootstrap_samples",
     )
     smoke = _closed(request["smoke"], _SMOKE_FIELDS, "smoke")
-    if smoke["mode"] not in {"correctness", "combined"}:
-        raise InputError("smoke.mode is unsupported")
     if smoke["case_id"] not in case_ids:
         raise InputError("smoke.case_id is not in test_suite.case_ids")
     STORE._scan_limits(request["scan_limits"])
     driver = ADAPTER.validate_driver(request["driver"])
-    if driver["execution_mode"] != "combined":
-        raise InputError("optimization readiness requires a combined driver")
-    if smoke["mode"] != "combined":
-        raise InputError("optimization readiness requires a combined smoke")
     return {
         **request,
         "artifact_root": str(artifact_root),
@@ -642,11 +636,16 @@ def check(value) -> dict:
             execution_id=probe_id,
             operation="readiness_smoke",
             driver=request["driver"],
-            variant={
-                "kind": original_variant["kind"],
-                "digest": original_variant["digest"],
-                "locator": str(smoke_original),
-            },
+            subjects=[
+                {
+                    "role": "original",
+                    "variant": {
+                        "kind": original_variant["kind"],
+                        "digest": original_variant["digest"],
+                        "locator": str(smoke_original),
+                    },
+                }
+            ],
             test_suite={
                 "digest": test_object["digest"],
                 "locator": str(smoke_test_suite),
@@ -664,8 +663,11 @@ def check(value) -> dict:
                 "primary_metric": request["objective"]["primary_metric"],
                 "constraints": request["objective"]["constraints"],
             },
-            role="original",
-            mode=request["smoke"]["mode"],
+            acquisition={
+                "lifecycle": "isolated_process",
+                "shared_state": [],
+                "rebuilt_state": ["process"],
+            },
             case={"id": request["smoke"]["case_id"]},
             sampling={"kind": "smoke", "repetitions": 2},
             output_path=driver_output,
@@ -719,14 +721,13 @@ def check(value) -> dict:
             driver_request,
             bundle_manifest=smoke_output_manifest,
         )
+        smoke_evidence = ADAPTER.evidence_for_role(driver_result, "original")
         ADAPTER.validate_measurement_contract(
-            driver_result["measurements"],
+            smoke_evidence["measurements"],
             driver_request["objective"],
             driver_request["sampling"],
         )
-        correctness = driver_result.get("correctness")
-        if correctness is None:
-            raise InputError("driver smoke omitted correctness")
+        correctness = smoke_evidence["correctness"]
         correctness_gate = ADAPTER.evaluate_correctness(
             correctness,
             request["correctness"]["acceptance"],

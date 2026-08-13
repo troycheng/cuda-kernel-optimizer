@@ -3,18 +3,18 @@
 The skill uses three sources of information:
 
 1. local facts: source, compiler output, profiler observations, raw samples, and workload KPIs;
-2. bundled knowledge: identity-bound mechanism cards, primary-source records, compatibility notes, and detailed playbooks loaded only when matched;
+2. bundled knowledge: technical contracts, optimization heuristics, practice cases, primary-source records, and detailed playbooks loaded only when matched;
 3. external research: current primary documentation and optional independent AI challenge.
 
 Only local correctness and measurement decide whether a Candidate passes.
 
 ## Offline knowledge
 
-`knowledge_query.py` filters cards by exact GPU architecture, CUDA version, framework versions, claim layer, observed phenomena, and optional mechanism keys. It limits result count and UTF-8 context size. A matched detailed playbook is returned only as a digest-bound path so ChatGPT can load it on demand.
+`knowledge_query.py` finds bounded material by observed phenomena or explicit mechanism keys, then reports whether each material is compatible with the supplied GPU, CUDA, framework, and claim-layer identity. Explicitly requested but incompatible material is returned with field-level mismatch reasons instead of disappearing. A contract with an unbounded component version is marked `related`, not `compatible`. A matched detailed playbook is returned only as a digest-bound path so ChatGPT can load it on demand.
 
-The query returns facts and falsification guidance, not an optimization direction or next action. An empty result is successful and does not block source analysis, profiling, or a new ChatGPT hypothesis. Historical gain numbers are not transferred to the current Target.
+Technical contracts report a primary-source proposition, applicability, unsupported inferences, and the decisions that depend on it. Heuristics can suggest a candidate or falsifying observation; cases remain bound to their recorded environment. The query never decides whether a premise is resolved, whether a mechanism is supported, or what to do next. An empty result is successful and does not block source analysis, profiling, or a new ChatGPT hypothesis. Historical gain numbers are not transferred to the current Target.
 
-Sources record title, version, URL, verification date, status, and summary digest. Cards may cite only known verified sources. Unknown identities and mismatched versions fail closed rather than inheriting from a nearby architecture.
+Sources record title, exact section locator, version, URL, review date, status, and summary digest. `reviewed` means the bundled statement was compared with that source; the digest detects later local edits but does not authenticate a remote page. A mismatch describes the bundled material, not platform support; ChatGPT must use matching primary documentation, implementation source, or local evidence before making a high-cost negative decision.
 
 ## External search
 

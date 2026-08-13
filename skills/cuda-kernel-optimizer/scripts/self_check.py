@@ -267,7 +267,7 @@ def _validate_knowledge(root: Path) -> None:
         raise ValueError("knowledge sources must have unique ids")
     for item in source_items:
         if (
-            item.get("status") != "verified"
+            item.get("status") != "reviewed"
             or not isinstance(item.get("summary_sha256"), str)
             or len(item["summary_sha256"]) != 64
             or any(character not in "0123456789abcdef" for character in item["summary_sha256"])

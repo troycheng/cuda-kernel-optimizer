@@ -42,7 +42,7 @@ runtime limit，并提供短期 `launch_deadline`。可选的 `absolute_deadline
 
 ```json
 {
-  "format_version": "cuda-kernel-optimizer/readiness-input-v1",
+  "format_version": "cuda-kernel-optimizer/readiness-input-v2",
   "operation": "check",
   "artifact_root": "/absolute/new/artifacts",
   "target_mode": "optimization",
@@ -62,8 +62,8 @@ runtime limit，并提供短期 `launch_deadline`。可选的 `absolute_deadline
   "driver": {
     "command": ["/absolute/python", "/absolute/workload_driver.py"],
     "request_argument": "--request",
-    "execution_mode": "combined",
-    "protocol_version": "cuda-kernel-optimizer/driver-v1",
+    "evidence_capabilities": ["single_variant_combined", "paired_same_process_combined"],
+    "protocol_version": "cuda-kernel-optimizer/driver-v2",
     "profiler_capabilities": [],
     "side_effects": [],
     "cleanup_contract": {"kind": "process_group_only", "external_tasks": false}
@@ -71,7 +71,6 @@ runtime limit，并提供短期 `launch_deadline`。可选的 `absolute_deadline
   "environment_requirements": {"gpu_uuids": ["GPU-..."], "required_tools": ["nvidia-smi"]},
   "validity_requirements": {"minimum_pairs": 10, "confidence": 0.95, "bootstrap_samples": 10000},
   "smoke": {
-    "mode": "combined",
     "case_id": "main",
     "resources": {"host_id": "<current host id>", "gpu_uuids": ["GPU-..."]},
     "runtime_limits": {
@@ -90,15 +89,21 @@ runtime limit，并提供短期 `launch_deadline`。可选的 `absolute_deadline
 driver 输入输出协议以 `templates/workload_driver_request.schema.json`、
 `templates/workload_driver_result.schema.json` 和 `templates/workload_driver.py` 为准。
 V1.4 只支持留在 Invocation 进程组内的任务，不支持远端或脱离进程组的后台任务。
-optimization readiness 只支持 combined driver；最小 smoke 在 request 的开放 `sampling`
-对象中发送 `{"kind":"smoke","repetitions":2}`。driver result 的 primary 和全部 constraints
-必须与 request objective 的名称、unit 和集合精确一致，每组 samples 必须恰好有两个值。
+optimization readiness 要求 driver 至少声明 `single_variant_combined`；只有确实能在同一进程
+共享已声明状态时，才声明 `paired_same_process_combined`。最小 smoke 会发送一个 original
+subject 和 `{"kind":"smoke","repetitions":2}`。driver 一次返回该 subject 的正确性和性能
+证据；primary 与全部 constraints 必须精确匹配 request objective，每组 samples 恰好两个值。
+
+`same_process` 的协议保证是：两个 subject 由一次 driver 调用执行，并接收同一个
+`prepare_acquisition` 返回对象。它不能自动证明 driver 内部管理的外部服务、远端进程或缓存
+确实共享；若结论依赖这些状态，driver 必须把对应身份作为 artifact 或 diagnostic 保存，ChatGPT
+再决定证据是否足够。仅回显 acquisition 声明不能支持更强归因。
 
 只有现成报告或编译产物时使用 diagnostic Target：
 
 ```json
 {
-  "format_version": "cuda-kernel-optimizer/readiness-input-v1",
+  "format_version": "cuda-kernel-optimizer/readiness-input-v2",
   "operation": "check",
   "artifact_root": "/absolute/new/artifacts",
   "target_mode": "diagnostic",
@@ -122,7 +127,7 @@ optimization readiness 只支持 combined driver；最小 smoke 在 request 的�
 
 ```json
 {
-  "format_version": "cuda-kernel-optimizer/evaluator-input-v1",
+  "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
   "operation": "baseline",
   "artifact_root": "/absolute/artifacts",
   "target_ref": {"id": "<target id>", "sha256": "<64 hex>"},
@@ -136,18 +141,16 @@ optimization readiness 只支持 combined driver；最小 smoke 在 request 的�
 }
 ```
 
-新建的 combined Target 在 baseline 对每个 case 只调用 driver 一次；driver 必须在一次 result 中返回
+baseline 对每个 case 只调用 driver 一次；driver 必须在一次 evidence bundle 中返回
 `samples_per_case` 个 primary 样本，以及数量相同的每项 constraint 样本。样本数、名称、unit
 或 constraint 集合不一致时，第一次 result 即失败，不能进入聚合。额外诊断写入已声明 artifact
-或 driver 日志，不能混入 measurements.constraints。evaluator 仍可读取已冻结的旧 separate Target；
-该兼容路径会对每个 case 分别调用 correctness 和 measure，共 `2 × C` 次，不代表 readiness
-仍能新建 separate optimization Target。
+或 driver 日志，不能混入 measurements.constraints。V2 不读取旧 Driver V1 Target。
 
 `experiment` 是同步记录操作，不含 runtime limit：
 
 ```json
 {
-  "format_version": "cuda-kernel-optimizer/evaluator-input-v1",
+  "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
   "operation": "experiment",
   "artifact_root": "/absolute/artifacts",
   "target_ref": {"id": "<target id>", "sha256": "<64 hex>"},
@@ -167,15 +170,34 @@ optimization readiness 只支持 combined driver；最小 smoke 在 request 的�
   "reject_if": [{"kind": "correctness_failed"}],
   "promote_if": [{"kind": "formal_target_passed"}],
   "change_scope": ["src/kernel.py"],
-  "max_risk": "low"
+  "max_risk": "low",
+  "comparison_contract": {
+    "relationship": "implementation_equivalence",
+    "additional_gates": [],
+    "diagnostics": [],
+    "acquisition": {
+      "lifecycle": "isolated_process",
+      "shared_state": [],
+      "rebuilt_state": ["process", "weights", "allocator"],
+      "rationale": "两套实现不能安全地共存于同一进程"
+    }
+  },
+  "material_premises": []
 }
 ```
+
+`comparison_contract.relationship` 可为 `implementation_equivalence`、`artifact_fidelity` 或
+`deployment_effect`。`additional_gates` 与 correctness acceptance 同形；`diagnostics` 只列指标名，
+不能与 Target gate 或附加 gate 重叠。`same_process` 必须声明非空 `shared_state`，且 driver 已声明
+`paired_same_process_combined`；否则使用 `isolated_process`。`material_premises` 只记录确实会改变
+候选判断或实验设计的事实或假设，每项包含 `statement`、`component`、`version`、`status`、
+`source` 和 `decision_effect`。一手资料中的命题使用 `primary_source_claim`，它仍是待 ChatGPT 结合版本和当前环境判断的来源主张，不是工具认证的事实；未核实内容使用 `unresolved_hypothesis`。
 
 `screen`、`target` 和 `final_audit` 使用同一比较请求骨架：
 
 ```json
 {
-  "format_version": "cuda-kernel-optimizer/evaluator-input-v1",
+  "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
   "operation": "target",
   "artifact_root": "/absolute/artifacts",
   "target_ref": {"id": "<target id>", "sha256": "<64 hex>"},
@@ -190,12 +212,13 @@ optimization readiness 只支持 combined driver；最小 smoke 在 request 的�
 }
 ```
 
-把 `operation` 改为 `screen` 可做初筛；改为 `final_audit` 时删除 `experiment_ref`。
+把 `operation` 改为 `screen` 可做初筛；改为 `final_audit` 时删除 `experiment_ref`，并在顶层
+提供同形状的 `comparison_contract`。
 正式比较的 `pairs` 不得低于 Target 的 `minimum_pairs`。
-combined driver 的 baseline 调用数为 `C`，screen 调用数为 `2 × P × C`；正式 target 或
-final audit 还会先对两个 Variant 各做一次每-case 精度调用，因此总数为
-`2 × C + 2 × P × C`。其中 `C` 是 case 数、`P` 是 pairs；单 case、3 pairs 的正式调用为
-8 次。readiness smoke 另计一次。
+baseline 调用数为 `C`。隔离进程比较为 `2 × P × C` 次；同进程成对比较为 `P × C` 次。
+每次调用同时返回正确性和性能证据，不再额外重复运行每-case 精度 workload。任一 gate 失败后
+不再启动用于性能结论的剩余调用；final audit 只可继续取得判断是否能恢复 original 所缺的最低
+正确性证据。`C` 是 case 数、`P` 是 pairs；readiness smoke 另计一次。
 
 ## profiler
 

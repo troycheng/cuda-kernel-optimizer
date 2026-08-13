@@ -9,8 +9,8 @@ The release gate covers:
 - the exact 17-module production surface and acyclic dependency direction;
 - Target, original baseline, Candidate, Experiment, screen, target, Champion, and final-audit black-box behavior;
 - Invocation deduplication, resource locks, heartbeats, timeout, cancellation, worker loss, and cleanup;
-- the single command-driver path and closed request/result protocols;
-- correctness blocking later performance stages;
+- the single Driver V2 path, closed evidence bundles, and isolated or same-process acquisition contracts;
+- correctness invalidating performance interpretation and preventing unnecessary later evidence calls;
 - NCU, Nsys, PyTorch Profiler, compiler, SASS, and execution-map known-format parsing;
 - fail-closed behavior for unknown interpretation-critical fields, versions, units, identities, paths, and digests, with non-critical extensions retained as unmodeled material;
 - bounded, identity-filtered offline knowledge queries and empty-result behavior;

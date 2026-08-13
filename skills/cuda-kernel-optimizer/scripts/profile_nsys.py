@@ -130,7 +130,7 @@ def _target(root: Path, reference) -> dict:
         raise NsysError("target_not_found", "target record is unavailable") from error
     if hashlib.sha256(payload).hexdigest() != _sha(reference["sha256"], "target_ref.sha256"):
         raise NsysError("target_changed", "target record digest changed")
-    if type(target) is not dict or target.get("record_type") != "target" or target.get("format_version") != "cuda-kernel-optimizer/target-v1" or target.get("id") != _text(reference["id"], "target_ref.id") or target.get("target_mode") != "diagnostic":
+    if type(target) is not dict or target.get("record_type") != "target" or target.get("format_version") != "cuda-kernel-optimizer/target-v2" or target.get("id") != _text(reference["id"], "target_ref.id") or target.get("target_mode") != "diagnostic":
         raise NsysError("target_invalid", "target is not a frozen diagnostic target")
     return target
 
@@ -505,12 +505,15 @@ def _collect_worker(request: dict, artifact_root: Path, invocation: Path, result
         execution_id=os.environ["CKO_INVOCATION_ID"],
         operation="profile_nsys_collect",
         driver=resolved["driver"],
-        variant=variant,
+        subjects=[{"role": resolved["role"], "variant": variant}],
         test_suite=target_inputs["test_suite"],
         correctness=target_inputs["correctness"],
         objective=target_inputs["objective"],
-        role=resolved["role"],
-        mode="measure" if resolved["driver"]["execution_mode"] == "separate" else "combined",
+        acquisition={
+            "lifecycle": "isolated_process",
+            "shared_state": [],
+            "rebuilt_state": ["process"],
+        },
         case={"id": resolved["case_id"]},
         sampling={"kind": "nsys_collect"},
         output_path=driver_output / "result.json",

@@ -39,8 +39,8 @@ class InvocationLifecycleBlackBoxTests(unittest.TestCase):
                 if event["execution_id"] != check["probe_id"]
             ]
             self.assertEqual(
-                [(event["operation"], event["mode"]) for event in events],
-                [("baseline", "combined")],
+                [(event["operation"], event["roles"]) for event in events],
+                [("baseline", ["original"])],
             )
             invocation_dirs = list(
                 (project.artifact_root / "invocations").glob("*")

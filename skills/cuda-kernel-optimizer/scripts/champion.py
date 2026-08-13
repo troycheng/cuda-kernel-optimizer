@@ -279,12 +279,24 @@ def _result(root: Path, reference) -> tuple[dict, dict]:
 def _valid_common_result(result: dict, target_ref: dict, operation: str) -> list[dict]:
     if (
         result.get("record_type") != "invocation_result"
-        or result.get("format_version") != "cuda-kernel-optimizer/evaluator-result-v1"
+        or result.get("format_version") != "cuda-kernel-optimizer/evaluator-result-v2"
         or result.get("operation") != operation
         or result.get("target_ref") != target_ref
         or result.get("cleanup_status") != "confirmed"
         or result.get("execution_status") != "succeeded"
-        or result.get("measurement_validity") != "valid"
+        or (
+            operation == "target"
+            and result.get("measurement_validity") != "valid"
+        )
+        or (
+            operation == "final_audit"
+            and result.get("measurement_validity") != "valid"
+            and not (
+                result.get("measurement_validity") == "invalid"
+                and result.get("stop_reason") == "correctness_failed"
+                and result.get("restore_supported") is True
+            )
+        )
         or result.get("reference_status") != "current"
     ):
         raise ChampionError("result_invalid", "invocation result is not an eligible result")

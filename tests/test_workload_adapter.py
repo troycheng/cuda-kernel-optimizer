@@ -34,7 +34,7 @@ def _driver(adapter) -> dict:
         {
             "command": [sys.executable],
             "request_argument": "--request",
-            "execution_mode": "combined",
+            "evidence_capabilities": ["single_variant_combined"],
             "protocol_version": adapter.DRIVER_PROTOCOL,
             "profiler_capabilities": ["pytorch_chrome_trace_v1"],
             "side_effects": [],
@@ -49,7 +49,10 @@ def _request(adapter, output_path: Path) -> dict:
         execution_id="execution-1",
         operation="baseline",
         driver=_driver(adapter),
-        variant={"kind": "source_snapshot", "digest": "a" * 64, "locator": "original"},
+        subjects=[{
+            "role": "original",
+            "variant": {"kind": "source_snapshot", "digest": "a" * 64, "locator": "original"},
+        }],
         test_suite={"digest": "b" * 64, "locator": "tests", "case_ids": ["case-1"]},
         correctness={
             "reference": {"digest": "c" * 64, "locator": "reference"},
@@ -57,8 +60,11 @@ def _request(adapter, output_path: Path) -> dict:
             "acceptance": {"metric": "max_error", "operator": "less_or_equal", "value": 0.01},
         },
         objective={"primary_metric": {"name": "latency", "unit": "ms"}, "constraints": []},
-        role="original",
-        mode="combined",
+        acquisition={
+            "lifecycle": "isolated_process",
+            "shared_state": [],
+            "rebuilt_state": ["process"],
+        },
         case={"id": "case-1"},
         sampling={"repetitions": 3},
         output_path=output_path,
@@ -71,9 +77,10 @@ def _result(adapter, request: dict) -> dict:
         "request_digest": request["request_digest"],
         "target_id": request["target_id"],
         "execution_id": request["execution_id"],
-        "variant_digest": request["variant"]["digest"],
-        "role": request["role"],
-        "mode": request["mode"],
+        "subject_digests": [
+            {"role": item["role"], "digest": item["variant"]["digest"]}
+            for item in request["subjects"]
+        ],
         "case_id": request["case"]["id"],
         "artifacts": [],
         "cleanup": {"status": "confirmed", "live_tasks": []},
@@ -85,12 +92,27 @@ def _result(adapter, request: dict) -> dict:
             "driver_version": "1",
             "cuda_runtime_version": "1",
             "frameworks": {"torch": "1"},
-            "container": {"kind": "none", "identity": "host"},
+            "runtime_provenance": {
+                "kind": "host",
+                "identity": "fixture-host",
+                "lineage_complete": True,
+                "lineage": [],
+                "components": [],
+            },
         },
-        "correctness": {"status": "passed", "metrics": {"max_error": 0.0}},
-        "measurements": {
-            "primary": {"name": "latency", "unit": "ms", "samples": [1.0, 1.1]},
-            "constraints": [],
+        "acquisition": request["acquisition"],
+        "evidence": {
+            "correctness": [{
+                "role": "original",
+                "result": {"status": "passed", "metrics": {"max_error": 0.0}},
+            }],
+            "measurements": [{
+                "role": "original",
+                "result": {
+                    "primary": {"name": "latency", "unit": "ms", "samples": [1.0, 1.1]},
+                    "constraints": [],
+                },
+            }],
         },
     }
 
@@ -123,7 +145,7 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
                 {
                     "command": [sys.executable],
                     "request_argument": "--request",
-                    "execution_mode": "combined",
+                    "evidence_capabilities": ["single_variant_combined"],
                     "protocol_version": self.adapter.DRIVER_PROTOCOL,
                     "profiler_capabilities": ["unknown_profiler"],
                     "side_effects": [],
@@ -137,7 +159,7 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
         external = {
             "command": [sys.executable],
             "request_argument": "--request",
-            "execution_mode": "combined",
+            "evidence_capabilities": ["single_variant_combined"],
             "protocol_version": self.adapter.DRIVER_PROTOCOL,
             "profiler_capabilities": ["pytorch_chrome_trace_v1"],
             "side_effects": [],
@@ -194,13 +216,35 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
             request = _request(self.adapter, path)
             result = _result(self.adapter, request)
             path.write_text(json.dumps(result), encoding="utf-8")
+            normalized = self.adapter.validate_driver_result(path, request)
             self.assertEqual(
-                self.adapter.validate_driver_result(path, request)["environment"],
-                result["environment"],
+                normalized["environment"]["runtime_provenance"]["attribution_scope"],
+                "identified_runtime",
             )
 
+            partial = copy.deepcopy(result)
+            partial["environment"]["runtime_provenance"] = {
+                "kind": "container",
+                "identity": "sha256:runtime",
+                "lineage_complete": False,
+                "lineage": [{"kind": "overlay", "identity": "sha256:overlay"}],
+                "components": [],
+            }
+            path.write_text(json.dumps(partial), encoding="utf-8")
+            partial_normalized = self.adapter.validate_driver_result(path, request)
+            self.assertEqual(
+                partial_normalized["environment"]["runtime_provenance"]["attribution_scope"],
+                "frozen_runtime_only",
+            )
+
+            incomplete_host = copy.deepcopy(result)
+            incomplete_host["environment"]["runtime_provenance"]["lineage_complete"] = False
+            path.write_text(json.dumps(incomplete_host), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "host runtime provenance must be complete"):
+                self.adapter.validate_driver_result(path, request)
+
             nonfinite = copy.deepcopy(result)
-            nonfinite["measurements"]["primary"]["samples"] = [math.nan]
+            nonfinite["evidence"]["measurements"][0]["result"]["primary"]["samples"] = [math.nan]
             path.write_text(json.dumps(nonfinite), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "non-finite"):
                 self.adapter.validate_driver_result(path, request)
@@ -212,7 +256,7 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
                 self.adapter.validate_driver_result(path, request)
 
             unbounded = copy.deepcopy(result)
-            unbounded["measurements"]["primary"]["samples"] = [
+            unbounded["evidence"]["measurements"][0]["result"]["primary"]["samples"] = [
                 1.0
             ] * (self.adapter._MAX_SAMPLES + 1)
             path.write_text(json.dumps(unbounded), encoding="utf-8")
@@ -240,7 +284,7 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
         self.assertEqual(set(result_schema["required"]), self.adapter._RESULT_BASE_FIELDS)
         self.assertEqual(
             set(result_schema["properties"]),
-            self.adapter._RESULT_BASE_FIELDS | {"correctness", "measurements"},
+            self.adapter._RESULT_BASE_FIELDS,
         )
 
         template = (TEMPLATE_DIR / "workload_driver.py").read_text("utf-8")
@@ -249,8 +293,7 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
             self.adapter.REQUEST_PROTOCOL,
             self.adapter.RESULT_PROTOCOL,
             "--request",
-            "run_correctness",
-            "run_measurements",
+            "run_subject_evidence",
             "collect_environment",
             "os.link",
         ):
@@ -270,7 +313,7 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(completed.returncode, 2)
-            self.assertIn("TODO: implement run_correctness", completed.stdout)
+            self.assertIn("TODO: implement run_subject_evidence", completed.stdout)
             self.assertFalse(output_path.exists())
 
 
@@ -344,7 +387,7 @@ class ProfileCollectionBindingTests(unittest.TestCase):
             }
             target = {
                 "record_type": "target",
-                "format_version": "cuda-kernel-optimizer/target-v1",
+                "format_version": "cuda-kernel-optimizer/target-v2",
                 "id": "target-diagnostic",
                 "target_mode": "diagnostic",
                 "diagnostic_materials": [material],
@@ -493,7 +536,7 @@ class ProfileCollectionBindingTests(unittest.TestCase):
                 "case_id": "main",
             }
             events_before = project.driver_events()
-            with self.assertRaisesRegex(ValueError, "one passing candidate receipt"):
+            with self.assertRaisesRegex(ValueError, "passing candidate evidence"):
                 self.adapter.resolve_profile_collection(
                     artifact_root=project.artifact_root,
                     target_ref=project.target_ref(),
@@ -530,6 +573,22 @@ class ProfileCollectionBindingTests(unittest.TestCase):
                     experiment_ref=experiment_ref,
                     correctness_ref=correctness_ref,
                 )
+
+    def test_candidate_collection_rejects_failed_candidate_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project, baseline = self._ready_project(Path(temporary))
+            experiment_ref, screen, result_path = self._screened_candidate(
+                project, baseline
+            )
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["measurement_validity"] = "invalid"
+            result["verdict"] = "rejected"
+            result["stop_reason"] = "correctness_failed"
+            write_json(result_path, result)
+            screen["result_ref"]["sha256"] = sha256_file(result_path)
+
+            with self.assertRaisesRegex(ValueError, "not bound"):
+                self._resolve_candidate(project, baseline, experiment_ref, screen)
 
     def test_candidate_collection_rejects_non_candidate_experiment_role(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -612,14 +671,11 @@ class ProfileCollectionBindingTests(unittest.TestCase):
     def test_template_never_publishes_when_cleanup_is_not_implemented(self) -> None:
         template = (TEMPLATE_DIR / "workload_driver.py").read_text("utf-8")
         implemented = template.replace(
-            '    raise NotImplementedError("TODO: implement run_correctness for this workload")',
-            '    return {"status": "passed", "metrics": {"max_error": 0.0}}',
-        ).replace(
-            '    raise NotImplementedError("TODO: implement run_measurements for this workload")',
-            '    return {"primary": {"name": "latency", "unit": "ms", "samples": [1.0]}, "constraints": []}',
+            '    raise NotImplementedError("TODO: implement run_subject_evidence for this workload")',
+            '    return {"correctness": {"status": "passed", "metrics": {"max_error": 0.0}}, "measurements": {"primary": {"name": "latency", "unit": "ms", "samples": [1.0, 1.1]}, "constraints": []}}',
         ).replace(
             '    raise NotImplementedError("TODO: implement collect_environment for this workload")',
-            '    return {"gpu_uuids": ["GPU-1"], "gpu_models": ["Test GPU"], "gpu_architectures": ["sm_test"], "driver_version": "1", "cuda_runtime_version": "1", "frameworks": {"torch": "1"}, "container": {"kind": "none", "identity": "host"}}',
+            '    return {"gpu_uuids": ["GPU-1"], "gpu_models": ["Test GPU"], "gpu_architectures": ["sm_test"], "driver_version": "1", "cuda_runtime_version": "1", "frameworks": {"torch": "1"}, "runtime_provenance": {"kind": "host", "identity": "fixture-host", "lineage_complete": True, "lineage": [], "components": []}}',
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

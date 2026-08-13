@@ -74,7 +74,8 @@ class SkillMetadataTests(unittest.TestCase):
     def test_profiler_and_knowledge_only_return_facts_and_empty_knowledge_does_not_block(self) -> None:
         self.assertIn("profiler 只返回观测事实", self.prose)
         self.assertIn("它不返回优化方向、ROI 或下一步", self.prose)
-        self.assertIn("知识查询只返回匹配材料或空结果", self.prose)
+        self.assertIn("知识查询只返回有界材料", self.prose)
+        self.assertIn("不判断前提是否解决、机制是否受支持或下一步", self.prose)
         self.assertIn("空结果不会阻止源码分析", self.prose)
 
     def test_profile_facts_require_system_attribution_before_a_candidate(self) -> None:

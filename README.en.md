@@ -78,7 +78,7 @@ V1.4 has three parts:
 
 - **ChatGPT owns optimization judgment**: understand the objective, analyze bottlenecks, propose candidates, weigh benefit against investment, and choose the next operation.
 - **Deterministic tools own execution**: perform one explicit task such as checking the environment, running a measurement, parsing a report, or selecting the Champion.
-- **Evidence records connect the work**: Target, Experiment, Invocation, and Champion retain object identity, experiment claims, actual execution, and the current best variant.
+- **Evidence records connect the work**: Target, Experiment, Invocation, and Champion retain object identity, comparison conditions, actual execution, and the current best variant.
 
 ```mermaid
 flowchart LR
@@ -115,7 +115,7 @@ The removable-time ceiling is the maximum time a cost could affect if eliminated
 | Stage | Purpose | If it fails |
 |---|---|---|
 | Lowest-cost falsifier | Establish whether the mechanism can exist | Do not build or run a GPU benchmark |
-| Build and correctness | Confirm that the candidate runs and preserves output | Do not interpret performance or start a profiler |
+| Build and first workload evidence | Confirm that the candidate runs and remains correct; retain performance samples from the same call | If correctness fails, do not interpret those samples or start later calls or profilers |
 | Short paired screen | Test the Experiment's predeclared claim at low cost | Stop when the claim is falsified; if inconclusive, ChatGPT decides whether formal testing is worthwhile |
 | Targeted profiler | Answer one unresolved question only | Retain the limitation; do not expand collection automatically |
 | Formal paired measurement | Compare with original or current Champion | Reject or mark inconclusive |

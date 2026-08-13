@@ -39,19 +39,20 @@ class ReadinessPublicSurfaceTests(unittest.TestCase):
             self.assertNotEqual(completed.returncode, 0)
             self.assertFalse(project.artifact_root.exists())
 
-    def test_optimization_rejects_separate_driver_before_execution(self) -> None:
+    def test_optimization_requires_single_subject_evidence_capability(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = V14Project(Path(directory))
             request = project.readiness_input()
-            request["driver"]["execution_mode"] = "separate"
-            request["smoke"]["mode"] = "correctness"
+            request["driver"]["evidence_capabilities"] = [
+                "paired_same_process_combined"
+            ]
 
             completed = project.run_tool(
                 "readiness.py", "check", request
             )
 
             self.assertEqual(completed.returncode, 2)
-            self.assertIn("combined driver", completed.stderr)
+            self.assertIn("single_variant_combined", completed.stderr)
             self.assertEqual(project.driver_events(), [])
             self.assertFalse(project.artifact_root.exists())
 
@@ -68,9 +69,6 @@ class ReadinessPublicSurfaceTests(unittest.TestCase):
                 ]
             )
             request = project.readiness_input()
-            request["driver"]["execution_mode"] = "combined"
-            request["smoke"]["mode"] = "combined"
-
             completed = project.run_tool("readiness.py", "check", request)
 
             self.assertEqual(completed.returncode, 2)
@@ -84,9 +82,6 @@ class ReadinessPublicSurfaceTests(unittest.TestCase):
             project = V14Project(Path(directory))
             project.set_behavior(original_samples=[10.0])
             request = project.readiness_input()
-            request["driver"]["execution_mode"] = "combined"
-            request["smoke"]["mode"] = "combined"
-
             completed = project.run_tool("readiness.py", "check", request)
 
             self.assertEqual(completed.returncode, 2)
@@ -106,9 +101,6 @@ class ReadinessPublicSurfaceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             request = project.readiness_input()
-            request["driver"]["execution_mode"] = "combined"
-            request["smoke"]["mode"] = "combined"
-
             completed = project.run_tool("readiness.py", "check", request)
 
             self.assertEqual(completed.returncode, 2)
@@ -161,20 +153,6 @@ class ReadinessPublicSurfaceTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertTrue(project.artifact_root.joinpath("target.json").is_file())
-
-    def test_optimization_rejects_correctness_only_smoke_before_execution(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            project = V14Project(Path(directory))
-            request = project.readiness_input()
-            request["smoke"]["mode"] = "correctness"
-
-            completed = project.run_tool("readiness.py", "check", request)
-
-            self.assertEqual(completed.returncode, 2)
-            self.assertIn("combined smoke", completed.stderr)
-            self.assertEqual(project.driver_events(), [])
-            self.assertFalse(project.artifact_root.exists())
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -77,7 +77,7 @@ class ChampionAuditBlackBoxTests(unittest.TestCase):
     ) -> dict:
         return {
             "record_type": "invocation_result",
-            "format_version": "cuda-kernel-optimizer/evaluator-result-v1",
+            "format_version": "cuda-kernel-optimizer/evaluator-result-v2",
             "operation": "target",
             "target_ref": project.target_ref(),
             "variant_refs": [reference, self._candidate()],
@@ -273,7 +273,7 @@ class ChampionAuditBlackBoxTests(unittest.TestCase):
                 "inv-audit",
                 {
                     "record_type": "invocation_result",
-                    "format_version": "cuda-kernel-optimizer/evaluator-result-v1",
+                    "format_version": "cuda-kernel-optimizer/evaluator-result-v2",
                     "operation": "final_audit",
                     "target_ref": project.target_ref(),
                     "variant_refs": [original, self._candidate()],
@@ -352,6 +352,55 @@ class ChampionAuditBlackBoxTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(restored.returncode, 0, restored.stderr)
+
+    def test_same_process_audit_uses_original_only_restore_checks_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = V14Project(Path(directory))
+            write_json(project.test_suite, {"cases": [{"id": "main"}, {"id": "extra"}]})
+            readiness = project.readiness_input()
+            readiness["test_suite"]["case_ids"] = ["main", "extra"]
+            checked = project.run_tool("readiness.py", "check", readiness)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            target_result = self._formal_target(project)
+            project.run_tool(
+                "champion.py",
+                "select",
+                self._champion_request(
+                    project,
+                    "select",
+                    target_result["result_ref"],
+                    None,
+                ),
+            )
+            project.set_behavior(
+                correctness_by_role={"original": "passed", "candidate": "failed"}
+            )
+            audit_input = project.final_audit_input()
+            audit_input["sampling_design"]["case_ids"] = ["main", "extra"]
+            audit_input["comparison_contract"]["acquisition"] = {
+                "lifecycle": "same_process",
+                "shared_state": ["service"],
+                "rebuilt_state": ["variant"],
+                "rationale": "audit both variants in one service process",
+            }
+            audited = project.run_tool(
+                "workload_evaluate.py",
+                "final_audit",
+                audit_input,
+                wait=True,
+            )
+            self.assertEqual(audited.returncode, 0, audited.stderr)
+            result = decode_stdout(audited)
+            self.assertTrue(result["restore_supported"])
+            self.assertEqual(result["completed_driver_calls"], 2)
+            self.assertEqual(result["skipped_evidence_steps"], [1, 2, 3])
+            requests = [receipt["request"] for receipt in result["command_receipts"]]
+            self.assertEqual(set(subject["role"] for subject in requests[0]["subjects"]), {"original", "candidate"})
+            self.assertEqual(
+                [subject["role"] for subject in requests[1]["subjects"]],
+                ["original"],
+            )
+            self.assertEqual(requests[1]["acquisition"]["lifecycle"], "isolated_process")
 
 
 if __name__ == "__main__":

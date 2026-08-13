@@ -203,7 +203,7 @@ def _target(root: Path, reference) -> dict:
     if (
         type(target) is not dict
         or target.get("record_type") != "target"
-        or target.get("format_version") != "cuda-kernel-optimizer/target-v1"
+        or target.get("format_version") != "cuda-kernel-optimizer/target-v2"
         or target.get("id") != _text(reference["id"], "target_ref.id", maximum=128)
         or target.get("target_mode") != "diagnostic"
     ):
@@ -707,12 +707,15 @@ def _collect_worker(request: dict, artifact_root: Path, invocation_dir: Path, re
         execution_id=os.environ["CKO_INVOCATION_ID"],
         operation="profile_ncu_collect",
         driver=resolved["driver"],
-        variant=variant,
+        subjects=[{"role": resolved["role"], "variant": variant}],
         test_suite=target_inputs["test_suite"],
         correctness=target_inputs["correctness"],
         objective=target_inputs["objective"],
-        role=resolved["role"],
-        mode="measure" if resolved["driver"]["execution_mode"] == "separate" else "combined",
+        acquisition={
+            "lifecycle": "isolated_process",
+            "shared_state": [],
+            "rebuilt_state": ["process"],
+        },
         case={"id": resolved["case_id"]},
         sampling={"kind": "ncu_collect"},
         output_path=driver_output / "result.json",

@@ -10,7 +10,7 @@ class TargetBaselineBlackBoxTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = V14Project(Path(directory))
             request = {
-                "format_version": "cuda-kernel-optimizer/readiness-input-v1",
+                "format_version": "cuda-kernel-optimizer/readiness-input-v2",
                 "operation": "check",
                 "artifact_root": str(project.artifact_root),
                 "target_mode": "diagnostic",
@@ -104,7 +104,7 @@ class TargetBaselineBlackBoxTests(unittest.TestCase):
             baseline_result = decode_stdout(baseline)
             self.assertEqual(baseline_result["measurement_validity"], "invalid")
             self.assertEqual(baseline_result["verdict"], "failed")
-            self.assertEqual(baseline_result["skipped_expensive_stages"], [])
+            self.assertEqual(baseline_result["skipped_evidence_steps"], [])
 
             baseline_events = [
                 event
@@ -112,8 +112,8 @@ class TargetBaselineBlackBoxTests(unittest.TestCase):
                 if event["execution_id"] != check_result["probe_id"]
             ]
             self.assertEqual(
-                [event["mode"] for event in baseline_events],
-                ["combined"],
+                [event["roles"] for event in baseline_events],
+                [["original"]],
             )
 
     def test_driver_pass_status_cannot_override_frozen_correctness_rule(self) -> None:
@@ -139,15 +139,27 @@ class TargetBaselineBlackBoxTests(unittest.TestCase):
                 for event in project.driver_events()
                 if event["execution_id"] != checked["probe_id"]
             ]
-            self.assertEqual([event["mode"] for event in events], ["combined"])
+            self.assertEqual([event["roles"] for event in events], [["original"]])
+
+    def test_environment_change_retains_correctness_but_invalidates_measurement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = V14Project(Path(directory))
+            project.check()
+            project.set_behavior(runtime_identity="changed-host")
+            baseline = decode_stdout(project.run_tool(
+                "workload_evaluate.py", "baseline", project.baseline_input(), wait=True
+            ))
+            self.assertEqual(baseline["stop_reason"], "environment_identity_changed")
+            self.assertEqual(baseline["measurement_validity"], "invalid")
+            self.assertTrue(baseline["correctness_receipts"][0]["passed"])
+            self.assertEqual(len(baseline["command_receipts"]), 1)
+            self.assertIn("driver_output_ref", baseline["command_receipts"][0])
 
     def test_baseline_rejects_sample_count_mismatch_before_aggregation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = V14Project(Path(directory))
             project.set_behavior(original_samples=[10.0, 10.1])
             readiness = project.readiness_input()
-            readiness["driver"]["execution_mode"] = "combined"
-            readiness["smoke"]["mode"] = "combined"
             checked = project.run_tool("readiness.py", "check", readiness)
             self.assertEqual(checked.returncode, 0, checked.stderr)
 
