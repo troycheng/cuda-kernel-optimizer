@@ -40,7 +40,7 @@ TPOT 改善为正表示每个输出 token 的耗时下降。这些测量没有�
 
 此前的指令可能因为目标 shape 的总时间覆盖较低、主吞吐指标变化很小而丢弃这项结果。[提交 `16d4f96`](https://github.com/troycheng/cuda-kernel-optimizer/commit/16d4f96) 已修改判断标准，要求保留稳定且整体不负向的长尾收益。[Issue #6](https://github.com/troycheng/cuda-kernel-optimizer/issues/6) 记录了这条真实使用反馈。
 
-同一次任务还暴露了两项独立的流程成本：重复启动完整服务记录在 [Issue #7](https://github.com/troycheng/cuda-kernel-optimizer/issues/7)，小众技术栈的源码调研时机记录在 [Issue #8](https://github.com/troycheng/cuda-kernel-optimizer/issues/8)。它们目前保留在 backlog 中，不改变上述优化结论。
+同一次任务还暴露了两项独立的流程成本：重复启动完整服务记录在 [Issue #7](https://github.com/troycheng/cuda-kernel-optimizer/issues/7)，小众技术栈的源码调研时机记录在 [Issue #8](https://github.com/troycheng/cuda-kernel-optimizer/issues/8)。这两项已在 V1.5.0 中解决，不改变上述优化结论。
 
 ## 证据边界
 

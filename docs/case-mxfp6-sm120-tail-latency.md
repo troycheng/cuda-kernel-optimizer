@@ -40,7 +40,7 @@ The important lesson was about result selection. Whole-workload time share can b
 
 The previous instructions could discard this result because the targeted shapes had limited total-time coverage and the primary throughput metric barely moved. [Commit `16d4f96`](https://github.com/troycheng/cuda-kernel-optimizer/commit/16d4f96) changed the judgment rule to retain stable, non-regressive tail improvements. [Issue #6](https://github.com/troycheng/cuda-kernel-optimizer/issues/6) records the originating feedback.
 
-The same run also exposed two separate workflow costs. Duplicate full-service invocations are tracked in [issue #7](https://github.com/troycheng/cuda-kernel-optimizer/issues/7), and the timing of source research for niche stacks is tracked in [issue #8](https://github.com/troycheng/cuda-kernel-optimizer/issues/8). They remain backlog items and do not change the result above.
+The same run also exposed two separate workflow costs. Duplicate full-service invocations were tracked in [issue #7](https://github.com/troycheng/cuda-kernel-optimizer/issues/7), and the timing of source research for niche stacks was tracked in [issue #8](https://github.com/troycheng/cuda-kernel-optimizer/issues/8). Both were addressed in V1.5.0 and do not change the result above.
 
 ## Evidence boundary
 
