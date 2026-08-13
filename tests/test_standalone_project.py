@@ -10,10 +10,11 @@ REPOSITORY = "github.com/troycheng/cuda-kernel-optimizer"
 
 
 class StandaloneProjectTests(unittest.TestCase):
-    def test_public_version_and_release_notes_are_v1_4_1(self) -> None:
-        self.assertEqual((ROOT / "VERSION").read_text("utf-8").strip(), "1.4.2")
+    def test_public_version_and_release_notes_match_current_release(self) -> None:
+        self.assertEqual((ROOT / "VERSION").read_text("utf-8").strip(), "1.5.0")
         for name in ("README.md", "README.en.md"):
             text = (ROOT / name).read_text("utf-8")
+            self.assertEqual(text.count("### V1.5.0"), 1)
             self.assertEqual(text.count("### V1.4.2"), 1)
             self.assertEqual(text.count("### V1.4.0"), 1)
             self.assertNotIn("开发中", text)

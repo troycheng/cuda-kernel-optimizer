@@ -26,4 +26,4 @@ External models are most useful for a major direction choice, an unexplained pla
 
 External availability is optional. A request without a complete answer is recorded as failed review, not successful coverage. Preserve disagreement rather than turning answers into a vote. Private source, credentials, raw inputs, hostnames, and business data are not sent without explicit approval.
 
-See the installed [research reference](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.4.2/skills/cuda-kernel-optimizer/references/research_augmentation.md) for provider order and review boundaries.
+See the installed [research reference](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.0/skills/cuda-kernel-optimizer/references/research_augmentation.md) for provider order and review boundaries.

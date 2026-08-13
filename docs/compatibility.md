@@ -13,4 +13,4 @@ The CPU/static suite targets Python 3.10 and 3.12. GPU execution uses Linux faci
 
 Architecture-specific claims require an exact compute capability match. A numerically adjacent SM does not inherit another target's features. Use a local compile probe and current official documentation for capability questions.
 
-The repository includes opt-in physical RTX 5090 tests. They are separate from the default CPU/static suite. See the [RTX 5090 test guide](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.4.2/tests/gpu/sm120/README.md) and the installed [compatibility reference](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.4.2/skills/cuda-kernel-optimizer/references/compatibility.md).
+The repository includes opt-in physical RTX 5090 tests. They are separate from the default CPU/static suite. See the [RTX 5090 test guide](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.0/tests/gpu/sm120/README.md) and the installed [compatibility reference](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.0/skills/cuda-kernel-optimizer/references/compatibility.md).

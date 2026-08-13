@@ -29,7 +29,7 @@
 | 报告分析 | 解析已导出的 NCU CSV、Nsys SQLite、PyTorch Chrome trace、编译产物和 SASS | 与当前环境身份绑定的观测事实 |
 | 长时间任务 | 保存实验、样本、当前最佳版本和交接记录 | 可交接、可审查的优化历史与终止原因 |
 
-知识库、外部搜索与第三方 AI 用于补充方向和质疑判断。它们不能替代当前项目上的精度与性能数据；未知 profiler 版本、关键字段、单位或身份会被拒绝，而不是猜测。已知格式中的非关键扩展内容只会保留为未建模材料，不参与语义计算。
+离线知识分为经人工复核的一手资料契约与启发式方向，并按当前硬件和软件身份返回适用、相关或不适用的材料。知识库没有匹配时，ChatGPT 仍可继续分析源码、profile 和运行证据。外部搜索与第三方 AI 用于补充方向和质疑判断，但都不能替代当前项目上的精度与性能数据。未知 profiler 版本、关键字段、单位或身份会被拒绝，而不是猜测；已知格式中的非关键扩展内容只会保留为未建模材料，不参与语义计算。
 
 ## 使用准备
 
@@ -51,7 +51,7 @@
 支持 Skills CLI 的环境可以直接安装当前正式版：
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.4.2/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.0/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 也可以让 ChatGPT 完成安装，用户不需要手工运行仓库内的 Python 脚本。直接发送：
@@ -76,7 +76,7 @@ npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.4.2/sk
 
 ## 优化模型
 
-V1.4 由三个部分组成：
+当前设计由三个部分组成：
 
 - **ChatGPT 负责优化判断**：理解目标、分析瓶颈、提出候选、评估收益与投入，并决定下一项操作。
 - **确定性工具负责执行**：每次只完成一项明确工作，例如检查环境、运行测量、解析报告或选择 Champion。
@@ -125,6 +125,8 @@ flowchart TD
 
 Profiler 不是固定阶段。正确性或初筛已经足以拒绝候选时，后续昂贵操作不会启动。`conservative_bound` 能够证明收益上限低于阈值时可以直接拒绝；`diagnostic_proxy` 的低收益或样本不足不能单独否定完整 workload，ChatGPT 需要结合它实际验证的主张重新判断投入。
 
+V1.5 将一次 driver 调用的精度结果、性能样本和运行身份保存在同一个证据包中，避免为了取得不同类型的证据重复启动完整 workload。Experiment 会声明比较对象、采集关系和要验证的主张；环境或容器身份不足时，工具只收窄这份证据能够支持的结论，不会把无法归因的数据解释成有效性能对比。
+
 ## 设计演进
 
 早期版本尝试把方向准入、预算和阶段推进写入规则，希望长时间优化能够自动运行。实际使用表明，固定流程适合约束已知步骤，却很难代替对具体 workload 的判断；当多套流程开始处理相同问题，ChatGPT 还要先理解控制系统，分析性能问题的上下文反而被挤占。
@@ -159,6 +161,14 @@ artifacts/
 [验证记录](docs/validation.md)说明自动化检查和实际 GPU 覆盖；[案例](docs/case-studies.md)只记录带原始证据的历史结果。两者都不预测新项目一定能获得多少收益。
 
 ## 版本说明
+
+### V1.5.0
+
+- driver 协议升级为 V2，一次调用同时保存精度结果、性能样本、运行身份和清理状态，减少重复启动完整 workload。
+- Experiment 明确记录比较对象、采集关系、精度门禁、诊断证据和外部技术前提；证据只支持与其身份和比较条件相符的结论。
+- 正确性失败、环境不一致或证据不完整时，后续高成本调用会停止，已经取得的独立精度证据仍会保留。
+- 离线知识区分一手资料契约与启发式方向，并按硬件和软件身份返回适用关系。知识没有匹配时不会阻断 ChatGPT 继续分析。
+- 本版本没有增加新的自动决策入口、生产模块或公开 operation，也不声称获得了 GPU 性能提升。
 
 ### V1.4.2
 

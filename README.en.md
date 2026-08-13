@@ -29,7 +29,7 @@ For a reliable, deployable optimization result, provide a test workload that rep
 | Report analysis | Parse exported NCU CSV, Nsys SQLite, PyTorch Chrome traces, compiler artifacts, and SASS | Observed facts bound to the current environment identity |
 | Long-running work | Retain experiments, samples, the current best variant, and handoff notes | Handoff-ready, reviewable optimization history and a durable terminal reason |
 
-Bundled knowledge provides offline leads. External search and third-party AI can suggest directions or challenge a judgment. They cannot replace correctness and performance data from the current project. Unknown profiler versions, interpretation-critical fields, units, or identities are rejected rather than guessed. Non-critical extensions in a known format are retained as unmodeled material and never enter semantic calculations.
+Bundled knowledge separates manually reviewed primary-source contracts from optimization heuristics. It reports whether material is applicable, related, or inapplicable to the current hardware and software identity. If nothing matches, ChatGPT can still analyze source, profiles, and runtime evidence. External search and third-party AI can suggest directions or challenge a judgment, but they cannot replace correctness and performance data from the current project. Unknown profiler versions, interpretation-critical fields, units, or identities are rejected rather than guessed. Non-critical extensions in a known format are retained as unmodeled material and never enter semantic calculations.
 
 ## Prerequisites
 
@@ -51,7 +51,7 @@ If these inputs are incomplete, ChatGPT reports the gaps and helps establish the
 In an environment that supports Skills CLI, install the current release directly:
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.4.2/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.0/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 ChatGPT can also perform the installation, so users do not need to run the repository's Python scripts manually. Send:
@@ -74,7 +74,7 @@ The user may authorize unattended work or limit time, GPU use, and the furthest 
 
 ## Optimization model
 
-V1.4 has three parts:
+The current design has three parts:
 
 - **ChatGPT owns optimization judgment**: understand the objective, analyze bottlenecks, propose candidates, weigh benefit against investment, and choose the next operation.
 - **Deterministic tools own execution**: perform one explicit task such as checking the environment, running a measurement, parsing a report, or selecting the Champion.
@@ -123,6 +123,8 @@ The removable-time ceiling is the maximum time a cost could affect if eliminated
 
 A profiler is not a mandatory stage. Once correctness or the screen is enough to reject a candidate, later expensive operations do not start. A `conservative_bound` may reject when it proves the benefit ceiling is below the threshold. A low or undersampled `diagnostic_proxy` cannot by itself reject the complete workload; ChatGPT must reconsider investment using the claim the proxy actually tested.
 
+V1.5 keeps correctness, performance samples, and runtime identity from one driver call in a single evidence bundle, avoiding repeated starts of the complete workload merely to collect different evidence types. Each Experiment states the comparison subject, acquisition relationship, and claim under test. When environment or container identity is incomplete, tools narrow the conclusion that the evidence can support instead of treating unattributed data as a valid performance comparison.
+
 ## Design evolution
 
 Earlier versions put direction admission, budgets, and stage progression into rules so that long optimization runs could advance automatically. In practice, fixed flows were useful for known steps but could not replace judgment about a specific workload. Once several flows addressed the same problem, ChatGPT had to understand the control system before it could focus on performance evidence.
@@ -157,6 +159,14 @@ A change is ready to merge only when correctness passes, the user's real target 
 [Validation records](docs/validation.md) describe automated checks and physical GPU coverage. [Case studies](docs/case-studies.md) retain only historical results with original evidence. Neither predicts the gain of a new project.
 
 ## Release notes
+
+### V1.5.0
+
+- Upgraded the driver protocol to V2. One call now retains correctness, performance samples, runtime identity, and cleanup state, reducing repeated starts of the complete workload.
+- Experiments now record the comparison subject, acquisition relationship, correctness gates, diagnostic evidence, and external technical premises. Evidence supports only conclusions that match its identity and comparison conditions.
+- Correctness failure, environment mismatch, or incomplete evidence stops later expensive calls while preserving independent correctness evidence already obtained.
+- Offline knowledge separates primary-source contracts from heuristics and reports applicability against hardware and software identity. An empty match does not block further ChatGPT analysis.
+- This release adds no automatic decision entry point, production module, or public operation, and makes no GPU performance claim.
 
 ### V1.4.2
 
