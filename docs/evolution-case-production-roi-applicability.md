@@ -19,7 +19,7 @@ This definition is committed with the fixed Candidate content and before the rep
 - **Repository arms:** `origin/main` is the Original; the commit containing this definition is the Candidate.
 - **Only intended axis:** how ChatGPT establishes and corrects a Candidate's production ROI claim. Existing execution tools and schemas remain unchanged.
 - **Deterministic evaluator:** the repository's complete CPU/static test suite, bytecode compilation, package self-check, and diff validation.
-- **Behavior evaluator:** one fresh read-only `gpt-5.6` session using the Candidate skill and five public scenarios: eager versus lowered timing, W2-only scope, dispatch mismatch, a conservative production bound, and a prediction-versus-target conflict.
+- **Behavior evaluator:** one fresh read-only `gpt-5.4` session using the Candidate skill and five public scenarios: eager versus lowered timing, W2-only scope, dispatch mismatch, a conservative production bound, and a prediction-versus-target conflict. The model is pinned to a version supported by the ChatGPT-account Codex CLI.
 - **Environment:** macOS arm64, Python 3, ChatGPT bundled Codex CLI 0.148.0-alpha.15; no GPU or network evidence is required.
 - **Budget:** one complete deterministic run and one behavior session. Repetition is unnecessary for deterministic checks; the model result is a bounded behavior observation, not a statistical capability estimate.
 - **Valid outcome:** all deterministic checks pass and the behavior session applies the five required invariants without inventing missing measurements.
