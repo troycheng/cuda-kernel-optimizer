@@ -56,14 +56,27 @@ During submission preparation, valid CUDA Programmatic Dependent Launch behavior
 
 The costly behavior was not specific to PDL: an unfamiliar external-stack fact was allowed to drive a rejection before the relevant primary source had been checked.
 
+### The candidate-specific opportunity bound was calculated too late
+
+A later experiment replaced only the MoE W2 path with MXFP4, but its early motivation partly inherited the larger opportunity of converting W1, W2, and dense MXFP6 together. The facts needed to bound the narrower candidate were already available: W2 covered 7.99% of the measured replay, while estimated global bytes per token were 3,994,624 B for the existing MXFP6 path and 2,814,976 B for MXFP4. The global-byte-only W2 ceiling was therefore about 1.419x, corresponding to an optimistic end-to-end Amdahl ceiling of +2.42%.
+
+Because +2.42% remained above the Target's +0.5% minimum effect, one bounded falsifier was reasonable. It did not justify a larger implementation program. The paired TP2 layer result, weighted by the observed batch-2/batch-4 coverage and extrapolated across 40 layers, saved only 3.21 us per replay: about +0.075% end to end and roughly 6.7x below the minimum effect. This closed the tested W2 mapping, not MXFP4 as a model-format direction.
+
+### Public methods were reduced to target-specific hypotheses
+
+The follow-up reviewed [Cursor Warp Decode](https://cursor.com/blog/warp-decode), [Alpha-MoE](https://github.com/Aleph-Alpha/Alpha-MoE), [DeepGEMM MegaMoE](https://github.com/deepseek-ai/DeepGEMM), and the official CUTLASS MXFP4 support. Their reported gains depended on different hardware, data formats, expert layouts, accumulation semantics, or communication overlap, so they were not imported as expected gains for this Target.
+
+The literal output-centric Warp Decode W2 mapping was reduced to an exact SM120/MXFP6 skeleton. It preserved the existing route-rounding and accumulation order and produced identical output, but weighted W2 latency regressed from 6.696 us to 23.806 us. That result rejected only the tested scalar output-centric mapping on this target; it did not contradict the published B200/MXFP8 result or close different output tilings. Alpha-MoE- and MegaMoE-like persistent pipelines remained feasibility hypotheses because their cross-cluster reduction or communication-overlap premises were not present in the tested decode path.
+
 ## Project feedback produced by the case
 
-The case produced four scoped changes or backlog items instead of one broad workflow rewrite:
+The case produced five scoped changes or backlog items instead of one broad workflow rewrite:
 
 - [Issue #15](https://github.com/troycheng/cuda-kernel-optimizer/issues/15): bind derived-container identity, not only inherited image labels or package versions.
 - [Issue #16](https://github.com/troycheng/cuda-kernel-optimizer/issues/16): use same-process pairing when small kernel-selection effects can be hidden by startup and cache variance.
 - [Issue #17](https://github.com/troycheng/cuda-kernel-optimizer/issues/17): separate implementation parity from cross-checkpoint fidelity.
 - [Issue #18](https://github.com/troycheng/cuda-kernel-optimizer/issues/18): verify relevant primary sources before an unfamiliar external-stack fact drives a safety, correctness, or terminal decision.
+- [Issue #19](https://github.com/troycheng/cuda-kernel-optimizer/issues/19): calculate the physical and Amdahl ceiling for the current candidate scope before deep research or implementation.
 
 The optimizer instructions were also tightened so that promising failed candidates require evidence proportional to their potential impact and so that a rejection closes only the tested implementation and conditions.
 
