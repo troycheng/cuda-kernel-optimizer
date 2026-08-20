@@ -51,7 +51,7 @@ If these inputs are incomplete, ChatGPT reports the gaps and helps establish the
 In an environment that supports Skills CLI, install the current release directly:
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.0/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 ChatGPT can also perform the installation, so users do not need to run the repository's Python scripts manually. Send:
@@ -108,7 +108,7 @@ flowchart TD
     decision -->|"Low value or no new direction"| stop["Stop with a reason"]
 ```
 
-The removable-time ceiling is the maximum time a cost could affect if eliminated completely; it is not promised gain. ChatGPT also considers whether the hypothesis is likely to hold, implementation time, GPU cost, validation difficulty, and user authorization before deciding whether another piece of evidence is worth obtaining.
+The removable-time ceiling is the maximum time a cost could affect if eliminated completely; it is not promised gain. ROI inputs must measure the production boundary the Candidate actually replaces or provide a justified conservative upper bound. Eager, lowered, CUDA Graph, dispatch, and fallback timings are not interchangeable merely because their mathematics match. The estimate must also include only the components the Candidate changes and their critical-path exposure. ChatGPT then considers whether the hypothesis is likely to hold, implementation time, GPU cost, validation difficulty, and user authorization before deciding whether another piece of evidence is worth obtaining.
 
 ### Candidate validation
 
@@ -159,6 +159,13 @@ A change is ready to merge only when correctness passes, the user's real target 
 [Validation records](docs/validation.md) describe automated checks and physical GPU coverage. [Case studies](docs/case-studies.md) retain only historical results with original evidence. Neither predicts the gain of a new project.
 
 ## Release notes
+
+### V1.5.1
+
+- Treats ROI as a derived evidence claim. Candidate ranking may use only timing, coverage, and cost evidence that applies to the actual production replacement boundary, or a justified conservative upper bound.
+- Keeps mismatched eager, lowered, CUDA Graph, dispatch, fallback, or overlap evidence diagnostic-only. A Candidate may claim savings only for the components it actually changes.
+- Requires prediction-error reconciliation when a formal workload result materially contradicts the preregistered opportunity estimate; the system model must be corrected before selecting the next Candidate.
+- Adds no production module, public operation, or automatic decision flow.
 
 ### V1.5.0
 

@@ -18,6 +18,10 @@ Target, Variant, Experiment, tool executable, profiler artifact, and result iden
 
 Profiler output is diagnostic evidence, not promotion evidence by itself. NCU, Nsys, and PyTorch parsers accept only tested versions and interpretation-critical fields; non-critical extensions are retained as unmodeled material. `ERR_NVGPUCTRPERM` records unavailable hardware counters without changing host policy.
 
+## Opportunity estimates
+
+ROI is a derived evidence claim. Its timing, coverage, and cost inputs must apply to the production boundary the Candidate actually replaces, including the selected lowering, graph, dispatch, fallback, and overlap behavior. Evidence from another execution form or another component remains diagnostic unless it is shown to be a conservative upper bound. When a formal workload result contradicts the estimate, correct the failed assumptions before ranking another Candidate.
+
 ## Modification boundary
 
 The skill changes only user-authorized project files and isolated environments. Host drivers, permissions, clocks, power, services, containers, and system configuration remain recommendations unless separately authorized.

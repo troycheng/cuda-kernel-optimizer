@@ -17,12 +17,22 @@ readiness 通过后，先执行 `workload_evaluate.py baseline`。原始业务�
 分布在哪些 subsystem，哪些时间未归因，还有哪些合理方向，为什么当前方向更值得验证。成本或
 可行性没有证据时写 unknown，不凭局部热点臆测 ROI。
 
-若候选只覆盖完整 workload 的一部分，令 `f` 为该部分占完整 workload 时间的比例，`r` 为候选
+ROI 不是独立于证据的估计值，而是由多项观测推导出的 opportunity claim。先定义当前 Candidate
+真实替换的 production boundary：入口与出口区域、phase 和 shape，以及 compiler lowering、graph、
+dispatch、fallback 和 overlap 后实际选中的 execution form。再把每个 timing、cost、operation/byte
+count 和 coverage 输入标记为：`same_boundary`、`conservative_upper_bound` 或 `diagnostic_only`。
+source artifact、environment 和数学语义一致，并不能弥补执行形态或候选范围不同；
+`diagnostic_only` 只能验证机制或精度，不能进入 production Amdahl 分子。
+
+只对 Candidate 实际改变、且在该 execution form 中暴露于关键路径的组件计算收益。若候选覆盖
+完整 workload 的一部分，令 `f` 为该部分占完整 workload 时间的比例，`r` 为候选
 使该部分延迟下降的比例，则理想化吞吐收益上限为 `1 / (1 - f × r) - 1`。局部结果给出相对
 吞吐增幅 `g` 时，换算 `r = g / (1 + g)`；例如 `g = 19.3%` 时 `r ≈ 16.2%`。若给出的是
 `k` 倍加速，则换算 `r = (k - 1) / k`。该式忽略额外 launch、同步、CPU 和通信成本，只能作为上限。
-coverage unknown 时，先选择最低成本 coverage 观测或端到端证伪；上限低于 minimum effect 时
-不创建 Experiment。
+同时反推跨过 Target minimum effect 所需的局部 saving。production execution form、occurrence 或
+exposure unknown 时，先从已有 trace、lowered artifact、dispatch 证据或窄 production-reference
+测量中选择最低成本观测，不固定新增 profiler 阶段。适用输入得到的上限低于 minimum effect 时
+不创建 Experiment；有依据的保守上界仍可用于排序或停止。
 
 先按对 primary 的预期端到端收益排序仍可行的 subsystem 和候选，再比较 coverage 可信度、
 phase/关键路径匹配、实现风险和取得结论的成本。不要因为某个局部 kernel 容易修改、microbenchmark
@@ -45,6 +55,7 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 - 机制与预期影响；
 - claim layer；
 - 修改范围；
+- opportunity claim：production replacement boundary、execution form、evidence relationship、Candidate scope、occurrence/exposure、局部物理上限、端到端上限和跨过 minimum effect 所需的 saving；
 - 最低成本证伪；
 - minimum effect；
 - 拒绝条件；
@@ -74,10 +85,11 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 
 `screen` 执行 Experiment 中声明的低成本证据计划。Driver V2 的一次调用同时返回每个 subject 的正确性和性能观测；工具先验证正确性，再决定这些性能样本能否解释，不为两个判断重复启动完整 workload。隔离比较每个 pair/case 启动 reference 和 candidate 各一次；只有 driver 声明确实支持且 Experiment 冻结了共享状态时，才在同一进程的一次调用内完成两个 subject。前一项已足以按预声明范围拒绝候选时，不启动后续昂贵动作。`conservative_bound` 只有在预先说明它为何约束正式目标，并实际证明收益上限低于 minimum effect 时才能拒绝机制。`diagnostic_proxy` 只检验声明的局部机制；低代理收益或样本不足不能单独否定完整 workload，ChatGPT 根据该主张、其它证据和正式测试成本决定是否继续。正确性、安全、dispatch identity、环境或指标口径失败会使相应性能结果无效，只能关闭受影响的实现或测量；不能据此评价机制。
 
-当 profile 和 coverage 表明候选仍有达到 minimum effect 的可能，或局部机制收益与完整 workload 结果冲突时，关闭机制前先解释差额来自路径未命中、额外 launch/同步/通信、资源竞争、测量分辨率还是机制本身。现有证据不能区分时，按 `research_augmentation.md` 核验一手资料并取得独立反例；若存在一个不同且最低成本的判别实验，且其结果可能改变结论，才追加一次。重新尝试必须有新证据、不同实现路径或不同测量设计；简单重跑、换名或调参不能延长已被同类证据否定的方向。profiler 不是固定阶段；只有它能区分仍然竞争的解释时才值得运行。
+当 preregistered opportunity range 与 target 结果实质冲突，包括局部机制收益与完整 workload 结果冲突时，先完成 prediction-error reconciliation：逐项检查 boundary/execution-form applicability、Candidate scope、coverage/occurrence、critical-path exposure 和 local cost premise，废止错误输入并重算系统机会。不能先用调度、cache 或噪声猜测保护旧 ROI，也不能在旧模型上直接切换下一候选。只有修正后仍存在高收益空间、且一个不同的最低成本判别实验可能改变决定时才追加一次；重新尝试必须有新证据、不同实现路径或不同测量设计。profiler 不是固定阶段，只有它能区分仍竞争的解释时才运行。
 
-每次进入正式 `target` 前，无条件简短复核 Target、Variant、case/request slice、phase、coverage、
-收益上限和 ROI。若其间取得新 profiler 事实，重新完成上一节的系统级归因，而不是沿用旧候选理由。
+每次进入正式 `target` 前，无条件简短复核 production replacement boundary、execution form、
+Candidate scope、case/request slice、phase、coverage/exposure、收益上限和 ROI。若其间取得新事实，
+重新完成上一节的适用性与系统级归因，而不是沿用旧候选理由。
 
 共享宿主机在正式性能采样前启动低频、只读的 CPU/GPU 观测，持续到采样结束，并保存与样本
 时间对齐的原始输出。观测缺失、中断，或出现与样本窗口重叠、达到用户或环境规则给出的影响阈值

@@ -157,7 +157,7 @@ baseline 对每个 case 只调用 driver 一次；driver 必须在一次 evidenc
   "baseline_ref": {"invocation_id": "inv-...", "sha256": "<64 hex>"},
   "source_base": {"kind": "source_snapshot", "path": "/absolute/reference"},
   "candidate": {"kind": "source_snapshot", "path": "/absolute/candidate"},
-  "hypothesis": "<one falsifiable claim>",
+  "hypothesis": "<one falsifiable claim bound to the production replacement boundary>",
   "mechanism_key": "normalized.mechanism.key",
   "claim_layer": "workload",
   "cheapest_falsifier": {"kind": "none", "reason": "<why no separate command is needed>"},
@@ -192,6 +192,10 @@ baseline 对每个 case 只调用 driver 一次；driver 必须在一次 evidenc
 `paired_same_process_combined`；否则使用 `isolated_process`。`material_premises` 只记录确实会改变
 候选判断或实验设计的事实或假设，每项包含 `statement`、`component`、`version`、`status`、
 `source` 和 `decision_effect`。一手资料中的命题使用 `primary_source_claim`，它仍是待 ChatGPT 结合版本和当前环境判断的来源主张，不是工具认证的事实；未核实内容使用 `unresolved_hypothesis`。
+
+`hypothesis` 同时概括当前 Candidate 的 opportunity claim：真实 production replacement boundary、
+实际 execution form、Candidate scope，以及只有适用于该 boundary 的输入才能支持的局部和端到端收益上限。
+具体观测与计算保留在候选说明和 Handoff，不扩展为新的协议对象；工具冻结主张但不判断 ROI 或下一步。
 
 `screen`、`target` 和 `final_audit` 使用同一比较请求骨架：
 

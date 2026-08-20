@@ -129,14 +129,24 @@ class SkillEvalTests(unittest.TestCase):
             "当前候选族关闭不等于 Target 完成",
             "GPU 进程列表为空或显存占用很低都不能单独证明设备空闲",
             "字符串只证明文本存在",
+            "ROI 是派生证据主张",
+            "真实的 production replacement boundary",
+            "源码、environment 和数学语义相同但 execution form 不同仍不适用",
+            "prediction-error reconciliation",
+            "不能在旧系统模型上切换下一候选",
         ):
             self.assertIn(marker, skill)
         for marker in (
             "elapsed/remaining budget",
             "跨 subsystem",
             "重新 tokenize 生成文本",
+            "`same_boundary`、`conservative_upper_bound` 或 `diagnostic_only`",
+            "Candidate 实际改变",
+            "不能在旧模型上直接切换下一候选",
         ):
             self.assertIn(marker, iteration)
+        self.assertNotIn("ProductionPath", skill)
+        self.assertNotIn("ProductionPath", iteration)
         self.assertIn("metric semantic audit", serving)
         self.assertIn("预 tokenized token ids", serving)
         self.assertIn("写 unproven", systems)

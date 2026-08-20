@@ -2,12 +2,12 @@
 
 `cuda-kernel-optimizer` helps ChatGPT optimize GPU workloads with a user-provided test workload, correctness checks, and paired measurements. ChatGPT makes optimization decisions; installed tools execute one explicit operation and record immutable facts.
 
-Start with the [Chinese README](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.0/README.md) or [English README](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.0/README.en.md).
+Start with the [Chinese README](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.1/README.md) or [English README](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.1/README.en.md).
 
 Install the current release in an environment that supports Skills CLI:
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.0/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 ## Documentation
@@ -24,6 +24,7 @@ npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.0/sk
 - [Project evolution](project-evolution.md): learn how real use becomes a bounded, evidence-backed project change.
 - [Project evolution in English](project-evolution.en.md): read the English contribution guide.
 - [Evolution case](evolution-case-profiler-evidence-validation.md): review a deterministic profiler-validation fix, not a performance example.
+- [Production ROI applicability](evolution-case-production-roi-applicability.md): review how Candidate scope and execution form limit an opportunity claim.
 - AI execution protocol: read `skills/cuda-kernel-optimizer/SKILL.md` from the installed release, so the instructions match the installed code.
 
 A result is usable only when its claim matches the supplied evidence. Source inspection supports a hypothesis; a stable kernel test supports a kernel claim; a representative workload supports an end-to-end claim; a controlled serving experiment supports a serving claim.
