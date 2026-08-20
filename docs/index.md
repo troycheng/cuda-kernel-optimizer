@@ -2,12 +2,12 @@
 
 `cuda-kernel-optimizer` helps ChatGPT optimize GPU workloads with a user-provided test workload, correctness checks, and paired measurements. ChatGPT makes optimization decisions; installed tools execute one explicit operation and record immutable facts.
 
-Start with the [Chinese README](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.0/README.md) or [English README](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.0/README.en.md).
+Start with the [Chinese README](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.1/README.md) or [English README](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.1/README.en.md).
 
 Install the current release in an environment that supports Skills CLI:
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.0/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 ## Documentation

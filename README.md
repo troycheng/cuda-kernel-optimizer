@@ -51,7 +51,7 @@
 支持 Skills CLI 的环境可以直接安装当前正式版：
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.0/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 也可以让 ChatGPT 完成安装，用户不需要手工运行仓库内的 Python 脚本。直接发送：
@@ -110,7 +110,7 @@ flowchart TD
     decision -->|"收益不足或无新方向"| stop["停止并说明原因"]
 ```
 
-可移除时间上限表示一项开销即使完全消除，最多能够影响多少时间，并不是收益承诺。ChatGPT 还要结合假设成立的可能性、实现时间、GPU 成本、验证难度和用户授权，判断下一项证据是否值得取得。
+可移除时间上限表示一项开销即使完全消除，最多能够影响多少时间，并不是收益承诺。用于估算 ROI 的时间必须来自候选实际替换的生产执行边界，或是有依据的保守上界；eager、编译后、CUDA Graph、dispatch 或 fallback 路径不同，即使数学语义相同，也不能直接共用耗时。估算还必须只包含候选真正修改的组件及其关键路径占比。ChatGPT 再结合假设成立的可能性、实现时间、GPU 成本、验证难度和用户授权，判断下一项证据是否值得取得。
 
 ### 候选验证
 
@@ -161,6 +161,13 @@ artifacts/
 [验证记录](docs/validation.md)说明自动化检查和实际 GPU 覆盖；[案例](docs/case-studies.md)只记录带原始证据的历史结果。两者都不预测新项目一定能获得多少收益。
 
 ## 版本说明
+
+### V1.5.1
+
+- 将 ROI 明确为派生证据主张：只有适用于候选真实生产替换边界的耗时、覆盖率和成本，或有依据的保守上界，才能参与候选排序。
+- eager、编译后、CUDA Graph、dispatch、fallback 和 overlap 等执行形态不一致时，局部代理只作诊断；候选只计算自身实际改变的组件，不能继承其它组件的收益。
+- 预测收益与正式 workload 结果明显冲突时，先废止错误前提并重算系统机会，再选择下一候选。
+- 本版本未增加生产模块、公开 operation 或自动决策流程。
 
 ### V1.5.0
 

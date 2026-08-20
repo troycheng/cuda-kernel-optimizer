@@ -56,14 +56,27 @@ batch 2 扩展在独立 TP2 layer 上提升了 11.03%，但实测服务 graph �
 
 这里暴露的不是 PDL 特例，而是一个通用问题：在不熟悉的外部技术栈事实影响安全、正确性或终止判断之前，没有及时核对相关一手资料。
 
+### 当前候选自身的收益上限计算得太晚
+
+后续实验只把 MoE W2 从 MXFP6 替换为 MXFP4，但早期预期部分借用了 W1、W2 和 dense MXFP6 全部转换后的更大收益。限定当前窄候选所需的事实其实已经具备：W2 占实测 replay 的 7.99%；现有 MXFP6 与 MXFP4 路径的每 token 估算 global bytes 分别为 3,994,624 B 和 2,814,976 B。因此，仅由 global bytes 决定的 W2 理想加速上限约为 1.419x，对应乐观的端到端 Amdahl 上限约 +2.42%。
+
+因为 +2.42% 仍高于 Target 的 +0.5% 最低有效收益，执行一次有界证伪是合理的，但它不足以支持更大的实现投入。TP2 layer 成对结果按实测 batch-2/batch-4 覆盖率加权并外推 40 层后，每个 replay 只节省 3.21 us：端到端约 +0.075%，比最低有效收益低约 6.7 倍。这个结果关闭的是已测试的 W2 映射，不是 MXFP4 这一模型格式方向。
+
+### 公开方法先被还原为当前目标下的具体假设
+
+后续研究核对了 [Cursor Warp Decode](https://cursor.com/blog/warp-decode)、[Alpha-MoE](https://github.com/Aleph-Alpha/Alpha-MoE)、[DeepGEMM MegaMoE](https://github.com/deepseek-ai/DeepGEMM) 和 CUTLASS 官方 MXFP4 支持。这些公开收益依赖不同的硬件、数据格式、expert layout、累加语义或通信重叠，不能直接作为当前 Target 的预期收益。
+
+因此，literal output-centric Warp Decode W2 被还原成一个保持现有 route rounding 和累加顺序的 SM120/MXFP6 精确 skeleton。输出完全一致，但加权 W2 延迟从 6.696 us 回退到 23.806 us。该结果只拒绝当前目标上实测的 scalar output-centric 映射，不反驳其 B200/MXFP8 公开结果，也不关闭其他 output tiling。Alpha-MoE 和 MegaMoE 式 persistent pipeline 所依赖的跨 cluster 归约或通信重叠在当前 decode 路径中并不存在，因此仍只保留为可行性假设，而不是案例结论。
+
 ## 对项目形成的反馈
 
-这次案例形成了四项范围明确的修改或 backlog，而不是一次宽泛的流程重写：
+这次案例形成了五项范围明确的修改或 backlog，而不是一次宽泛的流程重写：
 
 - [Issue #15](https://github.com/troycheng/cuda-kernel-optimizer/issues/15)：冻结派生容器的真实身份，不能只记录继承的镜像 label 或包版本。
 - [Issue #16](https://github.com/troycheng/cuda-kernel-optimizer/issues/16)：当小幅 kernel 选择收益容易被启动和 cache 方差掩盖时，使用同进程成对测试。
 - [Issue #17](https://github.com/troycheng/cuda-kernel-optimizer/issues/17)：区分同一实现的 parity 与不同 checkpoint 之间的 fidelity。
 - [Issue #18](https://github.com/troycheng/cuda-kernel-optimizer/issues/18)：当陌生外部技术栈事实会影响安全、正确性或终止判断时，先核对相关一手资料。
+- [Issue #19](https://github.com/troycheng/cuda-kernel-optimizer/issues/19)：在深入研究或实现前，先按当前候选的实际范围计算物理上限和端到端 Amdahl 上限。
 
 优化器指令也据此收紧：高潜力候选失败时，需要提供与潜在收益相称的反证；拒绝结论只能关闭已经测试的实现和条件。
 
