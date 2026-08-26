@@ -158,8 +158,68 @@ knowledge registry.
 
 ## Evaluation Result
 
-Pending. This section will be filled only after the bound Candidate and
-evaluator are committed and the declared commands have run.
+The Evaluation Definition was frozen in `002b855` before Candidate content or
+results were produced. Candidate and its unchanged evaluator were then fixed in
+`1f51c42822d46594fa1817129062cb87aedc69b8`.
+
+### Bound definition and actual identities
+
+- Original: `2dc7514` (`v1.5.1`).
+- Frozen definition: `002b855`.
+- Candidate and evaluator: `1f51c42822d46594fa1817129062cb87aedc69b8`.
+- Environment: Darwin 25.6.0 arm64, Python 3.9.6.
+- Workload: the repository's deterministic CPU-only test and validation suite.
+- GPU, network, model, profiler, and private-material use: none.
+
+Candidate changed only the two knowledge registries and
+`tests/test_knowledge_query.py`. It added nine reviewed public sources and nine
+`source_reviewed` technical-contract cards. The registry now contains 92 cards
+and 38 sources; `cards.json` is 187,813 bytes, below the existing 200,000-byte
+limit. No query implementation, workflow instruction, schema, public operation,
+or automatic decision changed.
+
+### Actual result
+
+- `python3 -m unittest discover -s tests -p 'test_*.py'` returned 0. All 260
+  tests passed in 45.126 seconds; 2 were skipped.
+- `python3 -m compileall -q skills/cuda-kernel-optimizer/scripts tests`
+  returned 0 in 0.04 seconds.
+- `python3 skills/cuda-kernel-optimizer/scripts/self_check.py` returned 0 in
+  0.13 seconds with status `passed`, `gpu_checks_run: false`, and
+  `network_checks_run: false`.
+- `python3 /Users/tcheng/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/cuda-kernel-optimizer`
+  returned 0 in 0.03 seconds and reported `Skill is valid!`.
+- `git diff --check` returned 0.
+
+The focused table-driven query evaluator returned each declared mechanism with
+its expected public source, technical-contract status, nonclaim text, and a
+`related` rather than `compatible` relation when component versions were not
+enumerated by the reviewed material. A separate focused assertion returned an
+`incompatible` relation when the serving-only dynamic-batching contract was
+queried at the kernel claim layer.
+
+### Validity, cost, terminal reason, and uncertainty
+
+Every declared trial ran once and was valid. No trial failed, was interrupted,
+or remained unrun. Evaluation used zero GPU time, no network access, and no
+expensive external operation. It ended because every frozen command returned
+zero and every declared focused behavior was covered by the full suite.
+
+The result is structural and deterministic. It does not test the current
+documentation against a deployed Triton version, execute a model, measure a
+service, or show that the nine contracts are the complete knowledge needed for
+the later OCR profile.
+
+### Supported claim scope
+
+The result supports only that Candidate structurally validates and can return
+the nine declared source-reviewed contracts with the tested source, nonclaim,
+claim-layer, and unbounded-version behavior. It does not establish OCR
+correctness, GPU performance, production applicability, framework-version
+compatibility, configuration optimality, source completeness, or general
+optimization quality.
+
+No private material was uploaded, evaluated, or used as public proof.
 
 ## Release Decision
 
