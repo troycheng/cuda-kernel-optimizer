@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-07-31",
+  "as_of": "2026-08-26",
   "cards": [
     {
       "applies_when": [
@@ -5566,6 +5566,462 @@
         "nvidia-cuda-programming-guide"
       ],
       "status": "advisory"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether request throughput, average executed batch size, queue time, and backend compute time are derived from the correct Triton counters"
+        ],
+        "non_claims": [
+          "Triton request duration does not include time before Triton core receives a request or business processing outside Triton.",
+          "A single scrape or an unaligned ratio of cumulative counters does not establish an interval latency or batch-size distribution."
+        ],
+        "proposition": "Triton counts each request once regardless of its batch size, counts a batch of n as n inferences, and counts each executed inference batch once. Its request, queue, compute-input, compute-infer, and compute-output latency counters are cumulative durations with documented cache inclusions or exclusions."
+      },
+      "counter_signals": [
+        "the observed metric family, model label, version label, or scrape interval differs across the compared deltas"
+      ],
+      "distinguishing_question": "Are the compared count and duration deltas from the same model, version, and closed observation interval?",
+      "id": "contract.triton.metrics-counter-semantics",
+      "identity_constraints": {
+        "claim_layers": [
+          "diagnostic",
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "tritonserver": []
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target Triton version changes the cited metric semantics or metric enablement"
+      ],
+      "match_terms": [
+        "triton.metrics-counter-semantics",
+        "nv_inference_count",
+        "nv_inference_exec_count",
+        "nv_inference_request_duration_us",
+        "triton queue duration"
+      ],
+      "mechanism": "Triton request and inference metric semantics",
+      "mechanism_key": "triton.metrics-counter-semantics",
+      "priority": 0,
+      "required_evidence": [
+        "Triton version and metrics configuration",
+        "paired counter snapshots with model and version labels and interval boundaries"
+      ],
+      "source_ids": [
+        "nvidia-triton-metrics"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether a stateless model can use Triton dynamic batching and which scheduler controls must be included in a measured comparison"
+        ],
+        "non_claims": [
+          "Enabling dynamic batching does not guarantee a throughput gain or preserve tail latency.",
+          "Preferred batch sizes, queue delay, or a concurrency rule from one model are not universal optima."
+        ],
+        "proposition": "Triton's dynamic batcher combines queued requests for a stateless model. Its model-local configuration controls maximum and preferred batch sizes, maximum queue delay, queue size, priorities, and timeouts before distributing created batches to configured model instances."
+      },
+      "counter_signals": [
+        "the model is stateful, does not support batching, or representative traffic cannot form the intended batches"
+      ],
+      "distinguishing_question": "Does the model support stateless batching, and what batch sizes and queue delays occur under the target arrival process?",
+      "id": "contract.triton.dynamic-batching",
+      "identity_constraints": {
+        "claim_layers": [
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "tritonserver": []
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target scheduler or model semantics differ from the cited dynamic-batcher contract"
+      ],
+      "match_terms": [
+        "triton.dynamic-batching",
+        "dynamic batching",
+        "max_queue_delay_microseconds",
+        "preferred_batch_size",
+        "request queue"
+      ],
+      "mechanism": "Triton dynamic batching scheduler contract",
+      "mechanism_key": "triton.dynamic-batching",
+      "priority": 0,
+      "required_evidence": [
+        "model batching and scheduler configuration",
+        "target arrival process, achieved batches, throughput, and latency distribution"
+      ],
+      "source_ids": [
+        "nvidia-triton-batcher",
+        "nvidia-triton-optimization"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether model-instance count is an independent experimental axis and whether its effect must be measured together with batching"
+        ],
+        "non_claims": [
+          "Adding model instances does not guarantee more throughput and can increase memory use or latency.",
+          "A gain from multiple instances without dynamic batching does not add linearly to a dynamic-batching gain."
+        ],
+        "proposition": "Triton instance groups configure multiple copies of a model. Multiple instances can overlap transfers with compute and expose more concurrent inference work, but dynamic batching may already saturate the GPU, making extra instances add latency with little or no throughput improvement."
+      },
+      "counter_signals": [
+        "dynamic batching already saturates the target resource or added instances increase queueing, memory pressure, or contention"
+      ],
+      "distinguishing_question": "At the target arrival process and batching policy, does another model instance reduce an observed critical-path gap without violating latency or memory constraints?",
+      "id": "contract.triton.instance-group-interaction",
+      "identity_constraints": {
+        "claim_layers": [
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "tritonserver": []
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target backend does not implement model instances with the cited execution behavior"
+      ],
+      "match_terms": [
+        "triton.instance-group-interaction",
+        "instance_group",
+        "model instances",
+        "concurrent model execution",
+        "dynamic batching instances"
+      ],
+      "mechanism": "Triton model-instance and batching interaction",
+      "mechanism_key": "triton.instance-group-interaction",
+      "priority": 0,
+      "required_evidence": [
+        "instance count, batching policy, backend, and resource placement",
+        "paired target throughput, latency distribution, memory, and utilization evidence"
+      ],
+      "source_ids": [
+        "nvidia-triton-optimization"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether preprocessing, inference, and postprocessing can be represented as one Triton tensor dataflow and measured as a full pipeline"
+        ],
+        "non_claims": [
+          "An ensemble declaration does not guarantee that every intermediate tensor remains in GPU memory or that the service becomes faster.",
+          "An ensemble is a dataflow specification, not a general replacement for loops, conditionals, or arbitrary business logic."
+        ],
+        "proposition": "A Triton ensemble represents a pipeline and the input-output tensor connections among composing models. Its scheduler routes step outputs to later inputs, can avoid external intermediate transfers and requests, and leaves the composing models' scheduler behavior and model characteristics in force."
+      },
+      "counter_signals": [
+        "the candidate path requires unsupported control flow, host materialization, or external business logic between steps"
+      ],
+      "distinguishing_question": "Is the target pipeline expressible as tensor dataflow, and where do intermediate tensors physically reside on the measured path?",
+      "id": "contract.triton.ensemble-dataflow",
+      "identity_constraints": {
+        "claim_layers": [
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "tritonserver": []
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target Triton version or composing backend changes the cited dataflow or transfer behavior"
+      ],
+      "match_terms": [
+        "triton.ensemble-dataflow",
+        "ensemble model",
+        "ensemble scheduler",
+        "preprocess inference postprocess",
+        "intermediate tensors"
+      ],
+      "mechanism": "Triton ensemble tensor dataflow",
+      "mechanism_key": "triton.ensemble-dataflow",
+      "priority": 0,
+      "required_evidence": [
+        "ensemble configuration and composing-model contracts",
+        "full-pipeline trace including intermediate tensor placement and scheduler behavior"
+      ],
+      "source_ids": [
+        "nvidia-triton-ensemble-models"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether requests are cache-identical and eligible before response caching is considered as a workload optimization"
+        ],
+        "non_claims": [
+          "Visually similar OCR images or requests with semantically equivalent content are not cache hits unless their hashed request identity is identical.",
+          "A response cache can reduce performance when misses dominate or model computation is cheap relative to cache overhead."
+        ],
+        "proposition": "Triton's response-cache key hashes model name, model version, and input tensor names, shapes, datatypes, and data; a hit skips model execution. Current eligibility requires CPU-memory inputs and outputs, a successful request, and the Default or Dynamic Batch Scheduler, and excludes sequence-batched and decoupled models."
+      },
+      "counter_signals": [
+        "representative requests are mostly unique, tensors are not cache-eligible, or cache management is comparable to the avoided compute"
+      ],
+      "distinguishing_question": "What exact-request hit rate and avoided compute time occur on the eligible target path?",
+      "id": "contract.triton.response-cache-eligibility",
+      "identity_constraints": {
+        "claim_layers": [
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "tritonserver": []
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target cache implementation, scheduler, or Triton version changes request identity or eligibility"
+      ],
+      "match_terms": [
+        "triton.response-cache-eligibility",
+        "response cache",
+        "cache hit",
+        "duplicate requests",
+        "OCR cache"
+      ],
+      "mechanism": "Triton response-cache identity and eligibility",
+      "mechanism_key": "triton.response-cache-eligibility",
+      "priority": 0,
+      "required_evidence": [
+        "Triton version, scheduler, tensor placement, and cache configuration",
+        "representative exact-request hit rate and cache versus compute timing"
+      ],
+      "source_ids": [
+        "nvidia-triton-response-cache"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether an OCR shape distribution fits one TensorRT profile and which representative opt shapes and profile switches belong in the experiment"
+        ],
+        "non_claims": [
+          "A wider min-opt-max range is not evidence of equal or better performance across that range.",
+          "A shape bucket or optimization profile does not by itself prove an end-to-end serving gain."
+        ],
+        "proposition": "A TensorRT optimization profile specifies minimum, optimization, and maximum dimensions; the optimization dimensions guide autotuning. Profile dimensions can materially change memory use, and some tactics are disabled unless MIN equals OPT equals MAX; each concurrent execution context uses a separate profile."
+      },
+      "counter_signals": [
+        "the production shape distribution is unknown, the selected opt shape is unrepresentative, or profile switching enters the critical path"
+      ],
+      "distinguishing_question": "Which observed OCR shapes and frequencies define each profile's min, opt, and max dimensions, and which tactics or memory costs change?",
+      "id": "contract.tensorrt.dynamic-shape-profiles",
+      "identity_constraints": {
+        "claim_layers": [
+          "kernel",
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "tensorrt": []
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the built engine or TensorRT version does not use the cited optimization-profile semantics"
+      ],
+      "match_terms": [
+        "tensorrt.dynamic-shape-profiles",
+        "optimization profile",
+        "MIN=OPT=MAX",
+        "dynamic shapes",
+        "OCR shape buckets"
+      ],
+      "mechanism": "TensorRT dynamic-shape optimization profiles",
+      "mechanism_key": "tensorrt.dynamic-shape-profiles",
+      "priority": 0,
+      "required_evidence": [
+        "TensorRT version, engine profile definitions, and execution-context mapping",
+        "representative shape-frequency distribution, selected tactics, memory, and target measurements"
+      ],
+      "source_ids": [
+        "nvidia-tensorrt-dynamic-shapes"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether one TensorRT CUDA Graph can safely represent a request bucket and whether shape or context changes require another captured graph"
+        ],
+        "non_claims": [
+          "CUDA Graph capture support does not prove an enqueue-bound workload or lower end-to-end latency.",
+          "Loops, conditionals, data-dependent shapes, context mutation, or changed buffer addresses can prevent safe reuse even when ordinary inference succeeds."
+        ],
+        "proposition": "TensorRT can capture an enqueueV3 execution when no mid-pipeline CPU interaction is required. After an input-shape change, one uncaptured enqueue updates internal state before capture; the captured graph is specific to input size, execution-context state, and captured input, output, and activation buffer addresses, so one execution context per captured graph is the documented practice."
+      },
+      "counter_signals": [
+        "the workload is not enqueue-bound, capture fails, request shapes cross graph identities, or buffer addresses and context state are not stable"
+      ],
+      "distinguishing_question": "Which stable shape, execution context, and buffer-address identity does each captured graph cover, and how much Target time is enqueue-bound?",
+      "id": "contract.tensorrt.cuda-graph-context-shape",
+      "identity_constraints": {
+        "claim_layers": [
+          "kernel",
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "tensorrt": []
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target TensorRT or CUDA version changes capture support or graph identity requirements"
+      ],
+      "match_terms": [
+        "tensorrt.cuda-graph-context-shape",
+        "TensorRT CUDA Graph",
+        "enqueueV3 capture",
+        "execution context graph",
+        "shape graph bucket"
+      ],
+      "mechanism": "TensorRT CUDA Graph context and shape identity",
+      "mechanism_key": "tensorrt.cuda-graph-context-shape",
+      "priority": 0,
+      "required_evidence": [
+        "TensorRT and CUDA versions, engine, execution-context, shape, and buffer identities",
+        "Target-aligned enqueue and GPU timeline with capture success and fallback coverage"
+      ],
+      "source_ids": [
+        "nvidia-tensorrt-performance-optimization"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether an ONNX model's measured execution path is fully TensorRT or includes CUDA execution-provider fallback"
+        ],
+        "non_claims": [
+          "Enabling the TensorRT execution provider does not mean every ONNX node executes in TensorRT.",
+          "TensorRT engine timing alone does not account for CUDA fallback nodes, provider transitions, or the full Triton request path."
+        ],
+        "proposition": "In Triton's ONNX Runtime backend, enabling TensorRT uses the CUDA execution provider as fallback for nodes TensorRT cannot execute. The backend also exposes TensorRT profile, engine-cache, auxiliary-stream, and CUDA Graph execution-provider controls."
+      },
+      "counter_signals": [
+        "the actual provider partition, fallback nodes, engine build, or backend parameters are unknown"
+      ],
+      "distinguishing_question": "Which nodes execute in TensorRT versus CUDA EP, and what provider transitions appear on the target critical path?",
+      "id": "contract.triton.ort-tensorrt-fallback",
+      "identity_constraints": {
+        "claim_layers": [
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "onnxruntime": [],
+          "tritonserver": []
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target backend version or execution-provider configuration differs from the cited implementation"
+      ],
+      "match_terms": [
+        "triton.ort-tensorrt-fallback",
+        "ONNX Runtime TensorRT",
+        "CUDA EP fallback",
+        "execution provider partition",
+        "trt_profile_opt_shapes"
+      ],
+      "mechanism": "Triton ONNX Runtime TensorRT and CUDA EP fallback",
+      "mechanism_key": "triton.ort-tensorrt-fallback",
+      "priority": 0,
+      "required_evidence": [
+        "Triton ONNX Runtime backend and ONNX Runtime versions and model configuration",
+        "provider assignment, engine/profile identities, and full-path trace"
+      ],
+      "source_ids": [
+        "triton-onnxruntime-backend"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether variable-length encoded OCR images can enter a batched Triton DALI preprocessing path and which padding or ragged representation must be evaluated"
+        ],
+        "non_claims": [
+          "Moving decode or preprocessing to DALI does not guarantee a full-service speedup or semantic equivalence with the current preprocessing path.",
+          "Ragged batching removes neither decode cost nor the need to preserve per-sample lengths and downstream shape contracts."
+        ],
+        "proposition": "Triton batches ordinarily require uniform input shapes, while encoded JPEG samples usually have different byte lengths. A DALI-backed image pipeline can use padded encoded samples or Triton ragged batching with dynamic batching to represent those variable-length inputs."
+      },
+      "counter_signals": [
+        "the client already sends decoded uniform tensors, downstream models reject the representation, or preprocessing is outside the target critical path"
+      ],
+      "distinguishing_question": "Are encoded image lengths variable at the Triton boundary, and can padding or ragged batching preserve exact preprocessing semantics and downstream shapes?",
+      "id": "contract.triton.dali-ragged-image-batching",
+      "identity_constraints": {
+        "claim_layers": [
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "dali": [],
+          "tritonserver": []
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target DALI backend, Triton version, or model input contract differs from the cited integration"
+      ],
+      "match_terms": [
+        "triton.dali-ragged-image-batching",
+        "DALI OCR preprocessing",
+        "ragged batching",
+        "encoded JPEG batch",
+        "variable length image input"
+      ],
+      "mechanism": "Triton DALI variable-length encoded-image batching",
+      "mechanism_key": "triton.dali-ragged-image-batching",
+      "priority": 0,
+      "required_evidence": [
+        "Triton and DALI backend versions, model configuration, and preprocessing contract",
+        "representative encoded-length distribution, exact output comparison, and full-path profile"
+      ],
+      "source_ids": [
+        "nvidia-triton-dali-inference"
+      ],
+      "status": "source_reviewed"
     }
   ],
   "schema_version": "cuda-kernel-optimizer/knowledge-cards-v2"

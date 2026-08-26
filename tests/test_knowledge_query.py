@@ -180,6 +180,105 @@ class KnowledgeQueryTests(unittest.TestCase):
             "frameworks.triton",
         )
 
+    def test_triton_ocr_serving_contracts_are_source_bound_and_version_limited(self):
+        cases = [
+            (
+                "triton.metrics-counter-semantics",
+                {"tritonserver": "2.61.0"},
+                "nvidia-triton-metrics",
+                "batch of n as n inferences",
+            ),
+            (
+                "triton.dynamic-batching",
+                {"tritonserver": "2.61.0"},
+                "nvidia-triton-batcher",
+                "does not guarantee a throughput gain",
+            ),
+            (
+                "triton.instance-group-interaction",
+                {"tritonserver": "2.61.0"},
+                "nvidia-triton-optimization",
+                "does not add linearly",
+            ),
+            (
+                "triton.ensemble-dataflow",
+                {"tritonserver": "2.61.0"},
+                "nvidia-triton-ensemble-models",
+                "does not guarantee that every intermediate tensor remains in GPU memory",
+            ),
+            (
+                "triton.response-cache-eligibility",
+                {"tritonserver": "2.61.0"},
+                "nvidia-triton-response-cache",
+                "Visually similar OCR images",
+            ),
+            (
+                "tensorrt.dynamic-shape-profiles",
+                {"tensorrt": "11.0.0"},
+                "nvidia-tensorrt-dynamic-shapes",
+                "wider min-opt-max range",
+            ),
+            (
+                "tensorrt.cuda-graph-context-shape",
+                {"tensorrt": "11.0.0"},
+                "nvidia-tensorrt-performance-optimization",
+                "does not prove an enqueue-bound workload",
+            ),
+            (
+                "triton.ort-tensorrt-fallback",
+                {"onnxruntime": "1.23.0", "tritonserver": "2.61.0"},
+                "triton-onnxruntime-backend",
+                "does not mean every ONNX node executes in TensorRT",
+            ),
+            (
+                "triton.dali-ragged-image-batching",
+                {"dali": "1.50.0", "tritonserver": "2.61.0"},
+                "nvidia-triton-dali-inference",
+                "does not guarantee a full-service speedup",
+            ),
+        ]
+        for mechanism_key, frameworks, source_id, bounded_text in cases:
+            with self.subTest(mechanism_key=mechanism_key):
+                result = load_module().query(
+                    request(
+                        phenomena=[],
+                        mechanism_keys=[mechanism_key],
+                        claim_layer="workload",
+                        frameworks=frameworks,
+                    )
+                )
+                self.assertEqual(len(result["matches"]), 1)
+                match = result["matches"][0]
+                self.assertEqual(match["content_kind"], "technical_contract")
+                self.assertEqual(match["status"], "source_reviewed")
+                self.assertEqual(match["applicability"]["relation"], "related")
+                self.assertTrue(match["applicability"]["limitations"])
+                self.assertIn(
+                    bounded_text,
+                    " ".join(
+                        [match["contract"]["proposition"]]
+                        + match["contract"]["non_claims"]
+                    ),
+                )
+                source = next(
+                    item for item in match["sources"] if item["id"] == source_id
+                )
+                self.assertTrue(source["locator"])
+                self.assertTrue(source["url"].startswith("https://"))
+
+    def test_serving_only_triton_contract_rejects_a_kernel_claim(self):
+        result = load_module().query(
+            request(
+                phenomena=[],
+                mechanism_keys=["triton.dynamic-batching"],
+                claim_layer="kernel",
+                frameworks={"tritonserver": "2.61.0"},
+            )
+        )
+        applicability = result["matches"][0]["applicability"]
+        self.assertEqual(applicability["relation"], "incompatible")
+        self.assertEqual(applicability["mismatches"][0]["field"], "claim_layer")
+
     def test_documented_version_families_match_patch_releases(self):
         cutlass = load_module().query(request(
             phenomena=[], mechanism_keys=["cutlass.blackwell-architecture-boundary"],

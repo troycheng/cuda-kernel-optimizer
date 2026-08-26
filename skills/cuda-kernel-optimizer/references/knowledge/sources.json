@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-08-13",
+  "as_of": "2026-08-26",
   "schema_version": "cuda-kernel-optimizer/knowledge-sources-v2",
   "sources": [
     {
@@ -390,6 +390,114 @@
       "title": "vLLM Optimization and Tuning",
       "url": "https://docs.vllm.ai/en/stable/configuration/optimization/",
       "version": "stable documentation snapshot"
+    },
+    {
+      "id": "nvidia-triton-metrics",
+      "last_reviewed": "2026-08-26",
+      "locator": "Inference Request Metrics: Counts and Latencies",
+      "source_kind": "official-documentation",
+      "status": "reviewed",
+      "summary": "Defines Triton request, inference, execution, pending-request, queue, and backend compute metric semantics, including batching and cache exclusions.",
+      "summary_sha256": "aa57c069b3c6423cb7af51b44d94425d599e5a321b597ca2f270b7714105dbbb",
+      "title": "NVIDIA Triton Inference Server: Metrics",
+      "url": "https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/metrics.html",
+      "version": "latest documentation snapshot 2026-08-26"
+    },
+    {
+      "id": "nvidia-triton-batcher",
+      "last_reviewed": "2026-08-26",
+      "locator": "Dynamic Batcher and Recommended Configuration Process",
+      "source_kind": "official-documentation",
+      "status": "reviewed",
+      "summary": "Defines dynamic batching for stateless models and the model-local batch-size, queue-delay, priority, timeout, and queue-policy controls.",
+      "summary_sha256": "b0f3d3b41e7061bb55fb77c6b34270f36a9d5f131b454ef5fd39b85194363074",
+      "title": "NVIDIA Triton Inference Server: Batchers",
+      "url": "https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/batcher.html",
+      "version": "latest documentation snapshot 2026-08-26"
+    },
+    {
+      "id": "nvidia-triton-optimization",
+      "last_reviewed": "2026-08-26",
+      "locator": "Optimization Settings: Dynamic Batcher and Model Instances",
+      "source_kind": "official-documentation",
+      "status": "reviewed",
+      "summary": "Defines Triton model-instance and dynamic-batching performance interactions as model-specific trade-offs that require measurement.",
+      "summary_sha256": "c7135ccf678efd93725b094e4d04ca2ee057e79bcd1e99ab9c2608c6aa788c7b",
+      "title": "NVIDIA Triton Inference Server: Optimization",
+      "url": "https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/optimization.html",
+      "version": "latest documentation snapshot 2026-08-26"
+    },
+    {
+      "id": "nvidia-triton-ensemble-models",
+      "last_reviewed": "2026-08-26",
+      "locator": "Ensemble Models overview and ensemble scheduler semantics",
+      "source_kind": "official-documentation",
+      "status": "reviewed",
+      "summary": "Defines Triton ensemble models as tensor dataflow pipelines whose composing models retain their own schedulers and model characteristics.",
+      "summary_sha256": "70d4d9e43570ed2e71a0f4b2cb9a152a2ba73e01f08b04df2d2222d3f3e25d87",
+      "title": "NVIDIA Triton Inference Server: Ensemble Models",
+      "url": "https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/ensemble_models.html",
+      "version": "latest documentation snapshot 2026-08-26"
+    },
+    {
+      "id": "nvidia-triton-response-cache",
+      "last_reviewed": "2026-08-26",
+      "locator": "Overview, Performance, and Known Limitations",
+      "source_kind": "official-documentation",
+      "status": "reviewed",
+      "summary": "Defines Triton response-cache request identity, hit behavior, eligibility constraints, scheduler limitations, and possible overhead on low-hit or cheap-compute workloads.",
+      "summary_sha256": "749d493eda0e0af360a988bdcf545294122b179d2c87522040f5cfcc64dfe369",
+      "title": "NVIDIA Triton Inference Server: Response Cache",
+      "url": "https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/response_cache.html",
+      "version": "latest documentation snapshot 2026-08-26"
+    },
+    {
+      "id": "nvidia-tensorrt-dynamic-shapes",
+      "last_reviewed": "2026-08-26",
+      "locator": "Optimization Profiles",
+      "source_kind": "official-documentation",
+      "status": "reviewed",
+      "summary": "Defines TensorRT dynamic-shape optimization profiles, min-opt-max dimensions, per-context profile use, and tactic and memory consequences.",
+      "summary_sha256": "2b4f9d173b207df6b7052ef1187272b9290a2a392770e164ed89e92978c66ad1",
+      "title": "NVIDIA TensorRT: Dynamic Shapes Core Concepts",
+      "url": "https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/dynamic-shapes-basics.html",
+      "version": "latest documentation snapshot 2026-08-26"
+    },
+    {
+      "id": "nvidia-tensorrt-performance-optimization",
+      "last_reviewed": "2026-08-26",
+      "locator": "Inference with CUDA Graphs and Limitations of CUDA Graphs",
+      "source_kind": "official-documentation",
+      "status": "reviewed",
+      "summary": "Defines TensorRT CUDA Graph capture use, dynamic-shape update protocol, unsupported operations, and graph binding to execution-context state and buffer addresses.",
+      "summary_sha256": "b5e4dfd5e82533f7eea6c25761a17dae7160538f2a4689733a251abd3a44353d",
+      "title": "NVIDIA TensorRT: Optimizing TensorRT Performance",
+      "url": "https://docs.nvidia.com/deeplearning/tensorrt/latest/performance/optimization.html",
+      "version": "latest documentation snapshot 2026-08-26"
+    },
+    {
+      "id": "triton-onnxruntime-backend",
+      "last_reviewed": "2026-08-26",
+      "locator": "ONNX Runtime with TensorRT and CUDA Execution Provider optimization",
+      "source_kind": "reference-implementation",
+      "status": "reviewed",
+      "summary": "Defines Triton ONNX Runtime backend execution-accelerator parameters and CUDA execution-provider fallback when TensorRT cannot execute a node.",
+      "summary_sha256": "65d6f54b5ce594751800bdf22b1bdbff1a72718279f1f7aa5c93cb7a41ffadfb",
+      "title": "Triton ONNX Runtime Backend",
+      "url": "https://github.com/triton-inference-server/onnxruntime_backend",
+      "version": "main branch snapshot 2026-08-26"
+    },
+    {
+      "id": "nvidia-triton-dali-inference",
+      "last_reviewed": "2026-08-26",
+      "locator": "Batching data in the request and Triton accepts batches with uniform shapes",
+      "source_kind": "official-documentation",
+      "status": "reviewed",
+      "summary": "Defines Triton DALI inference integration and the uniform-shape, padding, and ragged-batching boundary for variable-length encoded image inputs.",
+      "summary_sha256": "249033b25673bb79c27be892fc4d9da2716fb614561b059549a20eac50028188",
+      "title": "NVIDIA Triton DALI Backend: From Training to Inference",
+      "url": "https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/dali_backend/docs/tutorials/training_to_inference.html",
+      "version": "latest documentation snapshot 2026-08-26"
     }
   ],
   "staleness_policy": "Local cards are advisory; source verification is required before relying on a card outside its stated identity constraints."
