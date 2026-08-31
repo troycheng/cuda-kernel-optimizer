@@ -18,7 +18,9 @@ Sources record title, exact section locator, version, URL, review date, status, 
 
 ## External search
 
-Use current official documentation, source repositories, specifications, and papers for version-sensitive claims. Record which local observation each source is meant to explain. Search results remain advisory until verified in the current environment.
+External research serves two different decisions. Capability discovery checks whether an equivalent primitive already exists, whether the target framework and deployed version integrate it, and whether production-path evidence is still missing. Mechanism research checks version-sensitive semantics, competing explanations, and counterexamples. Maintained catalogs can help discover implementations, but availability and compatibility must be verified in the owning source repository, release, or change record.
+
+Stop when the checked scope is sufficient to choose between reuse, a minimal backport, a narrow adapter, a measurement harness, or genuinely new implementation. Record only decision-changing, versioned facts in the existing Experiment premises; do not mirror a volatile community catalog into bundled knowledge. Code produced by an external optimizer remains an ordinary Candidate and must pass the same correctness and workload evaluation. If current upstream access is unavailable, continue from the deployed source and local evidence while stating the freshness limit instead of claiming that no equivalent implementation exists.
 
 ## Independent AI challenge
 
@@ -26,4 +28,4 @@ External models are most useful for a major direction choice, an unexplained pla
 
 External availability is optional. A request without a complete answer is recorded as failed review, not successful coverage. Preserve disagreement rather than turning answers into a vote. Private source, credentials, raw inputs, hostnames, and business data are not sent without explicit approval.
 
-See the installed [research reference](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.5.1/skills/cuda-kernel-optimizer/references/research_augmentation.md) for provider order and review boundaries.
+See the installed [research reference](../skills/cuda-kernel-optimizer/references/research_augmentation.md) for source selection and review boundaries.
