@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-08-26",
+  "as_of": "2026-09-01",
   "schema_version": "cuda-kernel-optimizer/knowledge-sources-v2",
   "sources": [
     {
@@ -426,6 +426,18 @@
       "title": "NVIDIA Triton Inference Server: Optimization",
       "url": "https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/optimization.html",
       "version": "latest documentation snapshot 2026-08-26"
+    },
+    {
+      "id": "nvidia-triton-release-26-08",
+      "last_reviewed": "2026-09-01",
+      "locator": "Release 26.08 Highlights and Known Issues",
+      "source_kind": "official-documentation",
+      "status": "reviewed",
+      "summary": "Records Triton 2.72.0 and NGC 26.08 fixes for dynamic-batcher starvation, preserve-ordering completion slots, and TensorRT-backend CUDA Graph execution for non-batching models, plus versioned shared-memory and Python-binding known issues.",
+      "summary_sha256": "1e5e4fbae668747b5c2b06a99e4d47ddc40a012a531db7674146548b1d31520b",
+      "title": "NVIDIA Triton Inference Server Release Notes 26.08",
+      "url": "https://docs.nvidia.com/deeplearning/triton-inference-server/release-notes/rel-26-08.html",
+      "version": "Triton 2.72.0 / NGC 26.08"
     },
     {
       "id": "nvidia-triton-ensemble-models",

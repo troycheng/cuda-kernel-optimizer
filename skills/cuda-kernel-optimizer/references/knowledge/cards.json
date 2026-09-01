@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-08-26",
+  "as_of": "2026-09-01",
   "cards": [
     {
       "applies_when": [
@@ -5666,6 +5666,271 @@
       "source_ids": [
         "nvidia-triton-batcher",
         "nvidia-triton-optimization"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether an apparent dynamic-batcher throughput collapse can be attributed to the pre-2.72 scheduler defect before changing queue-delay or preferred-batch controls"
+        ],
+        "non_claims": [
+          "Upgrading to Triton 2.72.0 does not guarantee higher steady-state throughput or lower latency.",
+          "The release note does not prove that a target service encountered the waiting-consumer-count defect."
+        ],
+        "proposition": "Triton 2.72.0 fixes a dynamic-batcher starvation defect in which waiting_consumer_count could drift and stop scheduler dispatch even while requests remained queued."
+      },
+      "counter_signals": [
+        "the target already runs Triton 2.72.0 or later, or interval counters and traces show normal dispatch while requests are queued"
+      ],
+      "distinguishing_question": "Does the affected service run an earlier Triton version and show queued requests without corresponding scheduler dispatch?",
+      "id": "contract.triton.dynamic-batcher-starvation-2.72",
+      "identity_constraints": {
+        "claim_layers": [
+          "diagnostic",
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "tritonserver": [
+            "2.72.0"
+          ]
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target Triton version or scheduler implementation differs from the cited 2.72.0 release"
+      ],
+      "match_terms": [
+        "triton.dynamic-batcher-starvation-2.72",
+        "dynamic batcher starvation",
+        "waiting_consumer_count",
+        "queued requests no dispatch",
+        "scheduler stall"
+      ],
+      "mechanism": "Triton 2.72 dynamic-batcher starvation fix",
+      "mechanism_key": "triton.dynamic-batcher-starvation-2.72",
+      "priority": 0,
+      "required_evidence": [
+        "exact Triton server version and dynamic-batcher configuration",
+        "aligned request, queue, execution, achieved-batch, throughput, and tail-latency evidence under the target arrival process"
+      ],
+      "source_ids": [
+        "nvidia-triton-release-26-08"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether preserve_ordering behavior observed before 2.72 should be reproduced after the completion-slot reservation fix"
+        ],
+        "non_claims": [
+          "Enabling preserve_ordering does not guarantee unchanged throughput or latency.",
+          "The fix does not remove the need to validate response order under the target concurrency and decoupled-response behavior."
+        ],
+        "proposition": "Triton 2.72.0 restores preserve_ordering behavior by reserving a completion-queue slot when each request is enqueued."
+      },
+      "counter_signals": [
+        "preserve_ordering is disabled or response order is not part of the target service contract"
+      ],
+      "distinguishing_question": "Is preserve_ordering enabled, and does the target concurrency reproduce correct response order on Triton 2.72.0?",
+      "id": "contract.triton.preserve-ordering-2.72",
+      "identity_constraints": {
+        "claim_layers": [
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "tritonserver": [
+            "2.72.0"
+          ]
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target Triton version or response-scheduling path differs from the cited 2.72.0 release"
+      ],
+      "match_terms": [
+        "triton.preserve-ordering-2.72",
+        "preserve_ordering",
+        "completion queue slot",
+        "response ordering",
+        "dynamic batching order"
+      ],
+      "mechanism": "Triton 2.72 preserve-ordering completion-slot fix",
+      "mechanism_key": "triton.preserve-ordering-2.72",
+      "priority": 0,
+      "required_evidence": [
+        "exact Triton server version and preserve_ordering configuration",
+        "target-concurrency response-order correctness plus throughput and latency guardrails"
+      ],
+      "source_ids": [
+        "nvidia-triton-release-26-08"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether a non-batching TensorRT model can use Triton CUDA Graph execution without relying on the pre-2.72 broken path"
+        ],
+        "non_claims": [
+          "The fix does not prove that CUDA Graph capture succeeds for a target engine or shape set.",
+          "CUDA Graph support does not imply a measurable full-service benefit unless launch or enqueue overhead is exposed on the target critical path."
+        ],
+        "proposition": "Triton 2.72.0 fixes TensorRT-backend CUDA Graph execution for non-batching models, including models configured with max_batch_size equal to zero."
+      },
+      "counter_signals": [
+        "the model uses dynamic batching, CUDA Graphs are disabled, capture falls back, or launch and enqueue overhead are not material"
+      ],
+      "distinguishing_question": "Does a max_batch_size-zero TensorRT model capture and replay the intended graph, and is launch or enqueue time exposed in the complete request path?",
+      "id": "contract.triton.tensorrt-nonbatch-cuda-graph-2.72",
+      "identity_constraints": {
+        "claim_layers": [
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "tritonserver": [
+            "2.72.0"
+          ]
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target Triton or TensorRT backend version differs from the cited 2.72.0 release"
+      ],
+      "match_terms": [
+        "triton.tensorrt-nonbatch-cuda-graph-2.72",
+        "TensorRT backend CUDA Graph",
+        "non-batching model",
+        "max_batch_size 0",
+        "CUDA Graph execution fix"
+      ],
+      "mechanism": "Triton 2.72 TensorRT non-batching CUDA Graph fix",
+      "mechanism_key": "triton.tensorrt-nonbatch-cuda-graph-2.72",
+      "priority": 0,
+      "required_evidence": [
+        "exact Triton server and TensorRT backend versions, model configuration, engine, shape, context, and buffer identities",
+        "capture and fallback coverage plus Target-aligned Nsys timeline and paired full-path measurement"
+      ],
+      "source_ids": [
+        "nvidia-triton-release-26-08"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether CUDA shared-memory client failures in a multithreaded 26.08 deployment should invalidate the model or backend rather than the client integration"
+        ],
+        "non_claims": [
+          "The known issue does not apply to every shared-memory path or every single-threaded client.",
+          "Avoiding the affected client API does not prove that another transport or memory path is faster."
+        ],
+        "proposition": "The Triton 26.08 release notes identify a CuPy CUDA 13 Device API issue and advise against using tritonclient cuda_shared_memory APIs in multithreaded environments."
+      },
+      "counter_signals": [
+        "the client is single-threaded, does not use tritonclient cuda_shared_memory APIs, or runs a stack outside the cited 26.08 identity"
+      ],
+      "distinguishing_question": "Does the failing client combine the 26.08 CUDA 13 stack, multiple threads, and tritonclient cuda_shared_memory APIs?",
+      "id": "contract.triton.cuda-shared-memory-cupy-multithread-26.08",
+      "identity_constraints": {
+        "claim_layers": [
+          "diagnostic",
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [
+          "13.4.1"
+        ],
+        "framework_versions": {
+          "tritonserver": [
+            "2.72.0"
+          ]
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the CUDA, CuPy, tritonclient, or Triton runtime identity differs from the 26.08 release stack"
+      ],
+      "match_terms": [
+        "triton.cuda-shared-memory-cupy-multithread-26.08",
+        "cuda_shared_memory",
+        "CuPy Device API",
+        "CUDA 13 multithread",
+        "Triton shared memory client"
+      ],
+      "mechanism": "Triton 26.08 multithreaded CUDA shared-memory client known issue",
+      "mechanism_key": "triton.cuda-shared-memory-cupy-multithread-26.08",
+      "priority": 0,
+      "required_evidence": [
+        "exact Triton, tritonclient, CuPy, and CUDA runtime identities",
+        "client thread model, invoked shared-memory API, and a bounded single-thread or non-shared-memory control"
+      ],
+      "source_ids": [
+        "nvidia-triton-release-26-08"
+      ],
+      "status": "source_reviewed"
+    },
+    {
+      "content_kind": "technical_contract",
+      "contract": {
+        "decision_impact": [
+          "whether unexpected device-to-host and host-to-device copies should be attributed to a Python core-binding response-memory interaction before optimizing model compute"
+        ],
+        "non_claims": [
+          "The known issue does not prove that every Python backend or binding request performs the extra copies.",
+          "Removing one response-memory specification does not establish semantic equivalence or a full-service speedup without measurement."
+        ],
+        "proposition": "In Triton 26.08, the Python core binding may perform an extra device-to-host and host-to-device copy when both the backend and frontend specify device response memory."
+      },
+      "counter_signals": [
+        "only one side specifies response memory, response buffers are host-resident by contract, or a correlated trace contains no extra transfer pair"
+      ],
+      "distinguishing_question": "Do both backend and frontend request device response memory, and does a correlated trace show the extra D2H/H2D pair on the target path?",
+      "id": "contract.triton.python-binding-device-response-copy-26.08",
+      "identity_constraints": {
+        "claim_layers": [
+          "diagnostic",
+          "workload",
+          "serving"
+        ],
+        "cuda_runtime_version": [],
+        "framework_versions": {
+          "tritonserver": [
+            "2.72.0"
+          ]
+        },
+        "gpu_architecture": []
+      },
+      "invalidators": [
+        "the target Python core binding or Triton version differs from the cited 26.08 release"
+      ],
+      "match_terms": [
+        "triton.python-binding-device-response-copy-26.08",
+        "Python core binding",
+        "device response memory",
+        "extra D2H H2D",
+        "response buffer copy"
+      ],
+      "mechanism": "Triton 26.08 Python binding device-response copy known issue",
+      "mechanism_key": "triton.python-binding-device-response-copy-26.08",
+      "priority": 0,
+      "required_evidence": [
+        "exact Triton and Python core-binding identities plus backend and frontend response-memory configuration",
+        "correlated CPU and GPU transfer timeline and paired full-path measurement"
+      ],
+      "source_ids": [
+        "nvidia-triton-release-26-08"
       ],
       "status": "source_reviewed"
     },

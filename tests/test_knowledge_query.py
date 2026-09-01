@@ -279,6 +279,40 @@ class KnowledgeQueryTests(unittest.TestCase):
         self.assertEqual(applicability["relation"], "incompatible")
         self.assertEqual(applicability["mismatches"][0]["field"], "claim_layer")
 
+    def test_triton_272_release_contracts_are_exactly_version_bound(self):
+        mechanisms = [
+            "triton.dynamic-batcher-starvation-2.72",
+            "triton.preserve-ordering-2.72",
+            "triton.tensorrt-nonbatch-cuda-graph-2.72",
+            "triton.cuda-shared-memory-cupy-multithread-26.08",
+            "triton.python-binding-device-response-copy-26.08",
+        ]
+        for mechanism_key in mechanisms:
+            with self.subTest(mechanism_key=mechanism_key):
+                current = load_module().query(
+                    request(
+                        phenomena=[],
+                        mechanism_keys=[mechanism_key],
+                        claim_layer="serving",
+                        cuda_version="13.4.1",
+                        frameworks={"tritonserver": "2.72.0"},
+                    )
+                )
+                older = load_module().query(
+                    request(
+                        phenomena=[],
+                        mechanism_keys=[mechanism_key],
+                        claim_layer="serving",
+                        cuda_version="13.4.1",
+                        frameworks={"tritonserver": "2.71.0"},
+                    )
+                )
+                self.assertEqual(current["matches"][0]["applicability"]["relation"], "compatible")
+                self.assertEqual(older["matches"][0]["applicability"]["relation"], "related")
+                source = current["matches"][0]["sources"][0]
+                self.assertEqual(source["id"], "nvidia-triton-release-26-08")
+                self.assertEqual(source["version"], "Triton 2.72.0 / NGC 26.08")
+
     def test_documented_version_families_match_patch_releases(self):
         cutlass = load_module().query(request(
             phenomena=[], mechanism_keys=["cutlass.blackwell-architecture-boundary"],
