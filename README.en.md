@@ -51,7 +51,7 @@ If these inputs are incomplete, ChatGPT reports the gaps and helps establish the
 In an environment that supports Skills CLI, install the current release directly:
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.0/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 ChatGPT can also perform the installation, so users do not need to run the repository's Python scripts manually. Send:
@@ -160,12 +160,13 @@ A change is ready to merge only when correctness passes, the user's real target 
 
 ## Release notes
 
-### V1.5.1
+### V1.6.0
 
-- Treats ROI as a derived evidence claim. Candidate ranking may use only timing, coverage, and cost evidence that applies to the actual production replacement boundary, or a justified conservative upper bound.
-- Keeps mismatched eager, lowered, CUDA Graph, dispatch, fallback, or overlap evidence diagnostic-only. A Candidate may claim savings only for the components it actually changes.
-- Requires prediction-error reconciliation when a formal workload result materially contradicts the preregistered opportunity estimate; the system model must be corrected before selecting the next Candidate.
-- Adds no production module, public operation, or automatic decision flow.
+- Experiments now retain a structured `opportunity_claim` for the Candidate's actual production replacement boundary, execution form, component scope, and endpoint ceiling. Explicitly inapplicable, duplicate, or sub-threshold claims are rejected before workload execution.
+- Evaluator inputs and Experiment records move to V3 without a compatibility entry point for the previous protocol.
+- Before implementing a non-trivial kernel, communication primitive, or framework adapter, ChatGPT performs a bounded upstream capability check and defaults to reuse, a minimal backport, or a narrow adapter when equivalent work exists.
+- Primary-source contracts for CUDA, Triton, frameworks, and profilers are expanded and refreshed. Project feedback now locates the first broken decision before changing knowledge, methodology, evidence handling, or deterministic tools.
+- This release makes no general GPU performance claim and adds no automatic orchestration or direction selection.
 
 ### V1.5.0
 

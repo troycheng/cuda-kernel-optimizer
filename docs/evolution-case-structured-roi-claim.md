@@ -130,5 +130,10 @@ external probe cost.
 
 ## Release Decision
 
-No release decision is recorded. Merge, release, installation and remote
-publication remain maintainer actions.
+The maintainer authorized publication in `v1.6.0` on 2026-09-04. The accepted
+scope is the structured Experiment claim, explicit consistency checks, recorded
+arithmetic, and pre-workload rejection described above. The release does not
+claim that model-authored relationships are independently true or that GPU
+optimization quality improved in general. The release carriers are the
+[GitHub v1.6.0 release](https://github.com/troycheng/cuda-kernel-optimizer/releases/tag/v1.6.0)
+and the internal `v1.6.0` tag.

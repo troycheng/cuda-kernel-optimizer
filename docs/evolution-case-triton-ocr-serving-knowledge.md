@@ -223,5 +223,8 @@ No private material was uploaded, evaluated, or used as public proof.
 
 ## Release Decision
 
-Pending human maintainer decision. An Evaluation Result will not publish,
-release, push, or otherwise admit a broader claim by itself.
+The maintainer authorized publication in `v1.6.0` on 2026-09-04. The accepted
+scope is limited to the source-reviewed contracts and query behavior established
+above; the release makes no OCR correctness, compatibility, or GPU performance
+claim. The release carriers are the [GitHub v1.6.0 release](https://github.com/troycheng/cuda-kernel-optimizer/releases/tag/v1.6.0)
+and the internal `v1.6.0` tag.
