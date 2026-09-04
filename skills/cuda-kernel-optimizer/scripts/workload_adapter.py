@@ -818,7 +818,7 @@ def _profile_experiment(
     if (
         experiment.get("record_type") != "experiment"
         or experiment.get("format_version")
-        != "cuda-kernel-optimizer/experiment-v2"
+        != "cuda-kernel-optimizer/experiment-v3"
         or experiment.get("id") != experiment_id
         or experiment.get("target_ref") != target_ref
         or experiment.get("baseline_ref") != baseline_ref
@@ -1362,7 +1362,7 @@ def resolve_analysis_artifact(*, artifact_root, target_ref, artifact_ref) -> dic
         if (
             experiment.get("record_type") != "experiment"
             or experiment.get("format_version")
-            != "cuda-kernel-optimizer/experiment-v2"
+            != "cuda-kernel-optimizer/experiment-v3"
             or experiment.get("id") != experiment_ref["id"]
             or experiment.get("target_ref") != normalized_target_ref
             or experiment.get("candidate") != matches[0]

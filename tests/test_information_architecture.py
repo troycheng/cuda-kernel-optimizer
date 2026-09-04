@@ -280,7 +280,7 @@ class InformationArchitectureTests(unittest.TestCase):
         )
         for marker in (
             "cuda-kernel-optimizer/readiness-input-v2",
-            "cuda-kernel-optimizer/evaluator-input-v2",
+            "cuda-kernel-optimizer/evaluator-input-v3",
             "cuda-kernel-optimizer/ncu-input-v1",
             "cuda-kernel-optimizer/nsys-input-v1",
             "cuda-kernel-optimizer/pytorch-input-v1",

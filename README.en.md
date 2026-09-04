@@ -108,7 +108,7 @@ flowchart TD
     decision -->|"Low value or no new direction"| stop["Stop with a reason"]
 ```
 
-The removable-time ceiling is the maximum time a cost could affect if eliminated completely; it is not promised gain. ROI inputs must measure the production boundary the Candidate actually replaces or provide a justified conservative upper bound. Eager, lowered, CUDA Graph, dispatch, and fallback timings are not interchangeable merely because their mathematics match. The estimate must also include only the components the Candidate changes and their critical-path exposure. ChatGPT then considers whether the hypothesis is likely to hold, implementation time, GPU cost, validation difficulty, and user authorization before deciding whether another piece of evidence is worth obtaining.
+The removable-time ceiling is the maximum time a cost could affect if eliminated completely; it is not promised gain. ROI inputs must measure the production boundary the Candidate actually replaces or provide a justified conservative upper bound. Eager, lowered, CUDA Graph, dispatch, and fallback timings are not interchangeable merely because their mathematics match. The estimate must also include only the components the Candidate changes and their critical-path exposure. Experiment creation freezes these inputs in a structured `opportunity_claim`; an explicit execution-form mismatch or an end-to-end ceiling below the Target threshold prevents later workload execution. ChatGPT then considers whether the hypothesis is likely to hold, implementation time, GPU cost, validation difficulty, and user authorization before deciding whether another piece of evidence is worth obtaining.
 
 ### Candidate validation
 

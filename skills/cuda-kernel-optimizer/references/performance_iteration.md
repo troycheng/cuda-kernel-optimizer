@@ -50,7 +50,7 @@ phase/关键路径匹配、实现风险和取得结论的成本。不要因为�
 request drain；不能仅因调用次数少或总耗时占比低而否定长尾收益。
 
 再完成源码静态审查或独立小测试；已经证伪时不创建候选。调用
-`workload_evaluate.py experiment` 前，至少说明：
+`workload_evaluate.py experiment` 前，至少说明，并将 opportunity claim 写入同名结构化字段：
 
 - 机制与预期影响；
 - claim layer；
