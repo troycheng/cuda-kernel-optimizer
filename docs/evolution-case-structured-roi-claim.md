@@ -101,3 +101,32 @@ created. It cannot prove that a human- or model-authored evidence relationship
 is semantically true, that a hash names an available artifact, that an external
 probe stayed within a declared cost, or that the change improves GPU
 optimization quality in general.
+
+## Evaluation Result
+
+The definition was frozen in commit
+`27a23aab6827cd11071d36d8e2a591c6f37ec4ab`. Evaluation ran once on macOS
+26.6.2 with Python 3.9.6.
+
+- The five focused tests passed in 2.487 seconds. They observed the expected
+  0.677% full-removal ceiling, 0.753-microsecond required candidate time and
+  0.135% measured-prototype ceiling, and produced all declared accept or reject
+  outcomes.
+- The full unit suite passed 262 tests and skipped two in 43.867 seconds.
+- Python compilation, installation self-check, skill quick validation and
+  `git diff --check` all returned code 0.
+- Self-check ran no GPU or network checks. No trial was retried, interrupted or
+  left unrun.
+- Production Python decreased from 14,665 to 14,660 lines. The public evaluator
+  operation set remained unchanged; the breaking Experiment request and record
+  change is identified as V3 rather than silently changing V2.
+
+The result supports only the claim ceiling defined above. In particular, the
+tool freezes model-authored evidence relationships and rejects explicit
+contradictions; it does not independently certify production semantics or
+external probe cost.
+
+## Release Decision
+
+No release decision is recorded. Merge, release, installation and remote
+publication remain maintainer actions.
