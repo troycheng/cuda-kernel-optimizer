@@ -28,12 +28,13 @@ really came from production.
 
 ### Public challenge view
 
-The public fixture covers five invariants:
+The public fixture covers six invariants:
 
 - the production numbers above are below a 0.5% Target threshold;
 - eager evidence cannot be labelled as the Inductor production boundary when
   its declared execution form says otherwise;
 - a W2-only Candidate cannot include a W1 or dense timing pool;
+- the same component cannot be counted twice under renamed pool IDs;
 - a justified conservative reference upper bound remains usable;
 - full-removal and measured-prototype bounds remain distinct.
 
@@ -60,10 +61,10 @@ This definition is frozen before the recorded evaluation result.
 
 ### Project revision and intended axis
 
-- Project revision: `97470da3e97ac34f1e54df0a6f46f8b2b3eaa203`
-- Production evaluator digest: `5b654f23b599c49e4e763dc42cbb1fe4020f4dfae18f75c4b36c143726d29926`
+- Project revision: `22cfcd4e8deb4337d78ee60b2214d614704fce85`
+- Production evaluator digest: `1d4c4496b381a404865941d7be71e1659450795c4ba2820a6226aba7f9119bc7`
 - Workload adapter digest: `fbe333680ab5615b243246ffbd8a5726dbfcb69b2c3cb09defc946d1f43cf475`
-- Focused test digest: `f8388258e8afde776ca2053935f694f0e241a177ac2e544603350949ca0ac5c7`
+- Focused test digest: `77a709b6010e2b139eef5ff4f5a163f02b62945de2eae689d4d5bfa3c9ecf622`
 - Shared fixture digest: `6d8655a6dc4cf5b42d30c7f4a56e40d183fa678d60a6dbc18e6d2157e4b6ca62`
 
 The only intended behavior change is the required structured
@@ -74,18 +75,19 @@ used by the evaluator remains.
 
 ### Workload, correctness and resources
 
-Run the five tests in `tests.test_opportunity_claim` once, followed by the full
+Run the six tests in `tests.test_opportunity_claim` once, followed by the full
 unit suite, Python compile check, installation self-check, skill quick
 validation and `git diff --check`. The fixture is deterministic and CPU-only.
 No GPU, network, service, profiler or external model is authorized or needed.
 
-The five focused outcomes are valid only when they respectively:
+The six focused outcomes are valid only when they respectively:
 
 - reject the measured 0.135% opportunity under a 0.5% Target;
 - calculate approximately 0.677% for full removal, 0.753 microseconds for the
   required candidate time, and 0.135% for the measured prototype;
 - reject a declared eager/Inductor execution-form mismatch;
 - reject a timing pool outside Candidate component scope;
+- reject duplicate time contribution for one component even when pool IDs differ;
 - accept a justified conservative reference upper bound.
 
 Any exception outside the expected rejection envelope, changed evaluator,
