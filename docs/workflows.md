@@ -8,7 +8,7 @@ The project has one model-led workflow. ChatGPT decides what to investigate and 
 |---|---|---|
 | Target | Frozen objective, original Variant, workload, correctness, driver, environment, and validity requirements | readiness `check` |
 | Variant | Immutable original or Candidate content | readiness or Experiment creation |
-| Experiment | One candidate mechanism, mutation, falsifier, comparison relationship, invariant gates, measurement lifecycle, and acceptance boundary | workload `experiment` |
+| Experiment | One candidate mechanism, structured production ROI claim, mutation, falsifier, comparison relationship, invariant gates, measurement lifecycle, and acceptance boundary | workload `experiment` |
 | Invocation | One operation request, event stream, result, timeout, and cleanup outcome | the invoked tool |
 | Champion Selection | Explicit record that a valid formal result became the current best Variant | champion `select` |
 | Handoff | User-facing conclusion, retained changes, rejected directions, evidence gaps, and terminal reason | ChatGPT when pausing or finishing |
@@ -20,7 +20,7 @@ These machine records describe facts and explicit selections. The Handoff summar
 1. `check`: freeze the Target and exercise the original correctness smoke.
 2. `baseline`: establish original performance before any candidate exists.
 3. ChatGPT analyzes source and observations, then chooses the lowest-cost evidence that can distinguish the leading hypotheses.
-4. `experiment`: freeze one Candidate and its measurement design.
+4. `experiment`: freeze one Candidate, its production replacement boundary, applicable ROI inputs and measurement design. An explicit execution-form mismatch or an end-to-end ceiling below the Target threshold rejects the request before workload execution.
 5. `screen`: execute the declared short evidence plan. Each Driver V2 call records correctness and performance together; performance is interpreted only if the relevant gates pass. Isolated comparison starts each subject separately, while a declared same-process comparison runs both subjects in one driver call. Independent low-cost falsifiers are completed before the Experiment is created; a conclusive failure blocks later expensive work.
 6. A specific profiler `analyze` or `collect`: only when it answers an explicit unresolved question.
 7. `target`: perform formal paired comparison with original or the current Champion.

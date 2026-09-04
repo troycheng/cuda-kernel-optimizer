@@ -171,6 +171,33 @@ baseline 对每个 case 只调用 driver 一次；driver 必须在一次 evidenc
   "promote_if": [{"kind": "formal_target_passed"}],
   "change_scope": ["src/kernel.py"],
   "max_risk": "low",
+  "opportunity_claim": {
+    "boundary": {
+      "component": "qk-preprocess", "phase": "decode", "case_id": "main",
+      "shape": "TP-local production shape", "lowering": "inductor",
+      "graph": "full-cuda-graph", "dispatch": "production-path",
+      "fallback": "none", "overlap": "exposed-critical-path"
+    },
+    "candidate_components": ["qk-preprocess"],
+    "primary_model": "inverse_time",
+    "denominator_us": 4314.0,
+    "denominator_evidence": {"source": "frozen production replay", "sha256": "<64 hex>"},
+    "pools": [{
+      "pool_id": "qk-preprocess.decode", "component_id": "qk-preprocess", "parent_pool_id": null,
+      "reference_time_us": 2.899, "candidate_time_us": 2.316,
+      "occurrences": 10, "exposure_upper_bound": 1.0,
+      "reference_evidence": {
+        "relationship": "same_boundary",
+        "execution_form": {"component": "qk-preprocess", "phase": "decode", "case_id": "main", "shape": "TP-local production shape", "lowering": "inductor", "graph": "full-cuda-graph", "dispatch": "production-path", "fallback": "none", "overlap": "exposed-critical-path"},
+        "source": "production reference timing", "sha256": "<64 hex>", "reason": "exact production path"
+      },
+      "candidate_evidence": {
+        "relationship": "same_boundary",
+        "execution_form": {"component": "qk-preprocess", "phase": "decode", "case_id": "main", "shape": "TP-local production shape", "lowering": "inductor", "graph": "full-cuda-graph", "dispatch": "production-path", "fallback": "none", "overlap": "exposed-critical-path"},
+        "source": "bounded prototype timing", "sha256": "<64 hex>", "reason": "same lowering and graph path"
+      }
+    }]
+  },
   "comparison_contract": {
     "relationship": "implementation_equivalence",
     "additional_gates": [],
@@ -193,9 +220,20 @@ baseline 对每个 case 只调用 driver 一次；driver 必须在一次 evidenc
 候选判断或实验设计的事实或假设，每项包含 `statement`、`component`、`version`、`status`、
 `source` 和 `decision_effect`。一手资料中的命题使用 `primary_source_claim`，它仍是待 ChatGPT 结合版本和当前环境判断的来源主张，不是工具认证的事实；未核实内容使用 `unresolved_hypothesis`。
 
-`hypothesis` 同时概括当前 Candidate 的 opportunity claim：真实 production replacement boundary、
-实际 execution form、Candidate scope，以及只有适用于该 boundary 的输入才能支持的局部和端到端收益上限。
-具体观测与计算保留在候选说明和 Handoff，不扩展为新的协议对象；工具冻结主张但不判断 ROI 或下一步。
+`opportunity_claim` 把当前 Candidate 的 production replacement boundary、实际 execution form、
+Candidate scope、计入的时间池和完整 workload 分母冻结在 Experiment 中。`same_boundary` 的
+reference 或 candidate evidence 必须逐字段匹配 boundary；eager、lowering、graph、dispatch、fallback
+或 overlap 不同会在创建 Experiment 时被拒绝。`conservative_upper_bound` 只允许用于 reference，且必须
+说明为什么能够约束当前 boundary。父子时间池不能同时计入，时间池的 component 必须属于
+`candidate_components`。
+
+工具根据这些声明重算可移除时间和端到端上限；低于 Target `minimum_effect` 时不创建 Experiment。
+它验证显式矛盾、范围、摘要格式和算术，不声称能从任意文本或手写 JSON 证明 production 语义。
+证据关系和 critical-path exposure 仍由 ChatGPT 根据原始 artifact 判断；原始 artifact 的来源与
+SHA-256 必须保留。没有 production-equivalent candidate timing 时可将 `candidate_time_us` 和
+`candidate_evidence` 同时设为 `null`，此时结果只是完全移除上限，不是预期收益。
+`primary_model` 只允许 `direct_time`（延迟随时间同向变化）或 `inverse_time`（吞吐随时间反向变化），
+并且必须与 Target direction 一致；其它 primary 不得套用这套时间贡献公式。
 
 `screen`、`target` 和 `final_audit` 使用同一比较请求骨架：
 

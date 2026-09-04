@@ -65,6 +65,7 @@ _EXPERIMENT_FIELDS = {
     "max_risk",
     "comparison_contract",
     "material_premises",
+    "opportunity_claim",
 }
 _INVOCATION_REF_FIELDS = {"invocation_id", "sha256"}
 _SOURCE_FIELDS = {"kind", "path"}
@@ -90,6 +91,11 @@ _PREMISE_FIELDS = {
     "source",
     "decision_effect",
 }
+_OPPORTUNITY_FIELDS = {"boundary", "candidate_components", "primary_model", "denominator_us", "denominator_evidence", "pools"}
+_BOUNDARY_FIELDS = {"component", "phase", "case_id", "shape", "lowering", "graph", "dispatch", "fallback", "overlap"}
+_EVIDENCE_FIELDS = {"relationship", "execution_form", "source", "sha256", "reason"}
+_DENOMINATOR_EVIDENCE_FIELDS = {"source", "sha256"}
+_POOL_FIELDS = {"pool_id", "component_id", "parent_pool_id", "reference_time_us", "candidate_time_us", "occurrences", "exposure_upper_bound", "reference_evidence", "candidate_evidence"}
 _SCREEN_REQUIRED = {
     "format_version",
     "operation",
@@ -995,6 +1001,170 @@ def _current_pointer_digest(root: Path) -> str | None:
         ) from error
 
 
+def _claim_boundary(value, label: str) -> dict:
+    value = _closed(value, _BOUNDARY_FIELDS, set(), label)
+    return {
+        field: _text(value[field], f"{label}.{field}", maximum=256)
+        for field in sorted(_BOUNDARY_FIELDS)
+    }
+
+
+def _claim_evidence(value, label: str, boundary: dict, *, candidate=False) -> dict:
+    value = _closed(value, _EVIDENCE_FIELDS, set(), label)
+    relationship = value["relationship"]
+    if relationship not in {"same_boundary", "conservative_upper_bound"} or (
+        candidate and relationship != "same_boundary"
+    ):
+        raise EvaluatorError(
+            "opportunity_evidence_inapplicable",
+            f"{label} cannot support production ROI",
+        )
+    execution_form = _claim_boundary(
+        value["execution_form"], f"{label}.execution_form"
+    )
+    reason = _text(value["reason"], f"{label}.reason")
+    if relationship == "same_boundary" and execution_form != boundary:
+        raise EvaluatorError(
+            "opportunity_execution_mismatch",
+            f"{label} does not match the production boundary",
+        )
+    if relationship == "conservative_upper_bound" and not reason.strip():
+        raise EvaluatorError(
+            "opportunity_evidence_inapplicable",
+            f"{label} has no conservative-bound rationale",
+        )
+    return {
+        "relationship": relationship,
+        "execution_form": execution_form,
+        "source": _text(value["source"], f"{label}.source"),
+        "sha256": _sha256(value["sha256"], f"{label}.sha256"),
+        "reason": reason,
+    }
+
+
+def _opportunity_claim(value, target: dict) -> dict:
+    value = _closed(value, _OPPORTUNITY_FIELDS, set(), "opportunity_claim")
+    boundary = _claim_boundary(value["boundary"], "opportunity_claim.boundary")
+    if boundary["case_id"] not in target["test_suite"]["case_ids"]:
+        raise EvaluatorError("invalid_evaluator_input", "opportunity case is outside Target")
+    components = _string_list(
+        value["candidate_components"], "opportunity_claim.candidate_components"
+    )
+    if not components:
+        raise EvaluatorError("invalid_evaluator_input", "candidate_components must not be empty")
+    primary_model = value["primary_model"]
+    expected_direction = {"direct_time": "lower", "inverse_time": "higher"}.get(primary_model)
+    if expected_direction != target["primary_metric"]["direction"]:
+        raise EvaluatorError(
+            "opportunity_model_mismatch",
+            "opportunity primary_model does not match Target direction",
+        )
+    denominator = _finite(
+        value["denominator_us"], "opportunity_claim.denominator_us", positive=True
+    )
+    denominator_evidence = _closed(
+        value["denominator_evidence"],
+        _DENOMINATOR_EVIDENCE_FIELDS,
+        set(),
+        "opportunity_claim.denominator_evidence",
+    )
+    denominator_evidence = {
+        "source": _text(
+            denominator_evidence["source"],
+            "opportunity_claim.denominator_evidence.source",
+        ),
+        "sha256": _sha256(
+            denominator_evidence["sha256"],
+            "opportunity_claim.denominator_evidence.sha256",
+        ),
+    }
+    if type(value["pools"]) is not list or not value["pools"]:
+        raise EvaluatorError("invalid_evaluator_input", "opportunity pools must not be empty")
+    pools, pool_ids = [], set()
+    for index, item in enumerate(value["pools"]):
+        label = f"opportunity_claim.pools[{index}]"
+        item = _closed(item, _POOL_FIELDS, set(), label)
+        pool_id = _text(item["pool_id"], f"{label}.pool_id", maximum=256)
+        component_id = _text(item["component_id"], f"{label}.component_id", maximum=256)
+        parent = item["parent_pool_id"]
+        if parent is not None:
+            parent = _text(parent, f"{label}.parent_pool_id", maximum=256)
+        if pool_id in pool_ids or component_id not in components:
+            raise EvaluatorError(
+                "opportunity_scope_mismatch",
+                "opportunity pool is duplicated or outside Candidate scope",
+            )
+        pool_ids.add(pool_id)
+        candidate_time = item["candidate_time_us"]
+        candidate_evidence = item["candidate_evidence"]
+        if (candidate_time is None) != (candidate_evidence is None):
+            raise EvaluatorError("invalid_evaluator_input", "candidate timing and evidence must appear together")
+        if candidate_time is not None:
+            candidate_time = _finite(candidate_time, f"{label}.candidate_time_us")
+            if candidate_time < 0:
+                raise EvaluatorError("invalid_evaluator_input", "candidate time must be non-negative")
+            candidate_evidence = _claim_evidence(
+                candidate_evidence,
+                f"{label}.candidate_evidence",
+                boundary,
+                candidate=True,
+            )
+        exposure = _finite(item["exposure_upper_bound"], f"{label}.exposure_upper_bound")
+        if not 0 < exposure <= 1:
+            raise EvaluatorError("invalid_evaluator_input", "exposure_upper_bound must be in (0, 1]")
+        pools.append({
+            "pool_id": pool_id, "component_id": component_id, "parent_pool_id": parent,
+            "reference_time_us": _finite(
+                item["reference_time_us"], f"{label}.reference_time_us", positive=True
+            ),
+            "candidate_time_us": candidate_time,
+            "occurrences": _positive_integer(item["occurrences"], f"{label}.occurrences"),
+            "exposure_upper_bound": exposure,
+            "reference_evidence": _claim_evidence(
+                item["reference_evidence"], f"{label}.reference_evidence", boundary
+            ),
+            "candidate_evidence": candidate_evidence,
+        })
+    if any(pool["parent_pool_id"] in pool_ids for pool in pools):
+        raise EvaluatorError("opportunity_pool_overlap", "parent and child pools cannot both enter ROI")
+    measured = [pool["candidate_time_us"] is not None for pool in pools]
+    if any(measured) and not all(measured):
+        raise EvaluatorError("invalid_evaluator_input", "candidate timing must cover every opportunity pool")
+    candidate_measured = all(measured)
+    full_removal = sum(
+        pool["reference_time_us"] * pool["occurrences"] * pool["exposure_upper_bound"]
+        for pool in pools
+    )
+    saved = sum(
+        (pool["reference_time_us"] if not candidate_measured else max(pool["reference_time_us"] - pool["candidate_time_us"], 0.0))
+        * pool["occurrences"] * pool["exposure_upper_bound"]
+        for pool in pools
+    )
+    if full_removal >= denominator:
+        raise EvaluatorError("invalid_evaluator_input", "opportunity time must be below the workload denominator")
+    minimum = target["minimum_effect"]
+    if minimum["unit"] != "percent":
+        raise EvaluatorError("opportunity_threshold_unsupported", "opportunity claim requires a percentage threshold")
+    higher = primary_model == "inverse_time"
+    ceiling = saved / (denominator - saved) * 100.0 if higher else saved / denominator * 100.0
+    required = denominator * (minimum["value"] / 100.0) / (1.0 + minimum["value"] / 100.0) if higher else denominator * minimum["value"] / 100.0
+    if ceiling < minimum["value"]:
+        raise EvaluatorError("opportunity_below_minimum_effect", "Candidate production ROI is below the Target threshold")
+    bound = {
+        "candidate_measured": candidate_measured, "full_removal_us": full_removal,
+        "removable_time_us": saved, "e2e_ceiling_percent": ceiling,
+        "required_total_saving_us": required,
+    }
+    if len(pools) == 1:
+        pool = pools[0]
+        bound["required_candidate_time_us"] = max(pool["reference_time_us"] - required / (pool["occurrences"] * pool["exposure_upper_bound"]), 0.0)
+    return {
+        "boundary": boundary, "candidate_components": components, "primary_model": primary_model, "denominator_us": denominator,
+        "denominator_evidence": denominator_evidence, "pools": pools,
+        "bound": bound,
+    }
+
+
 def create_experiment(value) -> dict:
     request = _closed(
         value,
@@ -1117,6 +1287,7 @@ def create_experiment(value) -> dict:
         target=target,
     )
     material_premises = _material_premises(request["material_premises"])
+    opportunity_claim = _opportunity_claim(request["opportunity_claim"], target)
     reference_variant, reference_selection_ref = _current_reference(root, target)
 
     staging_parent = root / ".staging"
@@ -1200,6 +1371,7 @@ def create_experiment(value) -> dict:
             "max_risk": request["max_risk"],
             "comparison_contract": comparison_contract,
             "material_premises": material_premises,
+            "opportunity_claim": opportunity_claim,
         }
         experiment_id = "exp-" + hashlib.sha256(_canonical_bytes(core)).hexdigest()
         record = {
