@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 
-INPUT_VERSION = "cuda-kernel-optimizer/evaluator-input-v2"
+INPUT_VERSION = "cuda-kernel-optimizer/evaluator-input-v3"
 RESULT_VERSION = "cuda-kernel-optimizer/evaluator-result-v2"
 TOOL_IDENTITY_VERSION = "cuda-kernel-optimizer/evaluator-tool-v2"
 
@@ -403,6 +403,7 @@ def _load_experiment(root: Path, reference, target_ref: dict) -> dict:
     if (
         type(experiment) is not dict
         or experiment.get("record_type") != "experiment"
+        or experiment.get("format_version") != "cuda-kernel-optimizer/experiment-v3"
         or experiment.get("id") != experiment_id
         or experiment.get("target_ref") != target_ref
     ):
@@ -1376,7 +1377,7 @@ def create_experiment(value) -> dict:
         experiment_id = "exp-" + hashlib.sha256(_canonical_bytes(core)).hexdigest()
         record = {
             "record_type": "experiment",
-            "format_version": "cuda-kernel-optimizer/experiment-v2",
+            "format_version": "cuda-kernel-optimizer/experiment-v3",
             "id": experiment_id,
             **core,
         }

@@ -252,7 +252,7 @@ class V14Project:
 
     def baseline_input(self) -> dict:
         return {
-            "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
+            "format_version": "cuda-kernel-optimizer/evaluator-input-v3",
             "operation": "baseline",
             "artifact_root": str(self.artifact_root),
             "target_ref": self.target_ref(),
@@ -271,7 +271,7 @@ class V14Project:
 
     def experiment_input(self, baseline_ref: dict) -> dict:
         return {
-            "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
+            "format_version": "cuda-kernel-optimizer/evaluator-input-v3",
             "operation": "experiment",
             "artifact_root": str(self.artifact_root),
             "target_ref": self.target_ref(),
@@ -382,7 +382,7 @@ class V14Project:
 
     def screen_input(self, experiment_ref: dict) -> dict:
         return {
-            "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
+            "format_version": "cuda-kernel-optimizer/evaluator-input-v3",
             "operation": "screen",
             "artifact_root": str(self.artifact_root),
             "target_ref": self.target_ref(),

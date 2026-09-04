@@ -127,7 +127,7 @@ subject 和 `{"kind":"smoke","repetitions":2}`。driver 一次返回该 subject 
 
 ```json
 {
-  "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
+  "format_version": "cuda-kernel-optimizer/evaluator-input-v3",
   "operation": "baseline",
   "artifact_root": "/absolute/artifacts",
   "target_ref": {"id": "<target id>", "sha256": "<64 hex>"},
@@ -150,7 +150,7 @@ baseline 对每个 case 只调用 driver 一次；driver 必须在一次 evidenc
 
 ```json
 {
-  "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
+  "format_version": "cuda-kernel-optimizer/evaluator-input-v3",
   "operation": "experiment",
   "artifact_root": "/absolute/artifacts",
   "target_ref": {"id": "<target id>", "sha256": "<64 hex>"},
@@ -239,7 +239,7 @@ SHA-256 必须保留。没有 production-equivalent candidate timing 时可将 `
 
 ```json
 {
-  "format_version": "cuda-kernel-optimizer/evaluator-input-v2",
+  "format_version": "cuda-kernel-optimizer/evaluator-input-v3",
   "operation": "target",
   "artifact_root": "/absolute/artifacts",
   "target_ref": {"id": "<target id>", "sha256": "<64 hex>"},
