@@ -60,10 +60,11 @@ This definition is frozen before the recorded evaluation result.
 
 ### Project revision and intended axis
 
-- Project revision: `c6411bb33b2eb437ac14dae6e857ec5c40f6572d`
-- Production evaluator digest: `256469b542e02e9941c05190694ae57cdc4d6c39469d5c53cb0302f2569fdc19`
+- Project revision: `97470da3e97ac34f1e54df0a6f46f8b2b3eaa203`
+- Production evaluator digest: `5b654f23b599c49e4e763dc42cbb1fe4020f4dfae18f75c4b36c143726d29926`
+- Workload adapter digest: `fbe333680ab5615b243246ffbd8a5726dbfcb69b2c3cb09defc946d1f43cf475`
 - Focused test digest: `f8388258e8afde776ca2053935f694f0e241a177ac2e544603350949ca0ac5c7`
-- Shared fixture digest: `8778f4dcc8608d4d40516aeff18f55d3658af3790a35e7b660290ba2fe7885c3`
+- Shared fixture digest: `6d8655a6dc4cf5b42d30c7f4a56e40d183fa678d60a6dbc18e6d2157e4b6ca62`
 
 The only intended behavior change is the required structured
 `opportunity_claim` in Experiment creation. No public operation, runner,
@@ -100,31 +101,3 @@ created. It cannot prove that a human- or model-authored evidence relationship
 is semantically true, that a hash names an available artifact, that an external
 probe stayed within a declared cost, or that the change improves GPU
 optimization quality in general.
-
-## Evaluation Result
-
-The definition was frozen in commit
-`9bd8f3a76a9db66963e9943b4a47127801554e74`. Evaluation ran once on macOS
-26.6.2 with Python 3.9.6.
-
-- The five focused tests passed in 2.505 seconds. They observed the expected
-  0.677% full-removal ceiling, 0.753-microsecond required candidate time and
-  0.135% measured-prototype ceiling, and produced all four declared accept or
-  reject outcomes.
-- The full unit suite passed 262 tests and skipped two in 43.988 seconds.
-- Python compilation, installation self-check, skill quick validation and
-  `git diff --check` all returned code 0.
-- Self-check ran no GPU or network checks. No trial was retried, interrupted or
-  left unrun.
-- Production Python decreased from 14,665 to 14,659 lines. The public evaluator
-  operation set remained unchanged.
-
-The result supports only the claim ceiling defined above. In particular, the
-tool freezes model-authored evidence relationships and rejects explicit
-contradictions; it does not independently certify production semantics or
-external probe cost.
-
-## Release Decision
-
-No release decision is recorded. Merge, release, installation and remote
-publication remain maintainer actions.
