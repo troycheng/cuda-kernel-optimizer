@@ -51,7 +51,7 @@
 支持 Skills CLI 的环境可以直接安装当前正式版：
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.5.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.0/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 也可以让 ChatGPT 完成安装，用户不需要手工运行仓库内的 Python 脚本。直接发送：
@@ -162,12 +162,13 @@ artifacts/
 
 ## 版本说明
 
-### V1.5.1
+### V1.6.0
 
-- 将 ROI 明确为派生证据主张：只有适用于候选真实生产替换边界的耗时、覆盖率和成本，或有依据的保守上界，才能参与候选排序。
-- eager、编译后、CUDA Graph、dispatch、fallback 和 overlap 等执行形态不一致时，局部代理只作诊断；候选只计算自身实际改变的组件，不能继承其它组件的收益。
-- 预测收益与正式 workload 结果明显冲突时，先废止错误前提并重算系统机会，再选择下一候选。
-- 本版本未增加生产模块、公开 operation 或自动决策流程。
+- Experiment 使用结构化 `opportunity_claim` 保存候选真实替换的生产边界、执行形态、组件范围和端到端收益上限；明显不适用、重复计时或低于最低有效收益的主张会在启动 workload 前被拒绝。
+- evaluator 输入和 Experiment 记录升级为 V3，不为旧协议增加兼容入口。
+- 开发非平凡 kernel、通信 primitive 或框架适配前，先有界核验上游已有实现；已有能力默认复用、最小 backport 或窄适配。
+- 扩充并更新 CUDA、Triton、框架和 profiler 的一手资料契约；项目反馈先定位决策链上第一个断点，再决定修改知识、方法、证据还是工具。
+- 本版本不声称获得了通用 GPU 性能提升，也没有增加自动调度或方向选择。
 
 ### V1.5.0
 
