@@ -10,9 +10,11 @@ State what the user needed the project to accomplish, including the decision or 
 
 Provide only the information a clean evaluation may see. Do not include the historical candidate, answer, Champion, or handoff.
 
-## Audit provenance
+## Audit provenance and first broken decision
 
 Identify the public task, issue, commit, or synthetic reconstruction that revealed the project problem. A private statement may explain origin but cannot prove the change.
+
+Record the first decision that became unsupported or incorrect, the decisive facts available at that point, and the knowledge or evidence actually used. Identify the first broken link: missing knowledge, retrieval or routing, reasoning, measurement or evidence, deterministic tool behavior, or genuine ambiguity. Name the smallest existing artifact that could correct it. Keep this diagnosis out of the public challenge view used for clean evaluation.
 
 ## Environment and authorization
 

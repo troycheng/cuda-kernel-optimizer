@@ -64,6 +64,18 @@ class ProjectEvolutionTests(unittest.TestCase):
         self.assertNotIn("current_state", joined)
         self.assertNotIn("knowledge_weight", joined)
 
+    def test_case_snapshot_locates_the_first_broken_decision(self) -> None:
+        snapshot = (ROOT / ".github/evolution/case-snapshot.md").read_text("utf-8")
+        for marker in (
+            "first broken decision",
+            "facts available at that point",
+            "actually used",
+            "deterministic tool behavior",
+            "genuine ambiguity",
+            "smallest existing artifact",
+        ):
+            self.assertIn(marker, snapshot)
+
     def test_public_case_is_narrow_replayable_and_not_a_performance_claim(self) -> None:
         text = (ROOT / "docs/evolution-case-profiler-evidence-validation.md").read_text(
             "utf-8"
