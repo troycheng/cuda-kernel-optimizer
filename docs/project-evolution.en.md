@@ -33,6 +33,8 @@ These elements are evidence records, not another execution system. None of them 
 
 ## Contribution flow
 
+Start by locating the first broken link in the decision chain, not by deciding in advance to add knowledge, rules, or tooling. Record the decisive facts available before the incorrect decision, the knowledge or evidence actually used, and whether the correct conclusion was already derivable. Missing material is a knowledge gap; available material that was not retrieved is a routing problem; material that was used but led to the wrong conclusion is a reasoning problem. Invalid measurement, incorrect deterministic tool behavior, and genuine ambiguity remain separate cases. Record only the identities and summaries that affected the decision, not the complete context.
+
 ```text
 A real task reveals a project problem
   → a person decides whether to create a safe public case
