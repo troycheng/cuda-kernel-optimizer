@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import copy
+import importlib.util
 import tempfile
 import unittest
-import importlib.util
 from pathlib import Path
 
 from tests.v14_support import V14Project, decode_stderr, decode_stdout
@@ -67,6 +68,16 @@ class OpportunityClaimTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project, request = self._request(directory)
             request["opportunity_claim"]["candidate_components"] = ["w2"]
+            completed = project.run_tool("workload_evaluate.py", "experiment", request)
+            self.assertEqual(completed.returncode, 2)
+            self.assertEqual(decode_stderr(completed)["error_code"], "opportunity_scope_mismatch")
+
+    def test_component_time_cannot_be_counted_twice_under_renamed_pool_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project, request = self._request(directory)
+            duplicate = copy.deepcopy(request["opportunity_claim"]["pools"][0])
+            duplicate["pool_id"] = "renamed.duplicate.pool"
+            request["opportunity_claim"]["pools"].append(duplicate)
             completed = project.run_tool("workload_evaluate.py", "experiment", request)
             self.assertEqual(completed.returncode, 2)
             self.assertEqual(decode_stderr(completed)["error_code"], "opportunity_scope_mismatch")

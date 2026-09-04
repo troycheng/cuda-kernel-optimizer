@@ -1081,7 +1081,7 @@ def _opportunity_claim(value, target: dict) -> dict:
     }
     if type(value["pools"]) is not list or not value["pools"]:
         raise EvaluatorError("invalid_evaluator_input", "opportunity pools must not be empty")
-    pools, pool_ids = [], set()
+    pools, pool_ids, pool_components = [], set(), set()
     for index, item in enumerate(value["pools"]):
         label = f"opportunity_claim.pools[{index}]"
         item = _closed(item, _POOL_FIELDS, set(), label)
@@ -1090,12 +1090,17 @@ def _opportunity_claim(value, target: dict) -> dict:
         parent = item["parent_pool_id"]
         if parent is not None:
             parent = _text(parent, f"{label}.parent_pool_id", maximum=256)
-        if pool_id in pool_ids or component_id not in components:
+        if (
+            pool_id in pool_ids
+            or component_id in pool_components
+            or component_id not in components
+        ):
             raise EvaluatorError(
                 "opportunity_scope_mismatch",
                 "opportunity pool is duplicated or outside Candidate scope",
             )
         pool_ids.add(pool_id)
+        pool_components.add(component_id)
         candidate_time = item["candidate_time_us"]
         candidate_evidence = item["candidate_evidence"]
         if (candidate_time is None) != (candidate_evidence is None):
