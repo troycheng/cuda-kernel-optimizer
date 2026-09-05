@@ -5,7 +5,7 @@
 In an environment that supports Skills CLI, install the current release directly:
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.0/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 The user does not run repository scripts manually. Send this request in a ChatGPT coding session:

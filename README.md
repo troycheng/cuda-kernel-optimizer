@@ -7,9 +7,7 @@
 
 <p align="center"><strong>让 ChatGPT 用真实 workload、精度校验和可复核数据优化 GPU 性能</strong></p>
 
-<p align="center">
-  简体中文 · <a href="README.en.md">English</a>
-</p>
+<p align="center">简体中文 · <a href="README.en.md">English</a></p>
 
 ## 项目定位
 
@@ -51,7 +49,7 @@
 支持 Skills CLI 的环境可以直接安装当前正式版：
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.0/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 也可以让 ChatGPT 完成安装，用户不需要手工运行仓库内的 Python 脚本。直接发送：
@@ -162,6 +160,11 @@ artifacts/
 
 ## 版本说明
 
+### V1.6.1
+
+- 精简入口指令，按关键决策汇报，复用仍适用的研究与环境结论；保留原始基线、生产 ROI、精度和正式测量要求。
+- 修复同型号多 GPU 被模板拒绝的问题，设备 UUID 仍需唯一。执行协议和生产模块保持不变。
+
 ### V1.6.0
 
 - Experiment 使用结构化 `opportunity_claim` 保存候选真实替换的生产边界、执行形态、组件范围和端到端收益上限；明显不适用、重复计时或低于最低有效收益的主张会在启动 workload 前被拒绝。
@@ -187,10 +190,7 @@ artifacts/
 
 ### V1.4.1
 
-- 增加项目演进贡献流程，把真实使用中发现的问题整理为可复查的案例、评测结果和发布决定。
-- 提供案例快照、评测定义、评测结果和发布决定四份轻量模板；不会自动上传材料、接纳知识、提交代码或发布版本。
-- 公开首个 Profiler 证据对象校验回放案例，明确区分可确认的工具行为与未经证明的性能或通用性结论。
-- 补充贡献指南、Pull Request 检查项和文档测试。V1.4 运行时、安装包、知识库及优化决策方式保持不变。
+增加案例、评测与贡献流程，运行时和优化决策方式保持不变。
 
 ### V1.4.0
 

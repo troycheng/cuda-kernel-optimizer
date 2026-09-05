@@ -32,4 +32,4 @@ Host changes are never inferred from permission to optimize project code.
 
 The installed self-check verifies the final package surface, dependency graph, driver templates, offline knowledge closure, and runtime lock directory. It does not prove that the target GPU or workload is ready.
 
-For the exact installed protocol, see the [environment readiness reference](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.6.0/skills/cuda-kernel-optimizer/references/environment_readiness.md).
+For the exact installed protocol, see the [environment readiness reference](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.6.1/skills/cuda-kernel-optimizer/references/environment_readiness.md).

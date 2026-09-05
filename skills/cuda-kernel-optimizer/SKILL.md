@@ -1,79 +1,81 @@
 ---
 name: cuda-kernel-optimizer
-description: "Use when optimizing, tuning, diagnosing, or profiling CUDA, CUTLASS, Triton, PyTorch, vLLM, TensorRT-LLM, or another GPU workload; when assessing an NCU, Nsys, or PyTorch Profiler report; or when the test workload, correctness checks, measurement path, or target environment is incomplete."
+description: "Use when optimizing or diagnosing GPU workload performance with CUDA, CUTLASS, Triton, PyTorch, vLLM or TensorRT-LLM; interpreting NCU, Nsys or PyTorch Profiler evidence; or preparing the workload and correctness checks for such optimization. General coding, skill maintenance and conceptual GPU questions do not require the optimization workflow."
 ---
 
 # CUDA Kernel and Workload Optimizer
 
-ChatGPT 负责优化判断：识别瓶颈、提出候选、评估投入产出并决定下一步。随 skill 安装的工具只执行一次明确操作，完成检查、测量、解析或事实记录；工具不选择方向，不判断 ROI，也不生成下一步计划。
+ChatGPT 负责优化判断：识别瓶颈、提出候选、评估投入产出并决定下一步。工具执行明确请求，完成检查、测量、解析和事实记录；工具不选择方向，不判断 ROI，也不生成下一步计划。
 
-优化目标是用户的完整 workload，而不是孤立的 kernel 指标。kernel 测量只能支持 kernel 层结论；要得出 workload 或服务层结论，必须先取得用户提供的真实测试集和精度校验。不得自行编造、下载或替换测试 workload。
+围绕用户指定的目标优化。kernel 测量支持 kernel 层结论；workload 或服务层收益必须由用户的真实测试集、精度校验和成对测量支持。不得擅自编造、下载或替换测试 workload。
 
-当前 Target 的 primary 指标决定候选排序和任务是否完成。长尾或其它重要指标的局部收益可以在不违反约束时保留或显式纳入当前版本，但这是结果接纳规则，不是搜索优先级：它不能抬高一个低 primary ROI 候选的优先级，不能自动替换当前 Target 的 Champion，也不能把尚未实现的主目标报告为完成。
+## 工作与沟通
 
-## 每次行动前
+以一个能改变判断的工作步骤组织执行。同一已说明步骤中的编辑、构建和必要检查可以连续完成；在开始昂贵实验、改变方向或预计投入明显增加时，简要说明证据缺口、预期收益、成本和继续条件。已有授权内的常规操作直接推进，长任务及时报告实质进展。
 
-每次只推进一个能够改变当前判断的动作。除只读检查和 readiness 外，在修改代码、构建、启动 live GPU workload、运行 profiler 或外部研究前，先用不超过五行说明：当前要改变什么判断；已有证据与缺口；为什么这是最低成本的有效动作；什么结果会继续、停止或要求修正系统模型。不要连续启动多个昂贵动作后再统一解释。
-
-尚未量化 production gap，尚未确认当前 Candidate 的真实替换范围，证据不适用于该执行形态，收益上限低于 minimum effect，或测量分辨率不足以区分预期效果时，不得进入完整生产接入或正式性能测试；下一步只能补最便宜的必要观测、实现一个范围受限的 production-equivalent 原型，或者停止当前方向。创建 Experiment 时用结构化 `opportunity_claim` 冻结证据适用性、Candidate scope 和端到端上限；工具只校验显式矛盾与算术，语义判断仍由 ChatGPT 负责。发现社区已有等价能力时，回到复用或最小适配，不继续独立实现。
-
-一个动作返回后，先更新当前事实、收益上限和候选排序，再决定是否启动下一动作。预测与实测冲突时先完成 prediction-error reconciliation；不能用旧前提继续试下一个候选。可能支撑正式性能结论的 workload 比较使用 `workload_evaluate.py` 保存；绕过该路径的直接命令只作 readiness 或 diagnostic，不能晋升为正式结论。
+根据问题选择所需操作。已有报告可以直接分析，简单工具错误可以直接定位修复；完整性能优化才需要建立 Target 和测量链路。验证做到足以支持当前结论，检查通过且没有新疑点时继续交付。
 
 ## 按需读取
 
-只加载当前问题所需的脚本和 reference。
+只加载当前问题需要的资料。第一次使用或接口不明确时查看脚本 `--help` 和 `references/request_protocol.md`；已经确认的接口可直接复用。
 
 | 任务 | 脚本或资料 |
 |---|---|
-| 检查测试集、精度校验、driver、目标环境并冻结 Target | `scripts/readiness.py`；`references/environment_readiness.md` |
-| 建立 Experiment，执行 baseline、screen、target 或 final audit | `scripts/workload_evaluate.py`；`references/performance_iteration.md` |
-| 解析或采集 Nsight Compute 事实 | `scripts/profile_ncu.py`；`references/ncu_metrics_guide.md` |
-| 解析或采集 Nsight Systems 事实 | `scripts/profile_nsys.py` |
-| 解析或采集 PyTorch Profiler 事实 | `scripts/profile_pytorch.py` |
-| 分析冻结的编译产物或显式 binary | `scripts/compiler_evidence.py`；`scripts/sass_check.py` |
-| 查询内置离线知识 | `scripts/knowledge_query.py` |
-| 查看、选择或恢复当前最佳版本 | `scripts/champion.py` |
-| 判断服务测试是否可信 | `references/serving_evidence_protocol.md`；`references/nonstationary_serving_evidence.md` |
-| 查阅最新的一手资料或进行外部质证 | `references/research_augmentation.md` |
-| 构造各公开操作的封闭 JSON request | `references/request_protocol.md` |
+| 检查测试集、精度校验、driver、环境并冻结 Target | `scripts/readiness.py`；`references/environment_readiness.md` |
+| baseline、Experiment、screen、target 和 final audit | `scripts/workload_evaluate.py`；`references/performance_iteration.md` |
+| Nsight Compute | `scripts/profile_ncu.py`；`references/ncu_metrics_guide.md` |
+| Nsight Systems | `scripts/profile_nsys.py` |
+| PyTorch Profiler | `scripts/profile_pytorch.py` |
+| 编译产物和 SASS | `scripts/compiler_evidence.py`；`scripts/sass_check.py` |
+| 离线知识 | `scripts/knowledge_query.py` |
+| 选择或恢复最佳版本 | `scripts/champion.py` |
+| 服务采样和环境干扰 | `references/serving_evidence_protocol.md`；`references/nonstationary_serving_evidence.md` |
+| 上游复用、一手资料与外部 AI | `references/research_augmentation.md` |
 
-先用对应脚本的 `--help` 确认 operation 和命令行参数，再按 `references/request_protocol.md`
-构造封闭 JSON request。不要为确认输入格式而通读脚本源码。
+## 优化判断
 
-## 优化流程
+### 建立可比较的起点
 
-1. 冻结 Target：一个 primary、最低有效收益、不可退化 constraint/guardrail，以及测量分辨率的估计方法；在候选说明中另行预声明有业务价值的 secondary 及其门槛。同时明确允许修改的文件、风险边界、时间与 GPU 使用范围，以及宿主机是否只给建议。首次 live workload 前简要说明串行服务/GPU 生命周期、可并行只读工作、从比较生命周期推导的预计 live 调用数、当前完成点，以及首次适配成本与可避免重试；该说明不持久化。
-2. 执行 readiness。优化 Target 必须冻结原始版本、真实测试集、精度规则、command driver、性能目标、实际运行环境身份和统计要求；容器还要记录可确认的 base、overlay 和运行时组件身份，来源不完整时只把结论归属于最终冻结的 runtime。诊断 Target 可以只绑定已有报告，但不能假装具备 workload。多进程 driver 在首次 GPU workload 前先验证实际 launcher 和 rendezvous；单机 `torchrun` 在 hostname 与网络接口解析尚未被实测证明时，默认使用显式 loopback `--master-addr`、已确认空闲的 `--master-port` 和必要的 loopback interface，不使用 `--standalone`。name-resolution 或 rendezvous 失败不计入正式样本，不重复相同启动形式；清理并核实其准确 PID/PGID 后，将修正命令冻结进 driver。
-3. 修改代码前先审计 primary 及每个决策指标的实际计算口径：明确分子、分母、数据来源，以及是否由文本重分词、日志采样或其它重建过程得到；用冻结 workload 的恒等关系检查 driver 输出。口径与 Target 不一致且无法修正时，结果只能作 diagnostic，不能用于阈值判断。完成审计后，修改代码前先测原始业务基线，并用预先声明的 original 重复样本估计当前环境的测量分辨率。精度未通过时，不解释性能样本。
-4. 每次新 profiler 事实用于候选判断前，先核对 Target、Variant、case/request slice、并发、phase、coverage 和 claim layer，并定义当前 Candidate 真实的 production replacement boundary：被替换区域、实际形状，以及 compiler lowering、graph、dispatch、fallback 和 overlap 后真正执行的形态。ROI 是派生证据主张；每个 timing、cost 和 coverage 输入必须被归类为测量同一 boundary、为它提供有依据的保守上界，或只作 diagnostic。源码、environment 和数学语义相同但 execution form 不同仍不适用；只有前两类输入能参与当前候选的物理上限和端到端 Amdahl 上限。计算时只使用 Candidate 实际改变的组件、workload occurrence 和暴露在关键路径上的份额，并说明跨过 minimum effect 所需的局部 saving；缺项时只取得最低成本观测。随后完成系统级归因：说明主要 measured time 与未归因部分，比较可行的 subsystem 方向；coverage 已知时界定端到端收益上限，未知时明确标记。按“对 primary 的预期端到端收益、phase/关键路径匹配、coverage 可信度、可行性、风险和实验成本”排序候选。吞吐和均值可以用完整 workload 的时间贡献界定上限；p95、p99 要看受影响请求、关键路径和 phase，不能仅因调用次数少或总耗时占比低而否定。在新写非平凡 kernel、通信 primitive 或框架 backend/adapter 前，必须有界、定向核验当前上游源码、release 和已合并/在途工作，并区分底层 primitive、框架接入与目标 workload E2E 证据；该核验不能因存在更便宜的本地实验而跳过，也不自动触发异构 AI 或多方质证。已有可用的等价能力时，默认只做复用、最小 backport/适配和 E2E 证伪；只有没有等价实现，或现有实现存在经证据确认且无法小修解决的 production blocker，才扩大为独立实现。调试范围从适配扩大到 primitive 或通用接入时，重新核验后再继续。技术栈新颖或版本敏感、存在竞争性解释、下一候选昂贵或连续候选无收益时，按 `references/research_augmentation.md` 有界核验一手资料，只记录改变事实判断、候选排序或实验设计的研究增量；证据不适用时，只保留 diagnostic hypothesis。
-5. 创建 Experiment 前完成源码静态审查或独立的最低成本证伪，并预声明失败最多能否定当前实现、集成方式、代理结论还是整个机制；拒绝范围不能越过证据能够支持的范围。已经证伪、适用于 production replacement boundary 的 primary 收益上限低于 minimum effect，或预期效果低于正式测量分辨率且既不服务于预先声明的重要 secondary、也没有明确合并计划时，不执行昂贵候选。AOT/CUTLASS 模板工作在首次构建前冻结同一机制的有界配置、实验开关、回退方式和构建次数，先用一个实验产物筛选，不逐个 knob 重复完整构建。随后在 Experiment 中冻结双方关系、Target 之外的附加精度 gate、只作解释的 diagnostic、隔离或同进程测量生命周期，以及会影响判断的版本化外部前提。一次 driver 调用同时保存当前 subject 的正确性和性能证据；同进程比较必须在一次调用内返回两个 subject，不另行重复完整 workload。正确性、安全、dispatch 或环境失败只否定相应实现或结果；除非预先声明且实际取得了能够区分机制的证据，局部 proxy 或一次集成回退不能关闭整个机制。若 preregistered ROI 与 target 结果实质冲突，先废止或修正错误的 applicability、scope、coverage、exposure 或 cost 前提，形成 prediction-error reconciliation 并据此重排系统方向；不能先用调度或 cache 猜测维护旧 ROI，也不能在旧系统模型上切换下一候选。只有一个不同且最低成本的判别实验可能改变修正结论时才追加一次；profiler 不是固定阶段，只在能回答明确未解决问题时运行。进入正式 target 前无条件简短复核 replacement boundary、execution form、Candidate scope、收益上限、测量分辨率和 ROI；新事实则重新执行第 4 步。
-6. 本步只判断已经测出的结果是否值得保留，不改变候选搜索优先级。检查所有已声明且有业务价值的重要指标，不只看 primary。若改动在真实 workload 上稳定改善一项重要指标，例如 p95 或 p99，同时正确性通过且总体吞吐、平均延迟等 guardrail 未超过允许的退化范围，就将它纳入优化结果，记录为适用场景明确的局部结果；没有提升当前 primary 不能单独作为删除改动的理由。ChatGPT 可以依据预先声明的 secondary 和维护成本将其列入交付建议，但它不能成为当前 Target 的 Champion；必须同时记录 primary 未达成，也不能据此停止主目标搜索。测试后才发现的新收益先作为假设；要因该收益选择 Champion，必须重新冻结以该指标为 primary、其它重要指标为约束的 Target，避免从噪声中事后挑结果。最后将实测收益与不确定性同用户的最低有效收益、下一步时间和 GPU 成本比较；继续是否值得由 ChatGPT 判断，命令超时只负责防止工具卡死。
-7. 正式结果有效且通过当前 Target 的 primary verdict 后，ChatGPT 才能显式选择候选。secondary-only 收益保留为局部结果；要让它成为 Champion，先以该指标为 primary 冻结新的 Target。需要 workload 或服务层最终结论时，再对当前最佳版本和 original 运行 final audit。
-8. 每个终态都留下简短 Handoff，包含结论与证据、claim layer、当前 Target 的 primary 是否达成、Champion 或 Original、另行保留的局部结果、局部结果到端到端目标的解释、production replacement boundary 与最终收益上限、发生冲突时的 prediction-error correction、各被拒方向实际关闭到实现、集成还是机制、未覆盖风险、skill friction/feedback，以及 workspace 状态和停止原因。若在用户授权的时间或 GPU 上限明显未耗尽时停止，还要记录已用与剩余预算、当前候选族的覆盖边界，并重新做一次跨 subsystem 候选排序；对尚未关闭且预期 primary ROI 最高的方向，检查它是否被失败实现误杀，必要时按外部研究规则补充反例。只有该方向也有证据表明不值得或不能执行时，才形成 Target 的 terminal reason。当前候选族关闭不等于 Target 完成；局部结果存在不等于优化任务完成。
+明确 primary、minimum effect、不可退化的约束、允许的修改范围和投入上限。先前声明的重要 secondary 可以支持局部结果，但不替换 primary 或决定主目标完成。
+
+通过 readiness 冻结 original、真实测试集、精度规则、driver 和实际环境。修改性能代码前先测原始业务基线，核对决策指标的分子、分母、单位和来源，用 original 重复样本估计测量分辨率。精度未通过时，不解释性能样本。环境缺项时明确结论能支持的范围。多进程启动、依赖和资源可用性按环境参考处理，复用已经验证的配置。
+
+### 从生产路径选择方向
+
+结合已有 profile、源码和运行证据，解释 CPU、GPU、传输、同步及等待的时间贡献、重叠和未归因部分，比较可行的系统方向。
+
+ROI 是派生证据主张。定义 Candidate 真正替换的 production replacement boundary，核对 shape、phase、lowering、graph、dispatch、fallback 和 overlap。只使用同一边界的观测或有依据的保守上界；源码和数学语义一致不能代替执行形态一致。只计算候选改变的组件、实际 occurrence 和关键路径上暴露的时间，扣除新增成本，避免重复计时。p95/p99 要按受影响请求和关键路径判断，不能直接套用均值的时间占比。
+
+按对 primary 的预期收益、证据可信度、可行性、风险和验证成本排序。关键前提未知时，选择能最快区分解释的观测或范围受限的生产等价原型。完整生产接入或正式测试前，收益空间与测量分辨率必须足以支持投入；结构化 `opportunity_claim` 保存这些前提，工具只检查显式矛盾和算术。
+
+新增非平凡 kernel、通信 primitive 或通用接入前，按外部研究参考核验社区等价能力。优先复用、最小 backport 或窄适配；缺少当前 workload 的 E2E 证据意味着需要测量，不能据此重写已有能力。复用仍适用的研究结果，只核验变化的版本、边界或未解决事实。
+
+### 用最便宜的有效实验取得结论
+
+先做静态审查或独立小测试，再按需要构建、校验精度和短测。创建 Experiment 时冻结双方版本、比较关系、证据计划和最低成本证伪，说明失败能否定实现、集成还是机制。前面的结果已经足够拒绝时，不启动后续昂贵操作。profiler 只回答明确的未解决问题。
+
+可能支撑正式性能结论的比较由 `workload_evaluate.py` 保存。同一次 driver 调用保存正确性和性能证据，避免重复启动完整 workload；同进程比较必须实际保持声明的共享条件。正式 target 前确认前提仍适用，只有新事实影响判断时才重新分析。
+
+预测与实测实质冲突时先完成 prediction-error reconciliation：检查边界、执行形态、候选范围、coverage、exposure 和成本，修正系统模型后再选择候选。一次实现失败或局部代理测试不能自动关闭整个机制；重试应有能够改变结论的新证据或不同判别方法。
+
+### 保留结果并决定是否继续
+
+只有正式比较通过当前 Target 的 primary verdict，ChatGPT 才能显式选择 Champion。预先声明的 secondary 稳定改善且约束满足时，可以保留为局部结果并说明场景；它不能替代 primary 达成。测试后才发现的收益先作假设，要据此选择 Champion，需冻结新的目标并验证。组合已测机制仍是新 Candidate，需要验证组合结果。
+
+需要 workload 或服务层最终结论时，对 Champion 和 original 执行 final audit。命令超时防止卡死；继续投入由预期收益、剩余不确定性、成本和授权决定。结束前确认最高价值的剩余系统方向没有被一次失败实现误杀。已有系统分析仍适用时直接引用，只有新证据改变排序才重新比较；不为消耗剩余预算重复研究或实验。
+
+暂停或结束时留下简短 Handoff：primary 是否达成、Champion 或 Original、关键证据与收益、局部结果、被拒方向及拒绝范围、未解决问题、停止原因和恢复所需的 workspace 信息。发生预测错误时保留修正后的前提。环境或 runner 修复单独说明成本，不计作性能收益。
+
+## 证据与执行边界
+
+- 结果引用冻结的 Candidate/reference、测试集和实际环境；精度失败使相应性能结果无效。身份不完整只收窄可支持的结论，保留独立有效证据。
+- profiler 返回观测事实，知识查询返回材料及适用条件；都不决定下一步。知识无匹配不妨碍源码分析或提出假设。未知 profiler 版本、关键字段或单位不能猜测解析；已知格式的非关键扩展保留为 `unmodeled`。
+- 字符串存在不能证明编译器融合、消除或调度；这类结论需要对应版本的 lowered/generated code、编译器记录或运行证据。
+- 共享宿主机按环境和性能参考进行有界空闲检查，并保存与正式样本对齐的 CPU/GPU 观测。未解释的重叠干扰影响性能归因，不能据此否定独立的正确性结果。
+- GPU 实验、远端代码和 artifact root 由主智能体统一写入；正式共享 GPU 实验串行。独立只读工作可按复杂度并行，周期采样交给确定性命令。
+- 外部资料用于核实事实和挑战判断。高影响决策仍有关键不确定性时，按研究参考尝试异构 AI；外部不可用不阻塞本地工作，也不授权扩大结论。保留关键不同意见，最终由当前目标的本地证据决定。
+- 驱动、计数器权限、频率、功耗、服务和容器运行时等宿主机变更，默认只给建议，除非用户明确授权。`ERR_NVGPUCTRPERM` 时可改用其他有效证据。
 
 ## 使用后反馈
 
-将 Handoff 中的 `skill friction/feedback` 用于记录本次真实使用暴露、且可能改变 skill 指令、工具或知识的具体问题，以及值得保留的有效机制。每条只写观察到的行为、实际影响或成本、期望改动和最小证据；不要复述完整优化过程，不要把基本正确行为当作成果，也不要为填满字段添加通用风险。没有可行动反馈时写 `none`。
-
-Handoff 默认留在用户环境。只有用户明确授权时才向外部仓库提交反馈；移除私有 workload、内部地址、凭据和未公开材料，并将相互独立的问题分别提交。优化结果或上游 PR 可以作为问题来源和证据，但本身不等于 skill feedback。
-
-## 证据规则
-
-- Candidate 和 reference 内容必须冻结，并由每份结果显式引用。
-- 精度失败会使相应性能结果无效。
-- 变体比较使用同一 Target、同一测试集和实际环境身份下的成对样本。结论只能覆盖比较契约声明的双方关系、gate 和 acquisition context；缺失的容器 lineage 不能由最终镜像身份反推。
-- profiler 只返回观测事实；它不返回优化方向、ROI 或下一步。
-- 知识查询只返回有界材料及其声明条件与当前身份的匹配关系，不判断前提是否解决、机制是否受支持或下一步。显式查询的身份不匹配材料保留具体差异；该差异只说明材料不适用，不能证明机制不支持。空结果不会阻止源码分析、profiling 或 ChatGPT 自行提出假设。
-- 未知 profiler 版本、关键字段或单位必须拒绝解析；已知格式中的非关键扩展内容只作为
-  `unmodeled` 保留，不能参与语义计算。不能套用相近版本或相近架构。
-- `ERR_NVGPUCTRPERM` 表示当前宿主机权限不允许读取 NCU counter。记录限制并改用其他有效证据；宿主机权限调整只给建议，除非用户明确授权。
-- 共享宿主机在选卡和正式性能采样前启动确定性、低频、只读的 CPU/GPU 观测，持续到采样结束并保存时间对齐的原始输出。GPU 进程列表为空或显存占用很低都不能单独证明设备空闲；还要在有界窗口检查利用率、功耗和进程可见性，并解释持续活动。观测缺失或中断，或存在与正式样本窗口重叠、达到有依据阈值且未被解释的资源污染时，性能归因 inconclusive；瞬时、非重叠异常不否定 correctness。
-- 编译产物结论不能越过其证据阶段。源码、AOT 包或 binary 中的字符串只证明文本存在；fusion、消除或调度等 post-lowering 主张必须来自绑定同一 Experiment 的 lowered/generated code、编译器精确匹配记录或 runtime kernel 证据。
-- 使用子智能体时，主智能体是远端代码、GPU 实验和 artifact root 的唯一写者；只并行边界清楚的独立只读任务，使用最低足够能力，并说明模型、思考强度和目标。周期采样由确定性命令完成，正式共享 GPU 实验不并行。
-- 保留原始报告、成对样本、环境身份、被拒候选和 terminal reason，使结论可复核。
-
-## 外部资料
-
-外部研究按决策风险有条件触发，不是每个候选的固定阶段。触发时先核验当前版本的一手资料；涉及高成本候选、高潜机制关闭或 Target 终止且本地证据仍有关键不确定性时，再使用至少一个可用的非 OpenAI 模型家族挑战假设和证据遗漏。ChatGPT Pro、Codex 和 OpenAI 子智能体不能互相算作异构质证。外部模型不批准候选，也不接管执行；发送前移除私有内容，并保留不同意见。外网或异构模型不可用不阻塞本地优化，但要记录未完成项和结论强度；最终仍由当前 Target 的本地精度与测量证据决定。
-
-本 skill 不提供操作系统沙箱。只修改用户授权的文件和隔离环境。驱动、GPU 权限、频率、功耗、服务和容器运行时等宿主机变更，默认只提供建议。
+Handoff 中的 `skill friction/feedback` 只记录可行动的问题或值得保留的机制：观察、实际影响、期望改动和最小证据；没有则写 `none`。反馈默认留在用户环境，向外部提交须有明确授权并去除私有材料。普通正确行为和优化结果本身不等于 skill 改进。

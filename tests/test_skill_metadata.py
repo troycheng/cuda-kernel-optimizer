@@ -63,63 +63,9 @@ class SkillMetadataTests(unittest.TestCase):
         routed = set(re.findall(r"(?:<skill>/)?scripts/([a-z_]+\.py)", self.text))
         self.assertEqual(routed, _PUBLIC_TOOLS)
 
-    def test_original_tests_and_precision_validation_precede_measurement(self) -> None:
-        self.assertIn("修改代码前先测原始业务基线", self.prose)
-        self.assertIn("精度未通过时，不解释性能样本", self.prose)
-
     def test_no_legacy_control_plane_terms_remain(self) -> None:
         for pattern in _LEGACY_CONTROL_WORDS:
             self.assertNotRegex(self.lower, pattern)
-
-    def test_profiler_and_knowledge_only_return_facts_and_empty_knowledge_does_not_block(self) -> None:
-        self.assertIn("profiler 只返回观测事实", self.prose)
-        self.assertIn("它不返回优化方向、ROI 或下一步", self.prose)
-        self.assertIn("知识查询只返回有界材料", self.prose)
-        self.assertIn("不判断前提是否解决、机制是否受支持或下一步", self.prose)
-        self.assertIn("空结果不会阻止源码分析", self.prose)
-
-    def test_profile_facts_require_system_attribution_before_a_candidate(self) -> None:
-        for marker in (
-            "系统级归因",
-            "主要 measured time",
-            "未归因部分",
-            "比较可行的 subsystem 方向",
-            "coverage 已知时界定端到端收益上限",
-            "最低成本观测",
-            "证据不适用时，只保留 diagnostic hypothesis",
-        ):
-            self.assertIn(marker, self.prose)
-
-    def test_shared_host_subagents_and_handoff_have_bounded_behavior(self) -> None:
-        for marker in (
-            "正式样本窗口重叠",
-            "性能归因 inconclusive",
-            "唯一写者",
-            "使用最低足够能力",
-            "正式共享 GPU 实验不并行",
-            "局部结果到端到端目标的解释",
-            "skill friction/feedback",
-        ):
-            self.assertIn(marker, self.prose)
-
-    def test_live_cost_profile_recheck_and_resource_watch_fail_closed(self) -> None:
-        for marker in (
-            "首次 live workload 前",
-            "当前完成点",
-            "每次新 profiler 事实",
-            "进入正式 target 前无条件",
-            "观测缺失或中断",
-            "Champion 或 Original",
-            "未覆盖风险",
-        ):
-            self.assertIn(marker, self.prose)
-
-    def test_external_research_is_risk_triggered_and_local_evidence_decides(self) -> None:
-        self.assertIn("外部研究按决策风险有条件触发", self.prose)
-        self.assertIn("至少一个可用的非 OpenAI 模型家族", self.prose)
-        self.assertIn("不能互相算作异构质证", self.prose)
-        self.assertIn("外部模型不批准候选，也不接管执行", self.prose)
-        self.assertIn("本地精度与测量证据决定", self.prose)
 
     def test_every_referenced_skill_path_exists(self) -> None:
         paths = set(
