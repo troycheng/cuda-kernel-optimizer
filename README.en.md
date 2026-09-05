@@ -51,7 +51,7 @@ If these inputs are incomplete, ChatGPT reports the gaps and helps establish the
 In an environment that supports Skills CLI, install the current release directly:
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.0/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 ChatGPT can also perform the installation, so users do not need to run the repository's Python scripts manually. Send:
@@ -160,6 +160,11 @@ A change is ready to merge only when correctness passes, the user's real target 
 
 ## Release notes
 
+### V1.6.1
+
+- Shortened the skill entrypoint, report progress at meaningful decisions, and reuse applicable research and environment findings. Original baselines, production ROI, correctness, and formal measurement requirements remain in place.
+- Fixed driver-template rejection of identical GPU models; device UUIDs remain unique. Execution protocols and production modules are unchanged.
+
 ### V1.6.0
 
 - Experiments now retain a structured `opportunity_claim` for the Candidate's actual production replacement boundary, execution form, component scope, and endpoint ceiling. Explicitly inapplicable, duplicate, or sub-threshold claims are rejected before workload execution.
@@ -185,10 +190,7 @@ A change is ready to merge only when correctness passes, the user's real target 
 
 ### V1.4.1
 
-- Added a project-evolution contribution process for turning problems found in real use into reviewable cases, evaluation results, and release decisions.
-- Added four lightweight templates: Case Snapshot, Evaluation Definition, Evaluation Result, and Release Decision. They do not upload material, admit knowledge, submit code, or publish releases automatically.
-- Published the first replay case for Profiler evidence-object validation, separating confirmed tool behavior from unsupported performance or generality claims.
-- Updated the contribution guide, pull request checks, and documentation tests. The V1.4 runtime, installed skill, knowledge base, and optimization decision model are unchanged.
+Added the case, evaluation and contribution process without changing the runtime or optimization decisions.
 
 ### V1.4.0
 

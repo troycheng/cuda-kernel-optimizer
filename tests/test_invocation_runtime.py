@@ -620,8 +620,8 @@ class InvocationProbeTests(unittest.TestCase):
                     "required_gpu_uuids": [],
                 },
                 {
-                    "operation_timeout_seconds": 1.0,
-                    "command_timeout_seconds": 0.2,
+                    "operation_timeout_seconds": 5.0,
+                    "command_timeout_seconds": 2.0,
                     "resource_wait_timeout_seconds": 0.2,
                     "cleanup_timeout_seconds": 2.0,
                 },

@@ -87,14 +87,14 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 
 当 preregistered opportunity range 与 target 结果实质冲突，包括局部机制收益与完整 workload 结果冲突时，先完成 prediction-error reconciliation：逐项检查 boundary/execution-form applicability、Candidate scope、coverage/occurrence、critical-path exposure 和 local cost premise，废止错误输入并重算系统机会。不能先用调度、cache 或噪声猜测保护旧 ROI，也不能在旧模型上直接切换下一候选。只有修正后仍存在高收益空间、且一个不同的最低成本判别实验可能改变决定时才追加一次；重新尝试必须有新证据、不同实现路径或不同测量设计。profiler 不是固定阶段，只有它能区分仍竞争的解释时才运行。
 
-每次进入正式 `target` 前，无条件简短复核 production replacement boundary、execution form、
-Candidate scope、case/request slice、phase、coverage/exposure、收益上限和 ROI。若其间取得新事实，
-重新完成上一节的适用性与系统级归因，而不是沿用旧候选理由。
+进入正式 `target` 前确认 production replacement boundary、execution form、Candidate scope、
+case/request slice、phase、coverage/exposure、收益上限和 ROI 仍适用。已确认且未改变的前提直接
+复用；新事实改变适用性或候选排序时，更新系统归因并反馈变化，不重复抄写整份分析。
 
 共享宿主机在正式性能采样前启动低频、只读的 CPU/GPU 观测，持续到采样结束，并保存与样本
 时间对齐的原始输出。观测缺失、中断，或出现与样本窗口重叠、达到用户或环境规则给出的影响阈值
 且无法解释的污染时，性能结果标为 environment-inconclusive；correctness 结果仍独立保留。
-瞬时或非重叠异常不限制性能归因。进程列表为空或显存很低不能单独证明 GPU 空闲；选卡时还要在
+非重叠异常不限制性能归因；瞬时重叠异常仍按影响阈值判断。进程列表为空或显存很低不能单独证明 GPU 空闲；选卡时还要在
 有界窗口采样利用率和功耗，正式窗口继续保留这些观测。正式共享 GPU 实验保持串行，周期采样交给确定性命令。
 
 涉及越界访问、向量化或异步拷贝时，将 `compute-sanitizer memcheck` 纳入 screen；涉及 shared memory、多阶段 pipeline、barrier、warp specialization、原子操作或跨 stream 同步时，再按风险加入 `racecheck`、`initcheck` 或 `synccheck`。这些检查由 Experiment 显式声明，不由机制名称自动触发，也不能替代业务精度校验。
@@ -126,7 +126,7 @@ Candidate scope、case/request slice、phase、coverage/exposure、收益上限�
 
 每条外部命令有独立 timeout 和进程组清理，防止构建、测试或 profiler 卡死。是否继续优化不由 timeout 决定，而由现有证据、预期收益、下一步时间和 GPU 成本、风险与用户授权共同决定。
 
-时间或 GPU 授权是上限，不要求为了耗尽预算而执行低价值实验；但在上限明显未耗尽时，关闭当前候选族不能直接结束 Target。先记录 elapsed/remaining budget、已覆盖的候选空间和残余系统成本，再重新比较至少一轮跨 subsystem 方向，例如 communication、runtime、scheduler、memory、fusion 或更贴近真实请求的 workload。对尚未关闭且预期 primary ROI 最高的方向，先检查它是否只被失败实现或不充分 proxy 连带拒绝；存在关键知识或因果缺口时按 `research_augmentation.md` 质证。只有该方向也有证据表明收益上限不足、成本不值得、不可行或超出授权，才形成全局 terminal reason。
+时间或 GPU 授权是上限，不要求为了耗尽预算而执行低价值实验。关闭当前候选族后，根据已有系统分析确认最高价值的剩余方向是否仍值得投入；只有新事实改变排序或先前遗漏合理方向时才重新比较。检查该方向是否被失败实现或不充分 proxy 连带拒绝；存在关键知识或因果缺口时按 `research_augmentation.md` 质证。若已有证据表明剩余方向收益不足、成本不值得、不可行或超出授权，直接形成 terminal reason，保留已用投入和关键依据。
 
 出现以下情况应尽早停止：
 
@@ -135,7 +135,7 @@ Candidate scope、case/request slice、phase、coverage/exposure、收益上限�
 - screen 已按预先声明的证伪条件拒绝机制，或 conservative bound 已证明收益上限不足；
 - 重复证据已经否定该机制；
 - 下一步超出用户授权的时间、GPU、风险或修改范围；
-- 重新完成跨 subsystem 候选排序后，没有新的非重复且值得投入的方向。
+- 系统分析表明没有新的非重复且值得投入的方向。
 
 只有局部结果而 primary 未达成时，不得把任务标记为优化完成。若仍有更高 primary ROI 方向，
 继续该方向；若没有或成本已不值得，保持 original 或已有 Champion，并以“主目标未达成”的
