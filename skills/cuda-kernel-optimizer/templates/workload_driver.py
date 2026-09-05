@@ -181,12 +181,12 @@ def _read_request(path) -> dict:
     return value
 
 
-def _string_list(value, label: str) -> list[str]:
+def _string_list(value, label: str, *, unique: bool = True) -> list[str]:
     if type(value) is not list or any(
         not isinstance(item, str) or not item for item in value
     ):
         raise DriverError(f"{label} must be a string list")
-    if len(value) != len(set(value)):
+    if unique and len(value) != len(set(value)):
         raise DriverError(f"{label} must not contain duplicates")
     return list(value)
 
@@ -367,8 +367,9 @@ def _validate_environment(value) -> dict:
         "cuda_runtime_version", "frameworks", "runtime_provenance",
     }
     value = _closed(value, fields, "environment")
-    for field in ("gpu_uuids", "gpu_models", "gpu_architectures"):
-        _string_list(value[field], f"environment.{field}")
+    _string_list(value["gpu_uuids"], "environment.gpu_uuids")
+    for field in ("gpu_models", "gpu_architectures"):
+        _string_list(value[field], f"environment.{field}", unique=False)
     if (
         len(value["gpu_models"]) != len(value["gpu_uuids"])
         or len(value["gpu_architectures"]) != len(value["gpu_uuids"])

@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import runpy
 import shutil
 import subprocess
 import sys
@@ -262,6 +263,22 @@ class WorkloadDriverProtocolTests(unittest.TestCase):
             path.write_text(json.dumps(unbounded), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "sample limit"):
                 self.adapter.validate_driver_result(path, request)
+
+    def test_driver_template_allows_same_model_on_distinct_gpus(self) -> None:
+        template = runpy.run_path(str(TEMPLATE_DIR / "workload_driver.py"))
+        environment = _result(
+            self.adapter,
+            _request(self.adapter, Path("/tmp/result.json")),
+        )["environment"]
+        environment["gpu_uuids"] = ["GPU-1", "GPU-2"]
+        environment["gpu_models"] = ["NVIDIA GeForce RTX 5090"] * 2
+        environment["gpu_architectures"] = ["sm_120"] * 2
+
+        template["_validate_environment"](environment)
+
+        environment["gpu_uuids"] = ["GPU-1", "GPU-1"]
+        with self.assertRaisesRegex(template["DriverError"], "gpu_uuids.*duplicates"):
+            template["_validate_environment"](environment)
 
     def test_three_driver_templates_match_the_closed_adapter_protocol(self) -> None:
         expected = {
