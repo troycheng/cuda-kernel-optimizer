@@ -41,7 +41,7 @@
     {
       "id": "nvidia-cuda-best-practices",
       "last_reviewed": "2026-07-28",
-      "locator": "Memory Optimizations, Execution Configuration Optimizations, and Performance Metrics sections",
+      "locator": "Memory Optimizations, Execution Configuration Optimizations, and Performance Metrics; diagnostic sections rechecked 2026-09-07: 10.2.1 Coalesced Access to Global Memory, 10.2.7.1 Register Pressure, 11.1 Occupancy",
       "source_kind": "primary",
       "status": "reviewed",
       "summary": "Defines CUDA performance practices for memory access, occupancy, concurrency, and measurement.",
@@ -149,13 +149,13 @@
     {
       "id": "nvidia-nsight-compute",
       "last_reviewed": "2026-07-28",
-      "locator": "Kernel Profiling Guide, Replay, Sections and Rules, and Metrics Guide",
+      "locator": "Kernel Profiling Guide, Replay, Sections and Rules, and Metrics Guide; diagnostic sections rechecked 2026-09-07: ProfilingGuide/index.html#memory-tables and SASS Thread-Level Instructions Executed Metrics (predicate-enabled), Occupancy",
       "source_kind": "primary",
       "status": "reviewed",
       "summary": "Defines kernel replay, metric collection, sections, and profiler result interpretation.",
       "summary_sha256": "c94f4c34503cde10b1a84457ece64a72b0e41fa7843d89e08ce408d2582d4b66",
       "title": "Nsight Compute Documentation",
-      "url": "https://docs.nvidia.com/nsight-compute/NsightCompute/index.html",
+      "url": "https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html",
       "version": "2026.x"
     },
     {

@@ -854,16 +854,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak"
+        "action_id": "inspect-existing-code",
+        "rationale": "先查精度、shape、架构与生成代码。不按固定利用率重写；仅需确认执行时补动态观测，权限不足标未确认。"
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak is not a bad trigger under the frozen measurement"
+        "HMMA 指标不覆盖所有 tensor 指令；静态存在不证明执行，执行不证明收益"
       ],
-      "distinguishing_question": "Does sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak meet the frozen workload acceptance?",
+      "distinguishing_question": "当前路径未用适用指令，还是规模、供数或同步受限？",
       "id": "method.compute.tensor_core",
       "identity_constraints": {
         "claim_layers": [
@@ -897,17 +895,22 @@
         "Tensor Core / 专用硬件利用",
         "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak"
       ],
-      "mechanism": "Tensor Core / 专用硬件利用",
+      "mechanism": "Tensor Core 路径",
       "mechanism_key": "compute.tensor_core",
       "priority": 1,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "精度、shape、GPU/编译目标、dispatch、生成代码；必要时动态证据"
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-nsight-compute"
       ],
-      "status": "advisory"
+      "status": "advisory",
+      "competing_explanations": [
+        "lowering/dispatch 未选择适用指令",
+        "shape/tile 利用不足",
+        "供数、转换、同步或依赖等待"
+      ]
     },
     {
       "applies_when": [
@@ -3103,16 +3106,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 30,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "l1tex__t_sector_hit_rate.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "从地址和指令计算 segment，对照已有报告；已合并时不因低命中率采样或向量化。计入布局转换成本。"
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "l1tex__t_sector_hit_rate.pct is not a bad trigger under the frozen measurement"
+        "低命中率不证明访问未合并；聚合均值不能定位单次访问"
       ],
-      "distinguishing_question": "Does l1tex__t_sector_hit_rate.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "宽度、活跃线程和地址布局能否解释 sector 数？",
       "id": "method.memory.coalesced_access",
       "identity_constraints": {
         "claim_layers": [
@@ -3146,17 +3147,22 @@
         "合并访问",
         "l1tex__t_sector_hit_rate.pct"
       ],
-      "mechanism": "合并访问",
+      "mechanism": "合并访存",
       "mechanism_key": "memory.coalesced_access",
       "priority": 2,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "地址、指令宽度、活跃线程、对齐及对应请求/sector"
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-nsight-compute"
       ],
-      "status": "advisory"
+      "status": "advisory",
+      "competing_explanations": [
+        "地址分散或未对齐",
+        "宽访问、尾块、重复地址",
+        "已合并但无缓存复用"
+      ]
     },
     {
       "cheapest_falsifier": {
@@ -4412,16 +4418,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": null,
-        "direction": null,
-        "kind": "observed_metric",
-        "metric": "launch__occupancy_limit_registers"
+        "action_id": "inspect-existing-code",
+        "rationale": "先查资源/spill 报告和 launch；有价值才小测 live range、unroll 或 tile，计入指令和复用代价。"
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "launch__occupancy_limit_registers is not a bad trigger under the frozen measurement"
+        "高寄存器数或低 occupancy 不证明性能受限；减少寄存器可能损失 ILP 或引入 spill"
       ],
-      "distinguishing_question": "Does launch__occupancy_limit_registers meet the frozen workload acceptance?",
+      "distinguishing_question": "是寄存器造成延迟，还是其他资源、grid 或 ILP 影响 occupancy？",
       "id": "method.memory.register_pressure",
       "identity_constraints": {
         "claim_layers": [
@@ -4455,17 +4459,22 @@
         "寄存器压力控制 (__launch_bounds__)",
         "launch__occupancy_limit_registers"
       ],
-      "mechanism": "寄存器压力控制 (__launch_bounds__)",
+      "mechanism": "寄存器压力",
       "mechanism_key": "memory.register_pressure",
       "priority": 10,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "编译资源、grid、限制原因；local traffic 对应代码和 spill 报告"
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-nsight-compute"
       ],
-      "status": "advisory"
+      "status": "advisory",
+      "competing_explanations": [
+        "寄存器限制驻留但未限制吞吐",
+        "spill 或栈/局部数组流量",
+        "grid、shared memory 或依赖限制"
+      ]
     },
     {
       "cheapest_falsifier": {

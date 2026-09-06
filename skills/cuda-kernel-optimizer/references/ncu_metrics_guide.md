@@ -16,13 +16,17 @@ NCU 用于解释单个或一组 kernel 的硬件行为。它不能单独证明 w
 | 问题 | 典型观测 | 注意事项 |
 |---|---|---|
 | 是否受 DRAM 约束 | DRAM throughput、bytes、sector 和 memory pipe 活跃度 | cache 命中和请求合并会影响解释，不能只看一个百分比 |
-| 是否受计算管线约束 | tensor、FP、integer 等 pipe utilization | 必须确认实际指令类型和可并行工作量 |
-| occupancy 是否限制并发 | active warps、register、shared memory、block 限制原因 | 高 occupancy 不是目标，低 occupancy 也不自动意味着瓶颈 |
+| 是否受计算管线约束 | 实际 dispatch、生成指令、shape 与 pipe utilization | 区分未选择适用指令、工作量不足与供数/同步等待；单个 HMMA 指标不覆盖所有架构 |
+| occupancy 是否限制并发 | 编译资源/spill 报告、grid、active warps 与资源限制 | 先区分驻留限制和延迟暴露；减少寄存器可能损失 ILP、复用或引入 spill |
 | 是否发生 spill | local load/store、register 数和 SASS | local traffic 还需区分参数、栈和真正 spill |
 | 是否存在分支或尾块损耗 | warp efficiency、predication、分支、不同 shape 对比 | 首先保证尾块精度，不为整齐 shape 的收益牺牲边界正确性 |
-| 是否存在异常访存 | transaction、sector、request、L1/L2/DRAM 关系 | 结论需与访问模式和生成代码对应 |
+| 是否存在异常访存 | 指令宽度、活跃线程、地址布局与 request/sector | 对同一访问计算合理 sector 数；低 L1 命中率也可能只是已合并的流式读取 |
 
 Roofline 只能描述当前 kernel 在既定假设下的上限关系。算术强度、峰值和吞吐的单位必须一致，且不能把理论上限直接当成候选收益预测。
+
+优先用已有源码、编译产物和报告区分解释，再选择尚缺的观测。静态指令存在、运行时执行和实际收益是不同问题；只有当前判断依赖执行与否时，才补对应动态证据。跨匹配行均值不能回答单个 launch 或源码行的问题，需要时回到原始报告。具体思路可按 `memory.coalesced_access`、`memory.register_pressure`、`compute.tensor_core` 查询已有知识卡。
+
+来源：[CUDA Best Practices 访存与执行配置章节](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#coalesced-access-to-global-memory)、[NCU Profiling Guide 的 Memory Tables 与 SASS Metrics](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html)。指标可用性以当前工具与架构为准，不要求为阅读本说明重新采样。
 
 ## 权限失败
 
