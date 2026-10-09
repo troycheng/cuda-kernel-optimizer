@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-09-01",
+  "as_of": "2026-10-09",
   "cards": [
     {
       "applies_when": [
@@ -134,18 +134,19 @@
       "content_kind": "technical_contract",
       "contract": {
         "decision_impact": [
-          "whether replacing a wider barrier preserves the required synchronization and visibility scope"
+          "whether a changed copy or barrier preserves read-before-overwrite ordering"
         ],
         "non_claims": [
-          "A group-scoped synchronization does not establish ordering outside that group.",
-          "Creating or invoking a collective from a branch not reached by the full group is not safe."
+          "Group sync neither orders outside the group nor permits partial participation.",
+          "Matching outputs do not prove cross-block ordering.",
+          "Warp sync alone need not establish generic-to-async proxy visibility."
         ],
-        "proposition": "A Cooperative Groups sync is collective for the named group: all participating threads reach the synchronization point, and memory accesses before it become visible to threads in that group after it."
+        "proposition": "Cooperative Groups sync waits for every group thread and makes their prior memory accesses visible within that group."
       },
       "counter_signals": [
-        "component, version, architecture, or execution path differs from the cited contract"
+        "runtime differs from the source contract"
       ],
-      "distinguishing_question": "Do the current component and environment identities match this contract?",
+      "distinguishing_question": "What orders old-value reads before overwrite, or isolates them in a snapshot?",
       "id": "method.latency.cooperative_groups_sync",
       "identity_constraints": {
         "claim_layers": [
@@ -171,23 +172,28 @@
         ]
       },
       "invalidators": [
-        "the cited source does not describe the component version that actually executed"
+        "source/runtime version mismatch"
       ],
       "match_terms": [
         "latency.cooperative_groups_sync",
         "cooperative groups",
         "group sync",
-        "__syncthreads"
+        "__syncthreads",
+        "in-place state",
+        "snapshot isolation",
+        "cross-block race",
+        "proxy fence"
       ],
       "mechanism": "CUDA Cooperative Groups synchronization semantics",
       "mechanism_key": "latency.cooperative_groups_sync",
       "priority": 0,
       "required_evidence": [
-        "the current component and environment identities",
-        "the cited primary-source section or matching implementation source"
+        "runtime identity and source dependencies between affected readers and writers"
       ],
       "source_ids": [
-        "nvidia-cuda-cooperative-groups"
+        "nvidia-cuda-cooperative-groups",
+        "nvidia-cuda-programming-model",
+        "flashinfer-ll128-proxy-ordering"
       ],
       "status": "source_reviewed"
     },
@@ -195,19 +201,18 @@
       "content_kind": "technical_contract",
       "contract": {
         "decision_impact": [
-          "whether a dynamic workload can reuse one graph execution object safely",
-          "whether a fallback or re-instantiation path is required"
+          "whether graph reuse is safe or requires update/fallback"
         ],
         "non_claims": [
-          "Graph capture does not guarantee that every workload shape or operation is replay-compatible.",
-          "Using CUDA Graphs does not by itself prove lower end-to-end latency."
+          "Capture alone proves neither shape compatibility nor buffer lifetime; check allocator/API ownership.",
+          "Graphs do not guarantee speedup; internal gaps alone do not bound downstream submission effects."
         ],
-        "proposition": "An instantiated CUDA Graph can update supported node parameters for a later launch, but whole-graph updates require matching topology and dependency ordering; structural or unsupported changes require re-instantiation."
+        "proposition": "CUDA Graph updates support only permitted parameter changes with compatible topology and dependencies; otherwise re-instantiate."
       },
       "counter_signals": [
-        "component, version, architecture, or execution path differs from the cited contract"
+        "runtime differs from the source contract"
       ],
-      "distinguishing_question": "Do the current component and environment identities match this contract?",
+      "distinguishing_question": "Do replay dependencies and buffers survive changed inputs, shapes or capacity?",
       "id": "method.latency.cuda_graphs",
       "identity_constraints": {
         "claim_layers": [
@@ -234,24 +239,26 @@
         ]
       },
       "invalidators": [
-        "the cited source does not describe the component version that actually executed"
+        "source/runtime version mismatch"
       ],
       "match_terms": [
         "latency.cuda_graphs",
         "cuda graph",
         "graph update",
         "stream capture",
-        "graph replay"
+        "graph replay",
+        "graph workspace",
+        "buffer lifetime"
       ],
       "mechanism": "CUDA Graph update and replay semantics",
       "mechanism_key": "latency.cuda_graphs",
       "priority": 0,
       "required_evidence": [
-        "the current component and environment identities",
-        "the cited primary-source section or matching implementation source"
+        "runtime identity, supported updates, retained buffer addresses and replay ordering"
       ],
       "source_ids": [
-        "nvidia-cuda-graphs"
+        "nvidia-cuda-graphs",
+        "pytorch-cuda-semantics"
       ],
       "status": "source_reviewed"
     },
@@ -1355,7 +1362,7 @@
       ],
       "cheapest_falsifier": {
         "action_id": "pytorch-operator-trace",
-        "rationale": "Check operator, graph-break, and launch attribution before requesting a broader system trace."
+        "rationale": "Reuse existing attribution and uninstrumented timing. Trace only unresolved dependencies; check event-stream coverage or use synchronized host timing, including launch costs."
       },
       "competing_explanations": [
         "kernel execution dominates",
@@ -1391,7 +1398,7 @@
         "trace lacks CPU runtime events",
         "workload shape distribution changed"
       ],
-      "last_reviewed": "2026-07-30",
+      "last_reviewed": "2026-10-09",
       "match_terms": [
         "cudalaunchkernel",
         "launch",
@@ -1483,12 +1490,14 @@
       "priority": 1,
       "required_evidence": [
         "CPU runtime or operator events correlated with the affected GPU intervals",
-        "a stable workload shape and profiler identity"
+        "a stable workload shape and profiler identity",
+        "stream/host/graph/cache timing coverage and uninstrumented support for production ROI"
       ],
       "source_ids": [
         "nvidia-nsight-systems",
         "pytorch-profiler",
-        "pytorch-compile-profiling"
+        "pytorch-compile-profiling",
+        "kernelbench-timing"
       ],
       "status": "advisory"
     },

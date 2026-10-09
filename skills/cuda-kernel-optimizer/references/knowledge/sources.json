@@ -1,7 +1,55 @@
 {
-  "as_of": "2026-09-01",
+  "as_of": "2026-10-09",
   "schema_version": "cuda-kernel-optimizer/knowledge-sources-v2",
   "sources": [
+    {
+      "id": "nvidia-cuda-programming-model",
+      "last_reviewed": "2026-10-09",
+      "locator": "Thread Blocks and Grids; check the deployed CUDA version before applying launch-specific exceptions",
+      "source_kind": "primary",
+      "status": "reviewed",
+      "summary": "Defines thread-block independence; block-local synchronization does not establish ordering between ordinary thread blocks.",
+      "summary_sha256": "dc6cd2a9d3ac46b0b5d141223699910d2d857bdef1b43dbaeab5c4145c0cbc7f",
+      "title": "CUDA Programming Guide: Programming Model",
+      "url": "https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html",
+      "version": "live documentation reviewed 2026-10-09"
+    },
+    {
+      "id": "pytorch-cuda-semantics",
+      "last_reviewed": "2026-10-09",
+      "locator": "CUDA streams; Graph memory management; Sharing memory across captures",
+      "source_kind": "primary",
+      "status": "reviewed",
+      "summary": "PyTorch 2.14 documents stream synchronization and allocator lifetime, fixed replay addresses, and conditions for sharing graph-private pools.",
+      "summary_sha256": "67984c0466124098823e00695bfbedfc9ad9005ebc56c86664b3e6a968e48f69",
+      "title": "PyTorch CUDA semantics",
+      "url": "https://docs.pytorch.org/docs/2.14/notes/cuda.html",
+      "version": "PyTorch 2.14; not a compatibility claim for other versions"
+    },
+    {
+      "id": "kernelbench-timing",
+      "last_reviewed": "2026-10-09",
+      "locator": "src/kernelbench/timing.py: time_execution_with_cuda_event and time_execution_with_host_time",
+      "source_kind": "primary",
+      "status": "reviewed",
+      "summary": "Distinguishes current-stream CUDA event timing from synchronized host timing that includes launch and synchronization costs; this is a measurement method, not production speedup evidence.",
+      "summary_sha256": "a29f700c473652bfc8dbb38cc01794d08bd71f24b07728f477d73efe8eebb7ba",
+      "title": "KernelBench timing implementation",
+      "url": "https://github.com/ScalingIntelligence/KernelBench/blob/423217d9fda91e0c2d67e4a43bf62f96f6d104f1/src/kernelbench/timing.py",
+      "version": "423217d9fda91e0c2d67e4a43bf62f96f6d104f1"
+    },
+    {
+      "id": "flashinfer-ll128-proxy-ordering",
+      "last_reviewed": "2026-10-09",
+      "locator": "PR 5172 and receiver unpack before async shared-to-global copy; source fix, not independent dynamic verification",
+      "source_kind": "primary",
+      "status": "reviewed",
+      "summary": "FlashInfer PR 5172 adds an async-proxy fence before LL128 receiver shared-memory data is consumed by async copies; a warp rendezvous alone did not establish proxy visibility.",
+      "summary_sha256": "6bec6ee1d26ae4c3046af2d8ec3e887a55ed604060c2c581bea472afa01340e4",
+      "title": "FlashInfer LL128 receiver proxy-ordering fix",
+      "url": "https://github.com/flashinfer-ai/flashinfer/blob/baa1dd60f9fa5feb88f3a79651f5a2491acc0a87/csrc/nv_internal/tensorrt_llm/kernels/helixAllToAll.cu",
+      "version": "baa1dd60f9fa5feb88f3a79651f5a2491acc0a87; verify inclusion in deployed release"
+    },
     {
       "id": "nvidia-ampere-tuning",
       "last_reviewed": "2026-07-30",
@@ -52,8 +100,8 @@
     },
     {
       "id": "nvidia-cuda-cooperative-groups",
-      "last_reviewed": "2026-08-13",
-      "locator": "Sections 4.4.4.1 and 4.4.5",
+      "last_reviewed": "2026-10-09",
+      "locator": "Sections 4.4.4.1, 4.4.5 and 4.4.8; synchronization scope and cooperative grid launch",
       "source_kind": "primary",
       "status": "reviewed",
       "summary": "Defines collective participation, synchronization scope, and memory visibility for Cooperative Groups.",
@@ -64,8 +112,8 @@
     },
     {
       "id": "nvidia-cuda-graphs",
-      "last_reviewed": "2026-08-13",
-      "locator": "Section 4.2.3, Updating Instantiated Graphs and limitations",
+      "last_reviewed": "2026-10-09",
+      "locator": "Sections 4.2.3, 4.2.5 and 4.2.8; graph updates, ordered memory access and user-object lifetime",
       "source_kind": "primary",
       "status": "reviewed",
       "summary": "Defines CUDA Graph capture, update, replay, topology, and node-parameter restrictions.",
@@ -160,8 +208,8 @@
     },
     {
       "id": "nvidia-nsight-systems",
-      "last_reviewed": "2026-08-13",
-      "locator": "CUDA Workload Analysis, CUDA Trace, and OS Runtime Libraries Trace sections",
+      "last_reviewed": "2026-10-09",
+      "locator": "CUDA Workload Analysis, CUDA Trace, OS Runtime Libraries Trace and CUDA Graph Trace; graph versus node tracing overhead; verify CLI support in the installed version",
       "source_kind": "primary",
       "status": "reviewed",
       "summary": "Defines CUDA workload timelines, runtime traces, correlation, and OS runtime analysis.",

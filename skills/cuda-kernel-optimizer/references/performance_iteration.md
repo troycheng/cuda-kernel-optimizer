@@ -17,14 +17,22 @@ readiness 通过后，先执行 `workload_evaluate.py baseline`。原始业务�
 分布在哪些 subsystem，哪些时间未归因，还有哪些合理方向，为什么当前方向更值得验证。成本或
 可行性没有证据时写 unknown，不凭局部热点臆测 ROI。
 
+从具体改动追踪关键依赖：原操作除计算和搬运外是否还提供快照、同步或生命周期保障，替换后由什么保留必要作用。
+只分析会影响正确性、收益或下一实验的部分，已有可靠保证处即可停止。例如移除 gather 后直接读写同一状态池，
+先核对旧值读取与覆盖写入的顺序；一次 block 内同步不建立不同 block 间的顺序。若该关系尚不清楚，
+输出多次相等也不能解除疑点，应检查具体源码依赖或构造能暴露错误顺序的最小反例，而非先接入完整服务。
+
 ROI 不是独立于证据的估计值，而是由多项观测推导出的 opportunity claim。先定义当前 Candidate
 真实替换的 production boundary：入口与出口区域、phase 和 shape，以及 compiler lowering、graph、
 dispatch、fallback 和 overlap 后实际选中的 execution form。再把每个 timing、cost、operation/byte
 count 和 coverage 输入标记为：`same_boundary`、`conservative_upper_bound` 或 `diagnostic_only`。
 source artifact、environment 和数学语义一致，并不能弥补执行形态或候选范围不同；
-`diagnostic_only` 只能验证机制或精度，不能进入 production Amdahl 分子。
+`diagnostic_only` 只能验证机制或精度，不能进入 production Amdahl 分子。调用数、stream 或 graph 方式变化时，
+还要区分生产成本变化与插桩开销变化；用已有无插桩样本约束收益推断，仅在影响决定时补测。
 
-只对 Candidate 实际改变、且在该 execution form 中暴露于关键路径的组件计算收益。若候选覆盖
+按依赖关系确定 Candidate 实际影响的关键路径，不以函数范围代替影响范围：提前提交可能影响后续等待，
+局部 kernel gap 不自动构成整个机制的收益上限，周围全部 gap 也不自动属于该候选。连同新增准备、搬运和同步成本
+解释受影响组件；缺少证据的影响保留为未知，不能写成已确认收益。若候选覆盖
 完整 workload 的一部分，令 `f` 为该部分占完整 workload 时间的比例，`r` 为候选
 使该部分延迟下降的比例，则理想化吞吐收益上限为 `1 / (1 - f × r) - 1`。局部结果给出相对
 吞吐增幅 `g` 时，换算 `r = g / (1 + g)`；例如 `g = 19.3%` 时 `r ≈ 16.2%`。若给出的是
@@ -52,7 +60,7 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 再完成源码静态审查或独立小测试；已经证伪时不创建候选。调用
 `workload_evaluate.py experiment` 前，至少说明，并将 opportunity claim 写入同名结构化字段：
 
-- 机制与预期影响；
+- hypothesis：具体改动、必要作用如何保留、预期成本变化；
 - claim layer；
 - 修改范围；
 - opportunity claim：production replacement boundary、execution form、evidence relationship、Candidate scope、occurrence/exposure、局部物理上限、端到端上限和跨过 minimum effect 所需的 saving；
@@ -64,7 +72,7 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 - reference 与 candidate 的关系；
 - Target 规则之外的附加精度 gate，以及只作解释的 diagnostic；
 - 使用的测试 case、成对采样设计、隔离或同进程生命周期；
-- 会改变候选判断或实验设计的版本化外部前提；未核实时标记为假设。
+- material_premises：会改变候选判断或实验设计的关键源码或外部前提；未核实时标记为假设，证据只支持它实际回答的问题。
 
 对 AOT/CUTLASS 模板机制，在第一次构建前同时冻结该机制的有界候选配置、config ID、实验开关、
 回退方式和预计构建次数。把可以由同一产物独立选择的配置编进一次 screen artifact，先完成局部筛选；
@@ -74,14 +82,13 @@ request drain；不能仅因调用次数少或总耗时占比低而否定长尾�
 
 ## 3. 由低成本到高成本
 
-常见顺序是：
+按关键疑点选证据，再比较成本，不把操作顺序当成每轮必跑清单。源码依赖分析回答同步与别名是否安全；
+同输入测试回答声明范围内的数值要求；包含必要 host/device 工作的短测回答替换成本；profiler 用于区分仍竞争的解释。
+数值分歧也可能来自编译或包装变化：必要时保持候选执行环境、换回原算子作对照，前提是该对照确实保留了待隔离的条件。
+允许有界诊断检验未知，但与疑点无关的通过结果不能使它成为已确认前提。
 
-1. 静态审查或独立小测试；
-2. 构建与最低精度校验；
-3. 短版成对性能初筛；
-4. 回答明确问题所需的 profiler；
-5. 正式成对 workload 测试；
-6. 完整服务测试。
+已有证据足以拒绝时不启动昂贵操作；足以支持下一步时直接推进。复用仍适用的结果，只验证本次改动影响的部分，
+不为测试或文档变化重跑未受影响的 GPU 矩阵。正式性能结论仍需通过 Target 的精度和比较要求。
 
 `screen` 执行 Experiment 中声明的低成本证据计划。Driver V2 的一次调用同时返回每个 subject 的正确性和性能观测；工具先验证正确性，再决定这些性能样本能否解释，不为两个判断重复启动完整 workload。隔离比较每个 pair/case 启动 reference 和 candidate 各一次；只有 driver 声明确实支持且 Experiment 冻结了共享状态时，才在同一进程的一次调用内完成两个 subject。前一项已足以按预声明范围拒绝候选时，不启动后续昂贵动作。`conservative_bound` 只有在预先说明它为何约束正式目标，并实际证明收益上限低于 minimum effect 时才能拒绝机制。`diagnostic_proxy` 只检验声明的局部机制；低代理收益或样本不足不能单独否定完整 workload，ChatGPT 根据该主张、其它证据和正式测试成本决定是否继续。正确性、安全、dispatch identity、环境或指标口径失败会使相应性能结果无效，只能关闭受影响的实现或测量；不能据此评价机制。
 
@@ -97,7 +104,9 @@ case/request slice、phase、coverage/exposure、收益上限和 ROI 仍适用�
 非重叠异常不限制性能归因；瞬时重叠异常仍按影响阈值判断。进程列表为空或显存很低不能单独证明 GPU 空闲；选卡时还要在
 有界窗口采样利用率和功耗，正式窗口继续保留这些观测。正式共享 GPU 实验保持串行，周期采样交给确定性命令。
 
-涉及越界访问、向量化或异步拷贝时，将 `compute-sanitizer memcheck` 纳入 screen；涉及 shared memory、多阶段 pipeline、barrier、warp specialization、原子操作或跨 stream 同步时，再按风险加入 `racecheck`、`initcheck` 或 `synccheck`。这些检查由 Experiment 显式声明，不由机制名称自动触发，也不能替代业务精度校验。
+按疑点和[工具覆盖](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html)选择检查：越界或非法访问可用 `compute-sanitizer memcheck`，共享内存竞争、未初始化读取和同步误用分别考虑 `racecheck`、`initcheck`、`synccheck`；不能把 shared-memory racecheck 无报告当作任意 global-memory 竞争已排除。
+[Triton 3.8](https://github.com/triton-lang/triton/releases/tag/v3.8.0) 新增实验性 GSan 并扩展 ConSan，使用前核对当前版本、allocator 和指令覆盖；[FpSan](https://github.com/triton-lang/triton/blob/c01b6774b1865984607d89d89d3a10833de92037/docs/programming-guide/chapter-3/fpsan.rst) 要比较双方同模式下的符号计算关系，不是 IEEE 数值或逐位等价证明。
+只运行能回答当前疑点的工具，不为新增工具默认升级环境；检查在 Experiment 中声明，不能替代业务精度校验。
 
 ## 4. 判断收益
 
