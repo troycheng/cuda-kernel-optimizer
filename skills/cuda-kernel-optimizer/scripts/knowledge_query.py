@@ -519,12 +519,16 @@ def _phenomena_match(card: dict, phenomena: list[str]) -> bool:
     if not phenomena:
         return True
     exact = _observation_ids(card)
-    searchable = {
-        str(term).lower() for term in card.get("match_terms", []) if term
-    }
-    searchable.add(str(card.get("mechanism_key", "")).lower())
+    searchable = [
+        re.sub(r"[\W_]+", " ", str(term).casefold()).strip()
+        for term in [card.get("mechanism_key", ""), *card.get("match_terms", [])] if term
+    ]
     for phenomenon in phenomena:
-        if phenomenon in exact or phenomenon.lower() in searchable:
+        phrase = re.sub(r"[\W_]+", " ", phenomenon.casefold()).strip()
+        if phenomenon in exact or (phrase and any(
+            re.search(r"(?<![a-z0-9])" + re.escape(phrase) + r"(?![a-z0-9])", term)
+            for term in searchable
+        )):
             return True
     return False
 

@@ -90,6 +90,30 @@ class KnowledgeQueryTests(unittest.TestCase):
         )
         self.assertTrue(any(item["content_kind"] == "heuristic" for item in result["matches"]))
 
+    def test_phrases_find_existing_material_without_changing_applicability(self):
+        module = load_module()
+        for term, mechanism in (
+            ("寄存器压力", "memory.register_pressure"),
+            ("REGISTER pressure", "memory.register_pressure"),
+            ("register_pressure", "memory.register_pressure"),
+            ("tensor-core", "compute.tensor_core"),
+            ("graph breaks", "workload.framework.graph-breaks"),
+        ):
+            with self.subTest(term=term):
+                exact = module.query(request(phenomena=[], mechanism_keys=[mechanism]))
+                discovered = module.query(request(phenomena=[term]))
+                self.assertIn(exact["matches"][0], discovered["matches"])
+                self.assertLessEqual(discovered["context_bytes"], 8192)
+
+    def test_discovery_does_not_match_word_fragments_or_relax_explicit_keys(self):
+        module = load_module()
+        for term in ("regist", "pressurex", "...", "   "):
+            with self.subTest(term=term):
+                self.assertEqual(module.query(request(phenomena=[term]))["matches"], [])
+        self.assertEqual(module.query(request(
+            phenomena=["register pressure"], mechanism_keys=["register pressure"],
+        ))["matches"], [])
+
     def test_pdl_contract_uses_the_documented_compute_capability_boundary(self):
         for architecture in ("sm_90", "sm_120", "sm_122"):
             with self.subTest(architecture=architecture):

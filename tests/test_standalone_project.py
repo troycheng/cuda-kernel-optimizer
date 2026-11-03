@@ -11,10 +11,12 @@ REPOSITORY = "github.com/troycheng/cuda-kernel-optimizer"
 
 class StandaloneProjectTests(unittest.TestCase):
     def test_public_version_and_release_notes_match_current_release(self) -> None:
-        self.assertEqual((ROOT / "VERSION").read_text("utf-8").strip(), "1.6.1")
+        version = (ROOT / "VERSION").read_text("utf-8").strip()
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
         for name in ("README.md", "README.en.md"):
             text = (ROOT / name).read_text("utf-8")
-            self.assertEqual(text.count("### V1.6.1"), 1)
+            self.assertEqual(text.count(f"### V{version}\n"), 1)
+            self.assertIn(f"/tree/v{version}/skills/cuda-kernel-optimizer", text)
             self.assertEqual(text.count("### V1.5.0"), 1)
             self.assertEqual(text.count("### V1.4.2"), 1)
             self.assertEqual(text.count("### V1.4.0"), 1)

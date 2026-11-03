@@ -49,7 +49,7 @@
 支持 Skills CLI 的环境可以直接安装当前正式版：
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.2/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 也可以让 ChatGPT 完成安装，用户不需要手工运行仓库内的 Python 脚本。直接发送：
@@ -160,6 +160,10 @@ artifacts/
 
 ## 版本说明
 
+### V1.6.2
+
+离线知识检索支持常用词组、分隔符变体和中文关键词，适用性判断与执行协议不变。修复文档站链接，统一安装版本，并发布此前已合入的诊断知识、参考资料和低成本实验指导更新。不据此声称模型效率或 GPU 性能提升。
+
 ### V1.6.1
 
 - 精简入口指令，按关键决策汇报，复用仍适用的研究与环境结论；保留原始基线、生产 ROI、精度和正式测量要求。
@@ -194,12 +198,8 @@ artifacts/
 
 ### V1.4.0
 
-- ChatGPT 成为唯一优化决策者，删除旧的自动规划、全局流程状态和重复执行入口。
-- 收敛为 17 个生产模块；公开工具每次只执行一次明确 operation，并统一记录 Invocation 终态、超时和清理结果。
-- 以 Target、Variant、Experiment、Invocation 和 Champion 作为唯一持久模型；候选不会自动晋级。
-- NCU、Nsys、PyTorch Profiler、编译产物和 SASS 只返回身份绑定的事实；未知格式 fail closed。
-- 离线知识查询按硬件和软件身份过滤，返回空结果时不阻断 ChatGPT 继续分析。
-- README、安装示例与 reference 全面切换到 V1.4，不保留旧流程兼容入口。
+- ChatGPT 负责优化决策，17 个生产模块执行明确操作；移除旧自动规划和重复入口，不保留旧流程兼容入口。
+- 统一 Target、Variant、Experiment、Invocation 和 Champion。工具保存身份绑定的事实、终态与清理结果；知识查询不决定方向，候选不会自动晋级。
 
 更早版本的变化可在 [GitHub Releases](https://github.com/troycheng/cuda-kernel-optimizer/releases) 和 Git 历史中查看。
 

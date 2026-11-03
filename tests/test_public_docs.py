@@ -38,6 +38,7 @@ class PublicDocsTests(unittest.TestCase):
                 if "://" in target or target.startswith("#"):
                     continue
                 resolved = (path.parent / target.split("#", 1)[0]).resolve()
+                self.assertTrue(resolved.is_relative_to(ROOT / "docs"), f"Link leaves the published site: {path}: {target}")
                 self.assertTrue(resolved.exists(), f"{path}: {target}")
 
     def test_public_docs_use_only_the_v14_model(self) -> None:

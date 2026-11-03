@@ -51,7 +51,7 @@ If these inputs are incomplete, ChatGPT reports the gaps and helps establish the
 In an environment that supports Skills CLI, install the current release directly:
 
 ```bash
-npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.1/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
+npx skills add https://github.com/troycheng/cuda-kernel-optimizer/tree/v1.6.2/skills/cuda-kernel-optimizer --skill cuda-kernel-optimizer
 ```
 
 ChatGPT can also perform the installation, so users do not need to run the repository's Python scripts manually. Send:
@@ -160,6 +160,10 @@ A change is ready to merge only when correctness passes, the user's real target 
 
 ## Release notes
 
+### V1.6.2
+
+Offline knowledge search accepts common phrases, separator variants, and Chinese keywords without changing applicability checks or execution protocols. Fixed the documentation-site link, aligned installation versions, and released previously merged diagnostic knowledge, references, and low-cost experiment guidance. No model-efficiency or GPU performance improvement is claimed.
+
 ### V1.6.1
 
 - Shortened the skill entrypoint, report progress at meaningful decisions, and reuse applicable research and environment findings. Original baselines, production ROI, correctness, and formal measurement requirements remain in place.
@@ -194,12 +198,8 @@ Added the case, evaluation and contribution process without changing the runtime
 
 ### V1.4.0
 
-- Made ChatGPT the only optimization decision maker and removed automatic planning, global workflow state, and duplicate execution entry points.
-- Reduced the production surface to 17 modules. Public tools perform one explicit operation and share Invocation termination, timeout, and cleanup records.
-- Standardized durable state on Target, Variant, Experiment, Invocation, and Champion; candidates never promote themselves.
-- Made NCU, Nsys, PyTorch Profiler, compiler, and SASS tools return identity-bound facts only; unknown formats fail closed.
-- Kept offline knowledge identity-filtered and advisory. An empty result does not block ChatGPT from continuing analysis.
-- Updated README, installation examples, and references to V1.4 without a compatibility entry point for the old workflow.
+- ChatGPT owns optimization decisions; 17 production modules execute explicit operations. Removed automatic planning and duplicate entry points without retaining the old workflows.
+- Unified Target, Variant, Experiment, Invocation, and Champion. Tools retain identity-bound facts, terminal states, and cleanup results; knowledge does not choose directions, and candidates never promote themselves.
 
 See [GitHub Releases](https://github.com/troycheng/cuda-kernel-optimizer/releases) and Git history for earlier versions.
 

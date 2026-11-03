@@ -10,7 +10,7 @@ Only local correctness and measurement decide whether a Candidate passes.
 
 ## Offline knowledge
 
-`knowledge_query.py` finds bounded material by observed phenomena or explicit mechanism keys, then reports whether each material is compatible with the supplied GPU, CUDA, framework, and claim-layer identity. Explicitly requested but incompatible material is returned with field-level mismatch reasons instead of disappearing. A contract with an unbounded component version is marked `related`, not `compatible`. A matched detailed playbook is returned only as a digest-bound path so ChatGPT can load it on demand.
+`knowledge_query.py` finds bounded material by observed phenomena or explicit mechanism keys, then reports whether each material is compatible with the supplied GPU, CUDA, framework, and claim-layer identity. Short phrases such as `register pressure`, `tensor-core`, or `寄存器压力` match existing terms regardless of case or separators; English words must be complete, while Chinese keywords can match within a term. This is lexical discovery, not semantic search. Explicit mechanism keys remain exact. Explicitly requested but incompatible material is returned with field-level mismatch reasons instead of disappearing. A contract with an unbounded component version is marked `related`, not `compatible`. A matched detailed playbook is returned only as a digest-bound path so ChatGPT can load it on demand.
 
 Technical contracts report a primary-source proposition, applicability, unsupported inferences, and the decisions that depend on it. Heuristics can suggest a candidate or falsifying observation; cases remain bound to their recorded environment. The query never decides whether a premise is resolved, whether a mechanism is supported, or what to do next. An empty result is successful and does not block source analysis, profiling, or a new ChatGPT hypothesis. Historical gain numbers are not transferred to the current Target.
 
@@ -30,4 +30,4 @@ External models are most useful for a major direction choice, an unexplained pla
 
 External availability is optional. A request without a complete answer is recorded as failed review, not successful coverage. Preserve disagreement rather than turning answers into a vote. Private source, credentials, raw inputs, hostnames, and business data are not sent without explicit approval.
 
-See the installed [research reference](../skills/cuda-kernel-optimizer/references/research_augmentation.md) for source selection and review boundaries.
+See the installed [research reference](https://github.com/troycheng/cuda-kernel-optimizer/blob/v1.6.2/skills/cuda-kernel-optimizer/references/research_augmentation.md) for source selection and review boundaries.

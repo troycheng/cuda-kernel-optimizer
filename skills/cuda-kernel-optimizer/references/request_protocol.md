@@ -309,13 +309,13 @@ compiler stage 可为 `source`、`ttir`、`ttgir`、`llvm_ir`、`ptx`、`sass` �
 
 ## knowledge 与 Champion
 
-离线知识的 detached 查询：
+离线知识的 detached 查询：`phenomena` 可用简短关键词，如 `寄存器压力`、`register pressure`、`tensor-core`，也可用精确观测 ID。词组匹配忽略大小写及分隔符，英文按完整词匹配，中文可匹配术语的一部分；它不是自然语言语义检索。需要精确选择机制时使用 `filters.mechanism_keys`，其标识仍须完全匹配。查询只发现材料，不改变适用性判断。
 
 ```json
 {
   "format_version": "cuda-kernel-optimizer/knowledge-input-v1",
   "operation": "query",
-  "identity": {"gpu_architecture": "sm_120", "cuda_version": "13.0", "frameworks": {"triton": "3.4"}, "phenomena": ["memory_bound"], "claim_layer": "kernel"},
+  "identity": {"gpu_architecture": "sm_120", "cuda_version": "13.0", "frameworks": {"triton": "3.4"}, "phenomena": ["register pressure"], "claim_layer": "kernel"},
   "filters": {"mechanism_keys": []},
   "limits": {"max_results": 8, "max_context_bytes": 32768}
 }
