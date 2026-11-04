@@ -62,7 +62,9 @@ driver 确实能在同一进程内运行两个 subject 并保持所声明的共�
 - 关键工具缺失且没有等价证据路径；
 - 测量噪声大到无法识别最低有效收益。
 
-共享 GPU 的“空闲”必须由一个短、有界、只读的观测窗口证明，而不是只看 compute PID 或显存。至少同时记录设备身份、利用率、显存、功耗和可见进程；PID 为空但持续高利用率属于未解释污染，必须换卡、等待或标为 inconclusive。低显存本身既不能证明空闲，也不能单独证明污染。多 GPU workload 还要在冻结设备集合前核对 NUMA、PCIe/NVLink 与 P2P 可达性。
+共享 GPU 的“空闲”必须由一个短、有界、只读的观测窗口证明，而不是只看 compute PID 或显存。至少同时记录设备身份、利用率、显存、功耗和可见进程；PID 为空但持续高利用率属于未解释污染，必须换卡、等待或标为 inconclusive。低显存本身既不能证明空闲，也不能单独证明污染。多 GPU workload 核对实际 rank 到设备的映射、NUMA、PCIe/NVLink 与 P2P 可达性；跨节点时再看 GPU—NIC 路径和所用网络。已有环境记录可复用，不能从型号或 GPU 数量推断拓扑。
+
+通信成为候选方向时，先用已有 NCCL 日志、拓扑和对齐的 rank 时间线区分上游迟到、传输与未隐藏的通信。`nvidia-smi topo -m` 或本机支持的 P2P 查询可以补充拓扑事实，但可达性不证明吞吐。只有传输能力仍会影响判断时，才选择与实际设备对、消息大小和 rank 数相符的 `nvbandwidth` 或 NCCL tests；不要先跑全矩阵。链路带宽、collective 带宽和服务收益不能互换。工具按需使用，不因机器是 H800 就安装或运行整套诊断。[NCCL 官方排查资料](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/troubleshooting.html) 提供 GPU、网络和运行时的分项入口；宿主机修改仍遵循下述授权边界。
 
 命令失败会在现有错误输出中保留 stop reason、returncode、截断 stdout/stderr 和 cleanup。readiness 成功只证明本次最小 probe 闭合，不证明之后的 baseline 分布稳定，也不证明共享宿主机不会被其他任务污染。
 

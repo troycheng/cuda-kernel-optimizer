@@ -752,18 +752,19 @@
       ],
       "cheapest_falsifier": {
         "action_id": "nsys-os-runtime-slice",
-        "rationale": "Compare aligned rank arrival, collective, and upstream intervals before changing communication."
+        "rationale": "Read aligned rank/collective intervals and existing topology first; measure only an unresolved transfer path."
       },
       "competing_explanations": [
-        "kernel imbalance",
-        "CPU scheduling",
-        "topology limitation"
+        "Upstream compute or CPU delay",
+        "GPU/NIC placement or transport limit",
+        "Small messages or ineffective overlap"
       ],
       "content_kind": "heuristic",
       "counter_signals": [
-        "one rank arrives late because of upstream compute"
+        "Late arrival explains the wait",
+        "Communication is hidden off the critical path"
       ],
-      "distinguishing_question": "Do per-rank traces show the same collective delay and the same arrival skew?",
+      "distinguishing_question": "Is exposed time rank waiting, transfer service, or lost compute/communication overlap?",
       "execution_layers": [
         "communication",
         "gpu",
@@ -784,12 +785,14 @@
       "invalidators": [
         "rank clocks or trace windows are not aligned"
       ],
-      "last_reviewed": "2026-07-30",
+      "last_reviewed": "2026-11-04",
       "match_terms": [
         "nccl",
         "allreduce",
         "alltoall",
-        "collective"
+        "collective",
+        "NVLink PCIe NUMA GPU NIC topology",
+        "多卡通信"
       ],
       "mechanism": "Collective duration, rank imbalance or missing overlap limits the distributed critical path.",
       "mechanism_key": "collective_wait_or_rank_skew",
@@ -847,15 +850,13 @@
       ],
       "priority": 1,
       "required_evidence": [
-        "aligned per-rank collective and arrival intervals",
-        "stable rank, topology, and workload identities"
+        "Aligned rank arrival and completion; message size and rank mapping",
+        "Actual GPU/P2P/NIC topology and transport, not another SKU's bandwidth"
       ],
       "source_ids": [
         "nvidia-nsight-systems",
         "nvidia-nccl-user-guide",
-        "nvidia-ampere-tuning",
-        "nvidia-hopper-tuning",
-        "nvidia-blackwell-tuning"
+        "nvidia-nccl-troubleshooting"
       ],
       "status": "advisory"
     },
@@ -3175,16 +3176,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 40,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_long_scoreboard.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Inspect producer/consumer waits and tile count."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_long_scoreboard.pct is not a bad trigger under the frozen measurement"
+        "Small grid, tails, low residency or no independent work."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_long_scoreboard.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Is compute starved by data, too little work or synchronization?",
       "id": "method.compute.warp_specialization",
       "identity_constraints": {
         "claim_layers": [
@@ -3194,36 +3193,32 @@
         ],
         "cuda_runtime_version": [],
         "framework_versions": {},
-        "gpu_architecture": [
-          "sm_90",
-          "sm_100",
-          "sm_103",
-          "sm_110",
-          "sm_120",
-          "sm_121"
-        ]
+        "gpu_architecture": []
       },
-      "invalidators": [
-        "correctness failure",
-        "identity mismatch"
-      ],
       "match_terms": [
-        "compute.warp_specialization",
-        "compute",
-        "Warp Specialization (producer-consumer)",
+        "warp specialization",
+        "producer consumer",
+        "tensor core utilization",
+        "Hopper H800 H100 H200",
+        "流水线",
         "smsp__warp_issue_stalled_long_scoreboard.pct"
       ],
       "mechanism": "Warp Specialization (producer-consumer)",
       "mechanism_key": "compute.warp_specialization",
       "priority": 3,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Dispatched shape, code and register/shared-memory use; not stall percentage alone."
       ],
       "source_ids": [
-        "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-hopper-tuning",
+        "nvidia-cutlass-hopper-builder"
       ],
-      "status": "advisory"
+      "status": "advisory",
+      "applies_when": [
+        "Copy and compute can overlap; check instruction support separately."
+      ],
+      "playbook": "playbooks/hopper-dataflow.md",
+      "playbook_sha256": "aea0b93577e0cda6fe0b9f8f625dbd32901706737f45554b4187cbc621de94a5"
     },
     {
       "cheapest_falsifier": {
@@ -3626,16 +3621,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 40,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_long_scoreboard.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Check copy-to-use distance and access mapping before adding stages."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_long_scoreboard.pct is not a bad trigger under the frozen measurement"
+        "Already-overlapped copies, irreducible traffic or too few tiles."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_long_scoreboard.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Can copy latency overlap useful work without losing residency?",
       "id": "method.memory.async_copy",
       "identity_constraints": {
         "claim_layers": [
@@ -3657,27 +3650,26 @@
           "sm_121"
         ]
       },
-      "invalidators": [
-        "correctness failure",
-        "identity mismatch"
-      ],
       "match_terms": [
-        "memory.async_copy",
-        "memory",
-        "异步拷贝 (cp.async / TMA)",
+        "async copy",
+        "cp.async versus TMA",
+        "异步拷贝",
         "smsp__warp_issue_stalled_long_scoreboard.pct"
       ],
-      "mechanism": "异步拷贝 (cp.async / TMA)",
+      "mechanism": "Global-to-shared cp.async overlap",
       "mechanism_key": "memory.async_copy",
       "priority": 5,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Copy/wait path and stage storage; TMA has separate layout/target requirements."
       ],
       "source_ids": [
-        "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-ampere-tuning",
+        "nvidia-hopper-tuning"
       ],
-      "status": "advisory"
+      "status": "advisory",
+      "applies_when": [
+        "Ampere-or-later global-to-shared cp.async path; not a TMA capability claim."
+      ]
     },
     {
       "cheapest_falsifier": {
@@ -4613,16 +4605,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": null,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "launch__occupancy_limit_registers"
+        "action_id": "inspect-existing-code",
+        "rationale": "Check register release/request order and spills before changing allocation."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "launch__occupancy_limit_registers is not a bad trigger under the frozen measurement"
+        "No releasable registers or no consumer benefit; inc can block awaiting the CTA pool."
       ],
-      "distinguishing_question": "Does launch__occupancy_limit_registers meet the frozen workload acceptance?",
+      "distinguishing_question": "Can producers release registers that consumers actually need?",
       "id": "method.latency.producer_regdealloc_setmaxnreg",
       "identity_constraints": {
         "claim_layers": [
@@ -4641,40 +4631,36 @@
           "sm_121"
         ]
       },
-      "invalidators": [
-        "correctness failure",
-        "identity mismatch"
-      ],
       "match_terms": [
-        "latency.producer_regdealloc_setmaxnreg",
-        "latency",
-        "setmaxnreg.dec/inc 寄存器再分配",
+        "setmaxnreg",
+        "register redistribution",
+        "寄存器再分配",
         "launch__occupancy_limit_registers"
       ],
       "mechanism": "setmaxnreg.dec/inc 寄存器再分配",
       "mechanism_key": "latency.producer_regdealloc_setmaxnreg",
       "priority": 11,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Valid target (e.g. sm_90a), register bounds and uniform warpgroup execution with required synchronization."
       ],
       "source_ids": [
-        "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-ptx-isa"
       ],
-      "status": "advisory"
+      "status": "advisory",
+      "applies_when": [
+        "Uneven CTA register needs; verify PTX/compiler target, not just GPU identity."
+      ]
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": null,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "dram__bytes.sum"
+        "action_id": "inspect-existing-code",
+        "rationale": "Check tile reuse and existing cache service before attributing traffic savings to multicast."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "dram__bytes.sum is not a bad trigger under the frozen measurement"
+        "Different tiles, cache-served reuse, or cluster costs exceed savings."
       ],
-      "distinguishing_question": "Does dram__bytes.sum meet the frozen workload acceptance?",
+      "distinguishing_question": "Does multicast remove transfers on the limiting path?",
       "id": "method.memory.tma_multicast",
       "identity_constraints": {
         "claim_layers": [
@@ -4693,27 +4679,25 @@
           "sm_121"
         ]
       },
-      "invalidators": [
-        "correctness failure",
-        "identity mismatch"
-      ],
       "match_terms": [
-        "memory.tma_multicast",
-        "memory",
-        "TMA Multicast 跨 CTA 数据复用",
+        "TMA multicast",
+        "跨 CTA 复用",
         "dram__bytes.sum"
       ],
       "mechanism": "TMA Multicast 跨 CTA 数据复用",
       "mechanism_key": "memory.tma_multicast",
       "priority": 11,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Cluster shape, consumers and target support; DRAM bytes alone do not prove reuse."
       ],
       "source_ids": [
-        "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-hopper-tuning",
+        "nvidia-ptx-isa"
       ],
-      "status": "advisory"
+      "status": "advisory",
+      "applies_when": [
+        "CTAs in a supported cluster consume the same tile; verify multicast and cluster capability."
+      ]
     },
     {
       "cheapest_falsifier": {
@@ -4819,16 +4803,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 100,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum"
+        "action_id": "inspect-existing-code",
+        "rationale": "Inspect layout, consumer accesses and setup/tail costs."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum is not a bad trigger under the frozen measurement"
+        "Tiny transfer, setup-dominated kernel or already efficient shared-memory accesses."
       ],
-      "distinguishing_question": "Does l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum meet the frozen workload acceptance?",
+      "distinguishing_question": "Does TMA reduce address/copy work, and does its layout suit the consumer?",
       "id": "method.memory.tma_descriptor_tuning",
       "identity_constraints": {
         "claim_layers": [
@@ -4847,27 +4829,28 @@
           "sm_121"
         ]
       },
-      "invalidators": [
-        "correctness failure",
-        "identity mismatch"
-      ],
       "match_terms": [
-        "memory.tma_descriptor_tuning",
-        "memory",
-        "TMA descriptor swizzle / multicast 精调",
+        "TMA descriptor",
+        "tensor memory accelerator",
+        "shared memory swizzle",
         "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum"
       ],
-      "mechanism": "TMA descriptor swizzle / multicast 精调",
+      "mechanism": "TMA layout and consumer access",
       "mechanism_key": "memory.tma_descriptor_tuning",
+      "playbook": "playbooks/hopper-dataflow.md",
+      "playbook_sha256": "aea0b93577e0cda6fe0b9f8f625dbd32901706737f45554b4187cbc621de94a5",
       "priority": 12,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Alignment/strides, consumer layout and synchronization; no universal conflict threshold."
       ],
       "source_ids": [
-        "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-hopper-tuning",
+        "nvidia-cutlass-hopper-builder"
       ],
-      "status": "advisory"
+      "status": "advisory",
+      "applies_when": [
+        "Deployed target/compiler supports TMA; cp.async alone does not imply this."
+      ]
     },
     {
       "cheapest_falsifier": {
@@ -5201,16 +5184,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 50,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__cycles_active.pct_of_peak"
+        "action_id": "inspect-existing-code",
+        "rationale": "Check uneven tile completion and work left to steal before adding a scheduler."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__cycles_active.pct_of_peak is not a bad trigger under the frozen measurement"
+        "Uniform tiles, too little work or launch overhead outside the kernel."
       ],
-      "distinguishing_question": "Does sm__cycles_active.pct_of_peak meet the frozen workload acceptance?",
+      "distinguishing_question": "Is an imbalanced tail removable by dynamic tile assignment?",
       "id": "method.latency.cluster_launch_control_scheduler",
       "identity_constraints": {
         "claim_layers": [
@@ -5228,27 +5209,24 @@
           "sm_121"
         ]
       },
-      "invalidators": [
-        "correctness failure",
-        "identity mismatch"
-      ],
       "match_terms": [
-        "latency.cluster_launch_control_scheduler",
-        "latency",
-        "Cluster Launch Control 动态 tile 调度",
+        "cluster launch control",
+        "dynamic tile scheduling",
         "sm__cycles_active.pct_of_peak"
       ],
       "mechanism": "Cluster Launch Control 动态 tile 调度",
       "mechanism_key": "latency.cluster_launch_control_scheduler",
       "priority": 17,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Tile distribution and instruction support; low active cycles do not prove imbalance."
       ],
       "source_ids": [
-        "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-ptx-isa"
       ],
-      "status": "advisory"
+      "status": "advisory",
+      "applies_when": [
+        "Blackwell target with supported CLC instructions; Hopper thread-block clusters are not CLC."
+      ]
     },
     {
       "cheapest_falsifier": {

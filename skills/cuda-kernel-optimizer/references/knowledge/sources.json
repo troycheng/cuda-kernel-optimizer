@@ -1,7 +1,31 @@
 {
-  "as_of": "2026-10-09",
+  "as_of": "2026-11-04",
   "schema_version": "cuda-kernel-optimizer/knowledge-sources-v2",
   "sources": [
+    {
+      "id": "nvidia-cutlass-hopper-builder",
+      "last_reviewed": "2026-11-04",
+      "locator": "CollectiveBuilder: tile/cluster shapes, StageCountAutoCarveout and kernel schedules",
+      "source_kind": "primary",
+      "status": "reviewed",
+      "summary": "Hopper collective builders expose tile, cluster, stage and schedule choices and reserve epilogue shared memory when choosing stages.",
+      "title": "CUTLASS Hopper collective-builder example",
+      "url": "https://github.com/NVIDIA/cutlass/blob/0d2b201e8c1c4a03efa6e9c468161916e2334725/examples/49_hopper_gemm_with_collective_builder/49_collective_builder.cu",
+      "version": "commit 0d2b201e8c1c4a03efa6e9c468161916e2334725",
+      "summary_sha256": "4a1dd08a69576a012f05e6d7eb627d03671b41fede6e870134cbd525621cfa00"
+    },
+    {
+      "id": "nvidia-nccl-troubleshooting",
+      "last_reviewed": "2026-11-04",
+      "locator": "GPU troubleshooting: GPU-to-GPU/GPU-to-NIC and topology; Performance and tuning: intra-node/inter-node",
+      "source_kind": "primary",
+      "status": "reviewed",
+      "summary": "Distinguishes GPU peer access, link and fabric performance from NCCL configuration; topology visibility and transport health affect interpretation.",
+      "title": "NCCL troubleshooting",
+      "url": "https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/troubleshooting.html",
+      "version": "NCCL 2.32.3",
+      "summary_sha256": "f4975fae6f33e623939ee1925e0b56523ec2fec8cac75e69a133ccd6d2f33e5a"
+    },
     {
       "id": "nvidia-cuda-programming-model",
       "last_reviewed": "2026-10-09",
@@ -52,15 +76,15 @@
     },
     {
       "id": "nvidia-ampere-tuning",
-      "last_reviewed": "2026-07-30",
-      "locator": "CUDA Best Practices and Ampere Tuning sections",
+      "last_reviewed": "2026-11-04",
+      "locator": "1.4.1.1 Occupancy; 1.4.1.2 Asynchronous Data Copy from Global Memory to Shared Memory",
       "source_kind": "primary",
       "status": "reviewed",
       "summary": "Defines Ampere occupancy, asynchronous copy, memory hierarchy, and execution guidance without implying support on other architectures.",
       "summary_sha256": "d89ddc0e8f38f9abcd68de38d29598538f984ebaa463aa64ca6caffef655954e",
       "title": "NVIDIA Ampere GPU Architecture Tuning Guide",
       "url": "https://docs.nvidia.com/cuda/ampere-tuning-guide/",
-      "version": "CUDA 13.3 documentation family"
+      "version": "CUDA 13.4"
     },
     {
       "id": "nvidia-blackwell-tuning",
@@ -172,15 +196,15 @@
     },
     {
       "id": "nvidia-hopper-tuning",
-      "last_reviewed": "2026-07-30",
-      "locator": "Occupancy, Tensor Memory Accelerator, and Thread Block Clusters sections",
+      "last_reviewed": "2026-11-04",
+      "locator": "1.4.1.1 Occupancy; 1.4.1.2 Tensor Memory Accelerator; 1.4.1.3 Thread Block Clusters",
       "source_kind": "primary",
       "status": "reviewed",
       "summary": "Defines Hopper occupancy, Tensor Memory Accelerator, asynchronous execution, and cluster guidance for Hopper-family checks.",
       "summary_sha256": "1857e7442ccd1c6f9890e7dca9bb35366d12236c88ec8888ea5c78a1cac39156",
       "title": "NVIDIA Hopper Tuning Guide",
       "url": "https://docs.nvidia.com/cuda/hopper-tuning-guide/",
-      "version": "CUDA 13.x documentation family"
+      "version": "CUDA 13.4"
     },
     {
       "id": "nvidia-nccl-user-guide",
@@ -233,14 +257,14 @@
     {
       "id": "nvidia-ptx-isa",
       "last_reviewed": "2026-07-30",
-      "locator": "State Spaces, Memory Consistency Model, and PTX Instructions sections",
+      "locator": "State Spaces, Memory Consistency Model, and PTX Instructions sections; setmaxnreg and clusterlaunchcontrol.try_cancel Target ISA Notes rechecked against PTX 9.4 on 2026-11-04",
       "source_kind": "primary",
       "status": "reviewed",
       "summary": "Defines PTX memory, arithmetic, synchronization, and atomic instruction semantics used to inspect generated code.",
       "summary_sha256": "1e859e81983f2989288fd7f75959165ec9d6ab0baae77ac89ec5631d3acf2be7",
       "title": "Parallel Thread Execution ISA",
       "url": "https://docs.nvidia.com/cuda/parallel-thread-execution/",
-      "version": "PTX ISA 9.3"
+      "version": "PTX ISA 9.3; async control instruction sections rechecked in 9.4"
     },
     {
       "id": "nvidia.blackwell-tuning-12.9",
