@@ -25,8 +25,19 @@
 
 ## Evaluation Result
 
-尚未执行，待冻结提交后记录。
+定义及候选固定在 `fcb54e0`，2026-11-04 完成检查，候选内容未在评测后调整。
+
+- CPU 全套测试：`python3 -m unittest discover -s tests -p 'test_*.py'`，255 项，2 项环境相关跳过，其余通过，46.211 秒，退出码 0。
+- `self_check.py`、compileall、diff whitespace 检查退出码均为 0。系统 Python 的 quick_validate 首次因缺 PyYAML 未执行；改用 `uv run --no-project --with PyYAML` 的隔离环境后通过，退出码 0，没有修改项目依赖或全局 Python。
+- 调用现有 query 接口：SM80/90/100/120 均能取到通用 producer/consumer 材料及摘要绑定的文档路径，每次 1824 bytes；这是资料匹配，不是相同指令支持声明。H800、TMA 能发现说明，NVLink 与中文“多卡通信”能发现通信卡；SM80 显式查询 TMA 保留不匹配说明，未知机制仍正常返回空结果。
+- 独立子智能体 `cross_architecture_review`，请求配置 gpt-6.1-sol / medium，一轮只读、无网络或 GPU；未取得精确后端快照、token 用量及独立耗时，记为未知。未发现阻塞问题或新增强制流程。
+
+六题的语义结果：1 区分工作量不足，不从低利用率推定 TMA 收益；2 优先检查已有地址映射问题，不把 producer 忙等同带宽饱和；3 不把 A100 cp.async 当作 Hopper 模板可用的证据；4 承认资源代价，但不从驻留下降断言必然更慢；5 先查迟到 rank 上游，不把 collective 总区间当传输时间；6 先补消息与映射资料，仅在传输仍是关键未知时测相关路径，离线版本能力保持未知。
+
+全部计划内检查已完成，没有追加题目或重复调参。只支持资料自洽、接口可用及上述六个情境的合理解释，不证明相比旧版准确率、token 效率或 H800 性能提高。没有 GPU 调用或私有材料。卡片仍为 97 张，cards.json 为 199979 bytes；生产 Python、schema、SKILL 和现有测试文件均未修改。
 
 ## Release Decision
 
 用户已授权按上述内容范围修改，经 review 和必要检查后提交、推送并同步两个仓库；没有授权本轮发布新版本或声明 H800 实测收益。实际提交与检查结果随后记录。
+
+按该授权提交本次资料更新与检查结果；本文件不构成新版本 Release 或性能声明。停止原因是已批准范围内的修改与必要验证完成。
