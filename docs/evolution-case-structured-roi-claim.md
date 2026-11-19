@@ -137,3 +137,9 @@ claim that model-authored relationships are independently true or that GPU
 optimization quality improved in general. The release carriers are the
 [GitHub v1.6.0 release](https://github.com/troycheng/cuda-kernel-optimizer/releases/tag/v1.6.0)
 and the internal `v1.6.0` tag.
+
+## Knowledge lookup replay (2026-11-19)
+
+This follow-up reuses the Case Snapshot above. Compare `cdafb0d` with the first commit containing this section. Query `kernel fusion` with the unchanged `tests/test_knowledge_query.py` request defaults and `max_results=1`. The lookup identity is a test fixture, not the production software manifest. Give each reader only its card's question, required evidence, counter-signals and cheapest check, plus the two boundary timings, ten occurrences, replay duration and throughput target. Withhold the service result and the historical decision.
+
+Use two independent clean sessions, one per arm, requesting the same model (gpt-6.2-astra, medium). Ask for the deployment decision, arithmetic, next action and what remains unknown. Count an arm as passing only if it separates the measured prototype from complete removal, uses the deployed reference and does not request another run to reject the prototype. A missing answer is inconclusive, not a pass. One reading per arm, no GPU or external tools. This is a replay of a published case, not a holdout, speed benchmark or general model-quality comparison.
