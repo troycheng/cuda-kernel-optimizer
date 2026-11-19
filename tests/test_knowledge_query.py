@@ -98,12 +98,25 @@ class KnowledgeQueryTests(unittest.TestCase):
             ("register_pressure", "memory.register_pressure"),
             ("tensor-core", "compute.tensor_core"),
             ("graph breaks", "workload.framework.graph-breaks"),
+            ("all-reduce", "collective_wait_or_rank_skew"),
+            ("all_reduce", "workload.communication.collective"),
+            ("GPU利用率低", "cross-layer.unattributed-critical-path"),
+            ("GPU 利用率低", "nsys.time-utilization"),
         ):
             with self.subTest(term=term):
                 exact = module.query(request(phenomena=[], mechanism_keys=[mechanism]))
                 discovered = module.query(request(phenomena=[term]))
                 self.assertIn(exact["matches"][0], discovered["matches"])
                 self.assertLessEqual(discovered["context_bytes"], 8192)
+
+    def test_instruction_discovery_does_not_assume_an_fp8_policy(self):
+        module = load_module()
+        for arch in ("sm_90", "sm_120"):
+            match = module.query(request(phenomena=["WGMMA"], gpu_architecture=arch, max_results=1))["matches"][0]
+            self.assertEqual(match["mechanism_key"], "compute.tensor_core")
+        specific = module.query(request(phenomena=["FP8 fast accumulation"], gpu_architecture="sm_120"))["matches"][0]
+        self.assertEqual(specific["mechanism_key"], "compute.fp8_fast_accumulation_mode")
+        self.assertEqual(specific["applicability"]["relation"], "incompatible")
 
     def test_discovery_does_not_match_word_fragments_or_relax_explicit_keys(self):
         module = load_module()

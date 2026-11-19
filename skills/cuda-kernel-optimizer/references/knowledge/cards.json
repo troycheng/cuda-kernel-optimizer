@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-09",
+  "as_of": "2026-11-19",
   "cards": [
     {
       "applies_when": [
@@ -11,7 +11,7 @@
       ],
       "cheapest_falsifier": {
         "action_id": "nsys-global-timeline",
-        "rationale": "Capture one bounded cross-layer timeline before selecting a layer-specific mechanism."
+        "rationale": "Read the existing timeline first. Capture a short missing interval only if it would distinguish the competing causes."
       },
       "competing_explanations": [
         "CPU or framework gap",
@@ -49,7 +49,13 @@
         "timeline window is boundary ambiguous"
       ],
       "last_reviewed": "2026-07-28",
-      "match_terms": [],
+      "match_terms": [
+        "low GPU utilization",
+        "GPU利用率低",
+        "GPU 利用率低",
+        "GPU低利用率",
+        "GPU 低利用率"
+      ],
       "mechanism": "The current evidence does not locate delay at one execution layer.",
       "mechanism_key": "cross-layer.unattributed-critical-path",
       "observation_rules": {
@@ -416,7 +422,10 @@
         "nsys",
         "gpu utilization",
         "gpu idle gaps",
-        "profiling overhead"
+        "profiling overhead",
+        "low GPU utilization",
+        "GPU利用率低",
+        "GPU 利用率低"
       ],
       "mechanism": "Nsight Systems GPU time-utilization semantics",
       "mechanism_key": "nsys.time-utilization",
@@ -575,7 +584,10 @@
         "collective",
         "allreduce",
         "rank participation",
-        "async error"
+        "async error",
+        "all-reduce",
+        "alltoall",
+        "all-to-all"
       ],
       "mechanism": "NCCL collective participation and completion semantics",
       "mechanism_key": "workload.communication.collective",
@@ -792,7 +804,9 @@
         "alltoall",
         "collective",
         "NVLink PCIe NUMA GPU NIC topology",
-        "多卡通信"
+        "多卡通信",
+        "all-reduce",
+        "all-to-all"
       ],
       "mechanism": "Collective duration, rank imbalance or missing overlap limits the distributed critical path.",
       "mechanism_key": "collective_wait_or_rank_skew",
@@ -867,7 +881,7 @@
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "HMMA 指标不覆盖所有 tensor 指令；静态存在不证明执行，执行不证明收益"
+        "HMMA 指标不覆盖所有指令；发现 WGMMA 不代表使用 FP8，也不证明执行或收益。"
       ],
       "distinguishing_question": "当前路径未用适用指令，还是规模、供数或同步受限？",
       "id": "method.compute.tensor_core",
@@ -901,7 +915,8 @@
         "compute.tensor_core",
         "compute",
         "Tensor Core / 专用硬件利用",
-        "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak"
+        "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak",
+        "WGMMA"
       ],
       "mechanism": "Tensor Core 路径",
       "mechanism_key": "compute.tensor_core",
@@ -911,7 +926,8 @@
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
-        "nvidia-nsight-compute"
+        "nvidia-nsight-compute",
+        "nvidia-ptx-isa"
       ],
       "status": "advisory",
       "competing_explanations": [
@@ -1834,16 +1850,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 40,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_long_scoreboard.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Inspect the dispatched copy, wait and use sequence before adding a stage."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_long_scoreboard.pct is not a bad trigger under the frozen measurement"
+        "No independent work between copy and use."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_long_scoreboard.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Is an exposed copy-to-use wait holding up an independent tile?",
       "id": "method.latency.async_pipeline",
       "identity_constraints": {
         "claim_layers": [
@@ -1870,16 +1884,15 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.async_pipeline",
-        "latency",
-        "异步流水线消除同步等待",
-        "smsp__warp_issue_stalled_long_scoreboard.pct"
+        "smsp__warp_issue_stalled_long_scoreboard.pct",
+        "async pipeline",
+        "异步流水线"
       ],
-      "mechanism": "异步流水线消除同步等待",
+      "mechanism": "Async copy/compute pipeline",
       "mechanism_key": "latency.async_pipeline",
       "priority": 1,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Copy/wait order and shared-memory footprint."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -1889,16 +1902,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": null,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "dram__bytes.sum"
+        "kind": "knowledge_only",
+        "steps": ["Use the dispatched reference and candidate at the same boundary, multiplied by occurrences on the critical path. Compare that saving with the target before profiling."]
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "dram__bytes.sum is not a bad trigger under the frozen measurement"
+        "Lowering already removed the eager launches or intermediate; complete removal is not the measured candidate."
       ],
-      "distinguishing_question": "Does dram__bytes.sum meet the frozen workload acceptance?",
+      "distinguishing_question": "What work would fusion actually remove from the deployed graph?",
       "id": "method.memory.kernel_fusion",
       "identity_constraints": {
         "claim_layers": [
@@ -1927,8 +1938,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.kernel_fusion",
-        "memory",
         "Kernel Fusion",
         "dram__bytes.sum"
       ],
@@ -1936,7 +1945,7 @@
       "mechanism_key": "memory.kernel_fusion",
       "priority": 1,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Production graph, boundary timings, occurrence count and replay time."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3002,16 +3011,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 50,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__pipe_fp32_cycles_active.pct_of_peak"
+        "action_id": "inspect-existing-code",
+        "rationale": "Check the precision contract, compiled types and conversions before timing."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__pipe_fp32_cycles_active.pct_of_peak is not a bad trigger under the frozen measurement"
+        "Required accuracy rules out the change, or conversion dominates the proposed saving."
       ],
-      "distinguishing_question": "Does sm__pipe_fp32_cycles_active.pct_of_peak meet the frozen workload acceptance?",
+      "distinguishing_question": "Is a lower-precision path permitted and actually dispatched?",
       "id": "method.compute.mixed_precision",
       "identity_constraints": {
         "claim_layers": [
@@ -3040,8 +3047,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.mixed_precision",
-        "compute",
         "混合精度 / 低位宽计算",
         "sm__pipe_fp32_cycles_active.pct_of_peak"
       ],
@@ -3049,7 +3054,7 @@
       "mechanism_key": "compute.mixed_precision",
       "priority": 2,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Input range, accumulator type, accuracy reference and dispatch."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3059,16 +3064,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 30,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_barrier.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Trace shared reads and writes across the barrier; keep it if any cross-warp dependency requires this ordering."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_barrier.pct is not a bad trigger under the frozen measurement"
+        "A slow arriving warp explains the stall without making the barrier redundant."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_barrier.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Which producer and consumer require this block-wide barrier?",
       "id": "method.latency.reduce_sync_count",
       "identity_constraints": {
         "claim_layers": [
@@ -3097,8 +3100,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.reduce_sync_count",
-        "latency",
         "减少 __syncthreads() 次数",
         "smsp__warp_issue_stalled_barrier.pct"
       ],
@@ -3106,7 +3107,7 @@
       "mechanism_key": "latency.reduce_sync_count",
       "priority": 2,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Participants, memory scope and dependency order."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3201,7 +3202,8 @@
         "tensor core utilization",
         "Hopper H800 H100 H200",
         "流水线",
-        "smsp__warp_issue_stalled_long_scoreboard.pct"
+        "smsp__warp_issue_stalled_long_scoreboard.pct",
+        "Hopper WGMMA"
       ],
       "mechanism": "Warp Specialization (producer-consumer)",
       "mechanism_key": "compute.warp_specialization",
@@ -3222,16 +3224,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_barrier.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Map each consumer to a producer lane and check the active mask, including tails."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_barrier.pct is not a bad trigger under the frozen measurement"
+        "A required value crosses warp boundaries or comes from a nonparticipating lane."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_barrier.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Can the exchange stay within the same participating warp?",
       "id": "method.latency.warp_shuffle_sync",
       "identity_constraints": {
         "claim_layers": [
@@ -3260,8 +3260,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.warp_shuffle_sync",
-        "latency",
         "Warp Shuffle 替代 Shared Memory 同步",
         "smsp__warp_issue_stalled_barrier.pct"
       ],
@@ -3269,7 +3267,7 @@
       "mechanism_key": "latency.warp_shuffle_sync",
       "priority": 3,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Lane mapping and active mask."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3279,16 +3277,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 30,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "lts__t_sector_hit_rate.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Count reusable loads in the address mapping and compare with tile storage and barriers."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "lts__t_sector_hit_rate.pct is not a bad trigger under the frozen measurement"
+        "No reuse across threads, or the data is already reused by the dispatched path."
       ],
-      "distinguishing_question": "Does lts__t_sector_hit_rate.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Would shared tiling eliminate repeated global loads for this tile?",
       "id": "method.memory.tiling_smem",
       "identity_constraints": {
         "claim_layers": [
@@ -3317,8 +3313,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.tiling_smem",
-        "memory",
         "Tiling / Shared Memory 分块",
         "lts__t_sector_hit_rate.pct"
       ],
@@ -3326,7 +3320,7 @@
       "mechanism_key": "memory.tiling_smem",
       "priority": 3,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Tile shape, strides and shared-memory footprint."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3336,16 +3330,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 25,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__warps_active.pct_of_peak"
+        "action_id": "inspect-existing-code",
+        "rationale": "Compare actual block and grid sizes, SM count and compiled resource use for the target shape."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__warps_active.pct_of_peak is not a bad trigger under the frozen measurement"
+        "Low occupancy alone does not show that additional resident warps help."
       ],
-      "distinguishing_question": "Does sm__warps_active.pct_of_peak meet the frozen workload acceptance?",
+      "distinguishing_question": "Is the grid too small, or is per-block resource use limiting residency?",
       "id": "method.compute.launch_config",
       "identity_constraints": {
         "claim_layers": [
@@ -3374,8 +3366,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.launch_config",
-        "compute",
         "Launch Configuration / Tile Shape",
         "sm__warps_active.pct_of_peak"
       ],
@@ -3383,7 +3373,7 @@
       "mechanism_key": "compute.launch_config",
       "priority": 4,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Launch dimensions, registers and shared memory per block."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3393,16 +3383,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 30,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "lts__t_sector_hit_rate.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Trace which operand tiles consecutive CTAs revisit for the actual grid."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "lts__t_sector_hit_rate.pct is not a bad trigger under the frozen measurement"
+        "Neighboring CTAs share no operand tiles."
       ],
-      "distinguishing_question": "Does lts__t_sector_hit_rate.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Can a different tile order bring reuse inside the cache reuse distance?",
       "id": "method.latency.tile_scheduler_swizzle",
       "identity_constraints": {
         "claim_layers": [
@@ -3431,8 +3419,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.tile_scheduler_swizzle",
-        "latency",
         "Tile Scheduler Swizzle / 光栅化顺序优化",
         "lts__t_sector_hit_rate.pct"
       ],
@@ -3440,7 +3426,7 @@
       "mechanism_key": "latency.tile_scheduler_swizzle",
       "priority": 4,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "CTA traversal and operand working set."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3450,16 +3436,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_mio_throttle.pct"
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Check alignment, stride, tails and the actual load width in generated code."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_mio_throttle.pct is not a bad trigger under the frozen measurement"
+        "Loads are already wide, or vector lanes would cross the valid extent."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_mio_throttle.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Would a wider instruction reduce work for the same addresses?",
       "id": "method.memory.vectorized_access",
       "identity_constraints": {
         "claim_layers": [
@@ -3488,8 +3472,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.vectorized_access",
-        "memory",
         "向量化访存 (float4/int4/128-bit LDG)",
         "smsp__warp_issue_stalled_mio_throttle.pct"
       ],
@@ -3497,7 +3479,7 @@
       "mechanism_key": "memory.vectorized_access",
       "priority": 4,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Dispatched pointer alignment, shape and load instructions."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3507,16 +3489,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 1.0,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__inst_executed.avg.per_cycle_active"
+        "action_id": "inspect-existing-code",
+        "rationale": "Compare the per-thread access map with the extra live registers and lost parallelism."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__inst_executed.avg.per_cycle_active is not a bad trigger under the frozen measurement"
+        "Extra outputs only lengthen the live set without sharing inputs."
       ],
-      "distinguishing_question": "Does sm__inst_executed.avg.per_cycle_active meet the frozen workload acceptance?",
+      "distinguishing_question": "Can one thread reuse data across additional outputs?",
       "id": "method.compute.thread_coarsening",
       "identity_constraints": {
         "claim_layers": [
@@ -3545,8 +3525,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.thread_coarsening",
-        "compute",
         "线程粗化 / 寄存器级 Tiling",
         "sm__inst_executed.avg.per_cycle_active"
       ],
@@ -3554,7 +3532,7 @@
       "mechanism_key": "compute.thread_coarsening",
       "priority": 5,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Data reuse and compiled register footprint."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3564,16 +3542,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 50,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__cycles_active.pct_of_peak"
+        "kind": "knowledge_only",
+        "steps": ["Compare tile counts per SM and scheduling overhead in the deployed grid."]
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__cycles_active.pct_of_peak is not a bad trigger under the frozen measurement"
+        "The existing grid already distributes uniformly and its launch is not exposed."
       ],
-      "distinguishing_question": "Does sm__cycles_active.pct_of_peak meet the frozen workload acceptance?",
+      "distinguishing_question": "Is there enough uneven or repeated work for a persistent grid to save time?",
       "id": "method.latency.persistent_kernel",
       "identity_constraints": {
         "claim_layers": [
@@ -3602,16 +3578,15 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.persistent_kernel",
-        "latency",
-        "持久化 Kernel (launch = #SMs × waves)",
-        "sm__cycles_active.pct_of_peak"
+        "sm__cycles_active.pct_of_peak",
+        "persistent kernel",
+        "持久化 kernel"
       ],
-      "mechanism": "持久化 Kernel (launch = #SMs × waves)",
+      "mechanism": "Persistent grid scheduling",
       "mechanism_key": "latency.persistent_kernel",
       "priority": 5,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Grid, tile distribution and launch timeline."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3673,16 +3648,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 1.0,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__inst_executed.avg.per_cycle_active"
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Trace register dependencies and live ranges in the generated loop."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__inst_executed.avg.per_cycle_active is not a bad trigger under the frozen measurement"
+        "Additional unrolling repeats the same dependency or causes spills."
       ],
-      "distinguishing_question": "Does sm__inst_executed.avg.per_cycle_active meet the frozen workload acceptance?",
+      "distinguishing_question": "Are independent accumulator chains available to cover the dependency delay?",
       "id": "method.compute.ilp_unroll_register_tile",
       "identity_constraints": {
         "claim_layers": [
@@ -3711,8 +3684,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.ilp_unroll_register_tile",
-        "compute",
         "8×8 寄存器瓦片 outer-product ILP",
         "sm__inst_executed.avg.per_cycle_active"
       ],
@@ -3720,7 +3691,7 @@
       "mechanism_key": "compute.ilp_unroll_register_tile",
       "priority": 6,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Dispatched loop, independent operations and register use."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3730,16 +3701,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "wave_quantization_tail_pct"
+        "kind": "knowledge_only",
+        "steps": ["Use the actual M/N/K tiles and SM count to estimate the last wave and extra reduction traffic."]
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "wave_quantization_tail_pct is not a bad trigger under the frozen measurement"
+        "The original waves are balanced or the reduction consumes the saving."
       ],
-      "distinguishing_question": "Does wave_quantization_tail_pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Would sharing K work reduce the slowest wave more than the partial reduction costs?",
       "id": "method.latency.stream_k_load_balancing",
       "identity_constraints": {
         "claim_layers": [
@@ -3766,16 +3735,13 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.stream_k_load_balancing",
-        "latency",
-        "Stream-K 跨 K 动态负载均衡",
-        "wave_quantization_tail_pct"
+        "Stream-K 跨 K 动态负载均衡"
       ],
       "mechanism": "Stream-K 跨 K 动态负载均衡",
       "mechanism_key": "latency.stream_k_load_balancing",
       "priority": 6,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Tile distribution and reduction path."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3785,16 +3751,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 40,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_long_scoreboard.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Compare producer lead with consumer waits and the shared memory for one more stage."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_long_scoreboard.pct is not a bad trigger under the frozen measurement"
+        "Transfers are already hidden, or the extra stage displaces useful resident work."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_long_scoreboard.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Does the current tile wait because its next stage was issued too late?",
       "id": "method.memory.multi_stage_pipeline",
       "identity_constraints": {
         "claim_layers": [
@@ -3821,8 +3785,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.multi_stage_pipeline",
-        "memory",
         "双缓冲 / 多级流水线",
         "smsp__warp_issue_stalled_long_scoreboard.pct"
       ],
@@ -3830,7 +3792,7 @@
       "mechanism_key": "memory.multi_stage_pipeline",
       "priority": 6,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Stage order, shared-memory allocation and tile count."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3840,16 +3802,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 1.0,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__inst_executed.avg.per_cycle_active"
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Inspect the dependency chain for a legal issue window before increasing in-flight work."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__inst_executed.avg.per_cycle_active is not a bad trigger under the frozen measurement"
+        "A true address or data dependency serializes them."
       ],
-      "distinguishing_question": "Does sm__inst_executed.avg.per_cycle_active meet the frozen workload acceptance?",
+      "distinguishing_question": "Are the next load and current arithmetic independent?",
       "id": "method.compute.overlap_compute_memory",
       "identity_constraints": {
         "claim_layers": [
@@ -3878,16 +3838,13 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.overlap_compute_memory",
-        "compute",
-        "计算与访存重叠（延迟隐藏）",
-        "sm__inst_executed.avg.per_cycle_active"
+        "计算与访存重叠（延迟隐藏）"
       ],
       "mechanism": "计算与访存重叠（延迟隐藏）",
       "mechanism_key": "compute.overlap_compute_memory",
       "priority": 7,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Load-to-use ordering and live state."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3897,16 +3854,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": null,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "dram__bytes.sum"
+        "action_id": "inspect-existing-code",
+        "rationale": "Locate the actual intermediate, count its consumers and bound the arithmetic replacing its traffic."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "dram__bytes.sum is not a bad trigger under the frozen measurement"
+        "Lowering already keeps it on chip, or several consumers need the materialized result."
       ],
-      "distinguishing_question": "Does dram__bytes.sum meet the frozen workload acceptance?",
+      "distinguishing_question": "Is it cheaper to recompute a value than materialize and reread it on this path?",
       "id": "method.latency.online_recomputation",
       "identity_constraints": {
         "claim_layers": [
@@ -3935,8 +3890,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.online_recomputation",
-        "latency",
         "在线重计算 (FlashAttention 范式)",
         "dram__bytes.sum"
       ],
@@ -3944,7 +3897,7 @@
       "mechanism_key": "latency.online_recomputation",
       "priority": 7,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Dispatched intermediates, reuse count and precision contract."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -3954,16 +3907,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": null,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "dram__bytes_write.sum"
+        "action_id": "inspect-existing-code",
+        "rationale": "Inspect the selected epilogue, output users and rounding points before estimating saved traffic."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "dram__bytes_write.sum is not a bad trigger under the frozen measurement"
+        "The epilogue is already fused or another consumer needs the intermediate."
       ],
-      "distinguishing_question": "Does dram__bytes_write.sum meet the frozen workload acceptance?",
+      "distinguishing_question": "Does the dispatched GEMM still write an intermediate that the epilogue rereads?",
       "id": "method.memory.epilogue_fusion",
       "identity_constraints": {
         "claim_layers": [
@@ -3990,8 +3941,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.epilogue_fusion",
-        "memory",
         "Epilogue Fusion (bias+activation+cast)",
         "dram__bytes_write.sum"
       ],
@@ -3999,7 +3948,7 @@
       "mechanism_key": "memory.epilogue_fusion",
       "priority": 7,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Operator graph, kernel selection and output precision."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -4009,16 +3958,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_wait.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Trace the actual tile dependencies and lifetime of normalization state before scheduling overlap."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_wait.pct is not a bad trigger under the frozen measurement"
+        "Softmax depends on unfinished reductions from the same tile."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_wait.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Can independent GEMM tiles overlap their softmax work?",
       "id": "method.compute.gemm_softmax_interleave",
       "identity_constraints": {
         "claim_layers": [
@@ -4037,8 +3984,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.gemm_softmax_interleave",
-        "compute",
         "GEMM-Softmax 两阶段乒乓流水",
         "smsp__warp_issue_stalled_wait.pct"
       ],
@@ -4046,7 +3991,7 @@
       "mechanism_key": "compute.gemm_softmax_interleave",
       "priority": 8,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Tile dependency order, masking and normalization."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -4056,16 +4001,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_membar.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Map lane destinations and check whether individual return values or ordering are required."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_membar.pct is not a bad trigger under the frozen measurement"
+        "Destinations differ or per-lane atomic results are observable."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_membar.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Do active lanes update the same address with an aggregatable operation?",
       "id": "method.latency.warp_aggregated_atomics",
       "identity_constraints": {
         "claim_layers": [
@@ -4094,16 +4037,13 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.warp_aggregated_atomics",
-        "latency",
-        "Warp-Aggregated Atomics",
-        "smsp__warp_issue_stalled_membar.pct"
+        "Warp-Aggregated Atomics"
       ],
       "mechanism": "Warp-Aggregated Atomics",
       "mechanism_key": "latency.warp_aggregated_atomics",
       "priority": 8,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Lane grouping, operation and memory ordering."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -4113,16 +4053,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 100,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum"
+        "action_id": "inspect-existing-code",
+        "rationale": "Inspect the shared access instruction, width and lane addresses; distinguish broadcasts from conflicts."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum is not a bad trigger under the frozen measurement"
+        "The apparent conflicts come from another instruction or the access is a broadcast."
       ],
-      "distinguishing_question": "Does l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum meet the frozen workload acceptance?",
+      "distinguishing_question": "Does the active lane-to-bank mapping force extra transactions?",
       "id": "method.memory.bank_conflict",
       "identity_constraints": {
         "claim_layers": [
@@ -4151,8 +4089,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.bank_conflict",
-        "memory",
         "Bank Conflict 消除 (padding / swizzle)",
         "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum"
       ],
@@ -4160,7 +4096,7 @@
       "mechanism_key": "memory.bank_conflict",
       "priority": 8,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Instruction, shared layout and active lanes."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -4170,16 +4106,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 0.02,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "fp8_relative_error"
+        "kind": "knowledge_only",
+        "steps": ["Compare accumulator promotion on the same inputs, scaling and K range before changing cadence."]
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "fp8_relative_error is not a bad trigger under the frozen measurement"
+        "The discrepancy is already present after input quantization."
       ],
-      "distinguishing_question": "Does fp8_relative_error meet the frozen workload acceptance?",
+      "distinguishing_question": "Does accumulator error, rather than input quantization, violate the accuracy reference?",
       "id": "method.compute.two_level_accumulation_promotion",
       "identity_constraints": {
         "claim_layers": [
@@ -4198,16 +4132,14 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.two_level_accumulation_promotion",
-        "compute",
         "FP8 两级累加精度提升 (DeepGEMM)",
-        "fp8_relative_error"
+        "FP8 accumulator promotion"
       ],
       "mechanism": "FP8 两级累加精度提升 (DeepGEMM)",
       "mechanism_key": "compute.two_level_accumulation_promotion",
       "priority": 9,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Reference outputs, scale layout and accumulator policy."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -4217,16 +4149,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_barrier.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Trace arrival, wait, phase reuse and memory visibility for the selected instruction path."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_barrier.pct is not a bad trigger under the frozen measurement"
+        "A required participant or visibility edge is missing."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_barrier.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Which producer, consumer and phase would the barrier order?",
       "id": "method.latency.asymmetric_mbarrier_sync",
       "identity_constraints": {
         "claim_layers": [
@@ -4250,35 +4180,33 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.asymmetric_mbarrier_sync",
-        "latency",
-        "mbarrier 非对称同步替换 __syncthreads",
-        "smsp__warp_issue_stalled_barrier.pct"
+        "smsp__warp_issue_stalled_barrier.pct",
+        "mbarrier",
+        "非对称同步"
       ],
-      "mechanism": "mbarrier 非对称同步替换 __syncthreads",
+      "mechanism": "Split-phase producer/consumer synchronization",
       "mechanism_key": "latency.asymmetric_mbarrier_sync",
       "priority": 9,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Compilation target, participants and phase lifetime."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-cuda-programming-guide",
+        "nvidia-ptx-isa"
       ],
       "status": "advisory"
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_mio_throttle.pct"
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Check the exact PTX form, direction, alignment and generated code for this tile."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_mio_throttle.pct is not a bad trigger under the frozen measurement"
+        "Register-to-shared stores do not have the same target and layout requirements as loads."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_mio_throttle.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Does the selected load or store support this target and lane layout?",
       "id": "method.memory.ldmatrix_stmatrix",
       "identity_constraints": {
         "claim_layers": [
@@ -4306,35 +4234,32 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.ldmatrix_stmatrix",
-        "memory",
-        "ldmatrix / stmatrix 合并 SMEM→register",
-        "smsp__warp_issue_stalled_mio_throttle.pct"
+        "ldmatrix",
+        "stmatrix"
       ],
-      "mechanism": "ldmatrix / stmatrix 合并 SMEM→register",
+      "mechanism": "Matrix loads and stores between shared memory and registers",
       "mechanism_key": "memory.ldmatrix_stmatrix",
       "priority": 9,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Instruction variant, compilation target and lane addresses."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-cuda-programming-guide",
+        "nvidia-ptx-isa"
       ],
       "status": "advisory"
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 40,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "wgmma_throughput_pct"
+        "kind": "knowledge_only",
+        "steps": ["Inspect operand and accumulator types and the selected CUTLASS policy; compare errors against the project's existing accuracy reference."]
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "wgmma_throughput_pct is not a bad trigger under the frozen measurement"
+        "WGMMA is not specific to FP8 and instruction presence does not identify the accumulation policy."
       ],
-      "distinguishing_question": "Does wgmma_throughput_pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Is the dispatched kernel an FP8 path with an eligible alternative accumulation policy?",
       "id": "method.compute.fp8_fast_accumulation_mode",
       "identity_constraints": {
         "claim_layers": [
@@ -4353,35 +4278,33 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.fp8_fast_accumulation_mode",
-        "compute",
         "FP8 Fast Accumulation (CUTLASS fastAccum)",
-        "wgmma_throughput_pct"
+        "fp8 fast accumulation",
+        "CUTLASS fastAccum"
       ],
       "mechanism": "FP8 Fast Accumulation (CUTLASS fastAccum)",
       "mechanism_key": "compute.fp8_fast_accumulation_mode",
       "priority": 10,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Dispatched specialization, scaling and accuracy limits."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-cuda-programming-guide",
+        "nvidia-cutlass-hopper-builder"
       ],
       "status": "advisory"
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_wait.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Map producer and consumer groups to tiles, barriers and available registers."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_wait.pct is not a bad trigger under the frozen measurement"
+        "Too few independent tiles, or synchronization serializes the groups."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_wait.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Can different warpgroups own independent work while another waits?",
       "id": "method.latency.pingpong_warpgroup_schedule",
       "identity_constraints": {
         "claim_layers": [
@@ -4400,8 +4323,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.pingpong_warpgroup_schedule",
-        "latency",
         "FA3 Pingpong Warpgroup Schedule",
         "smsp__warp_issue_stalled_wait.pct"
       ],
@@ -4409,7 +4330,7 @@
       "mechanism_key": "latency.pingpong_warpgroup_schedule",
       "priority": 10,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Warpgroup roles, tile count and register allocation."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -4554,16 +4475,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak"
+        "action_id": "inspect-existing-code",
+        "rationale": "Verify the exact target, operand and scale layout, dispatch and generated conversions."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak is not a bad trigger under the frozen measurement"
+        "A supported storage format still takes a decompression or fallback path."
       ],
-      "distinguishing_question": "Does sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak meet the frozen workload acceptance?",
+      "distinguishing_question": "Does the selected backend consume this block-scaled format directly?",
       "id": "method.compute.block_scaled_precision",
       "identity_constraints": {
         "claim_layers": [
@@ -4586,16 +4505,14 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.block_scaled_precision",
-        "compute",
         "NVFP4 / MXFP8 / MXFP6 块缩放精度",
-        "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak"
+        "block scaling"
       ],
       "mechanism": "NVFP4 / MXFP8 / MXFP6 块缩放精度",
       "mechanism_key": "compute.block_scaled_precision",
       "priority": 11,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Backend specialization, scale granularity and accuracy reference."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -4701,16 +4618,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 15,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak"
+        "action_id": "inspect-existing-code",
+        "rationale": "Check the actual decomposition and accumulator order against the reference before estimating throughput."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak is not a bad trigger under the frozen measurement"
+        "Additional terms, conversions or error leave no advantage over the current dispatch."
       ],
-      "distinguishing_question": "Does sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak meet the frozen workload acceptance?",
+      "distinguishing_question": "Can a multi-term approximation meet the required FP32 error contract?",
       "id": "method.compute.tf32_emulation_3xtf32_bf16x6",
       "identity_constraints": {
         "claim_layers": [
@@ -4737,16 +4652,13 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.tf32_emulation_3xtf32_bf16x6",
-        "compute",
-        "FP32 via 3×TF32 or 6×BF16 Tensor Core 仿真",
-        "sm__pipe_tensor_op_hmma_cycles_active.pct_of_peak"
+        "FP32 via 3×TF32 or 6×BF16 Tensor Core 仿真"
       ],
       "mechanism": "FP32 via 3×TF32 or 6×BF16 Tensor Core 仿真",
       "mechanism_key": "compute.tf32_emulation_3xtf32_bf16x6",
       "priority": 12,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Input range, generated operations and required precision."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -4756,16 +4668,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_wait.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Trace instruction dependencies, waits and live accumulator fragments within the group."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_wait.pct is not a bad trigger under the frozen measurement"
+        "A dependent fragment or a required wait prevents overlap."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_wait.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Can the same warpgroup issue independent GEMM work during softmax?",
       "id": "method.latency.intra_wg_gemm_softmax_pipeline",
       "identity_constraints": {
         "claim_layers": [
@@ -4784,8 +4694,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.intra_wg_gemm_softmax_pipeline",
-        "latency",
         "FA3 单 Warpgroup 内 GEMM-Softmax 2-stage 流水",
         "smsp__warp_issue_stalled_wait.pct"
       ],
@@ -4793,7 +4701,7 @@
       "mechanism_key": "latency.intra_wg_gemm_softmax_pipeline",
       "priority": 12,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Selected schedule, fragment lifetime and register use."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -4854,16 +4762,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": null,
-        "direction": null,
-        "kind": "observed_metric",
-        "metric": "smsp__inst_executed_pipe_xu.sum"
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Inspect the dispatched exponential, base conversion and approximation mode before comparing outputs."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__inst_executed_pipe_xu.sum is not a bad trigger under the frozen measurement"
+        "The compiler already emits the same sequence or the approximation violates the reference."
       ],
-      "distinguishing_question": "Does smsp__inst_executed_pipe_xu.sum meet the frozen workload acceptance?",
+      "distinguishing_question": "Would replacing exp change the generated math or its required accuracy?",
       "id": "method.compute.mufu_ex2_softmax_replacement",
       "identity_constraints": {
         "claim_layers": [
@@ -4892,16 +4798,14 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.mufu_ex2_softmax_replacement",
-        "compute",
-        "SFU ex2 替代 exp (softmax)",
-        "smsp__inst_executed_pipe_xu.sum"
+        "ex2",
+        "softmax exponential"
       ],
-      "mechanism": "SFU ex2 替代 exp (softmax)",
+      "mechanism": "Base-2 exponential in softmax",
       "mechanism_key": "compute.mufu_ex2_softmax_replacement",
       "priority": 13,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Compiled math path, input range and tolerance."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -4911,16 +4815,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": null,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "dram__bytes_write.sum"
+        "action_id": "inspect-existing-code",
+        "rationale": "Inspect the actual collective, operand types and supported visitors for the target."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "dram__bytes_write.sum is not a bad trigger under the frozen measurement"
+        "The required operation, layout or intermediate output cannot be represented."
       ],
-      "distinguishing_question": "Does dram__bytes_write.sum meet the frozen workload acceptance?",
+      "distinguishing_question": "Can the selected CUTLASS epilogue express these operations and rounding points?",
       "id": "method.memory.epilogue_visitor_tree_fusion",
       "identity_constraints": {
         "claim_layers": [
@@ -4939,35 +4841,33 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.epilogue_visitor_tree_fusion",
-        "memory",
-        "Epilogue Visitor Tree (EVT) 任意 DAG 融合",
-        "dram__bytes_write.sum"
+        "dram__bytes_write.sum",
+        "epilogue visitor tree",
+        "EVT"
       ],
-      "mechanism": "Epilogue Visitor Tree (EVT) 任意 DAG 融合",
+      "mechanism": "CUTLASS Epilogue Visitor Tree (EVT)",
       "mechanism_key": "memory.epilogue_visitor_tree_fusion",
       "priority": 13,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Selected epilogue, operand layout and precision contract."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-cuda-programming-guide",
+        "nvidia-cutlass"
       ],
       "status": "advisory"
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 50,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__cycles_active.pct_of_peak"
+        "kind": "knowledge_only",
+        "steps": ["Compare the actual replay/update pattern with extra blocks and early exits for each shape."]
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__cycles_active.pct_of_peak is not a bad trigger under the frozen measurement"
+        "The graph is already reused or padded work exceeds the avoided overhead."
       ],
-      "distinguishing_question": "Does sm__cycles_active.pct_of_peak meet the frozen workload acceptance?",
+      "distinguishing_question": "Would using one fixed grid save exposed recapture or update cost?",
       "id": "method.latency.static_launch_grid_graph",
       "identity_constraints": {
         "claim_layers": [
@@ -4996,16 +4896,13 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.static_launch_grid_graph",
-        "latency",
-        "静态最大 grid + CUDA Graph + 内部早退",
-        "sm__cycles_active.pct_of_peak"
+        "静态最大 grid + CUDA Graph + 内部早退"
       ],
       "mechanism": "静态最大 grid + CUDA Graph + 内部早退",
       "mechanism_key": "latency.static_launch_grid_graph",
       "priority": 15,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Shape distribution, graph lifetime and launch geometry."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -5015,16 +4912,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 30,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "l1tex__t_sector_hit_rate.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Trace the working set and reuse distance before changing the dispatched cache hint."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "l1tex__t_sector_hit_rate.pct is not a bad trigger under the frozen measurement"
+        "A low hit rate on a one-pass stream does not imply useful cache reuse."
       ],
-      "distinguishing_question": "Does l1tex__t_sector_hit_rate.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Which later access would reuse or avoid evicting this line?",
       "id": "method.memory.ldg_cache_modifier_hint",
       "identity_constraints": {
         "claim_layers": [
@@ -5053,8 +4948,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.ldg_cache_modifier_hint",
-        "memory",
         "显式 Cache Modifier (__ldcg/__ldcs/__ldca)",
         "l1tex__t_sector_hit_rate.pct"
       ],
@@ -5062,7 +4955,7 @@
       "mechanism_key": "memory.ldg_cache_modifier_hint",
       "priority": 15,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Load site, reuse pattern and compilation target."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -5072,16 +4965,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_short_scoreboard.pct"
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Check whether the compiler already unrolled it and whether more independent work fits in registers."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_short_scoreboard.pct is not a bad trigger under the frozen measurement"
+        "Unrolling leaves the critical dependency unchanged or increases spills."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_short_scoreboard.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Does loop control or a loop-carried dependency limit the generated loop?",
       "id": "method.compute.loop_unroll",
       "identity_constraints": {
         "claim_layers": [
@@ -5110,8 +5001,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.loop_unroll",
-        "compute",
         "循环展开",
         "smsp__warp_issue_stalled_short_scoreboard.pct"
       ],
@@ -5119,7 +5008,7 @@
       "mechanism_key": "compute.loop_unroll",
       "priority": 16,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Generated loop, trip count and register footprint."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -5129,16 +5018,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 30,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "lts__t_sector_hit_rate.pct"
+        "kind": "knowledge_only",
+        "steps": ["Check device support, the configured window and overlapping streams against the reused byte range."]
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "lts__t_sector_hit_rate.pct is not a bad trigger under the frozen measurement"
+        "One-pass traffic or competing windows leave no useful persistent set."
       ],
-      "distinguishing_question": "Does lts__t_sector_hit_rate.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Does the critical region repeatedly reuse an eligible L2 working set?",
       "id": "method.memory.l2_persistence_window",
       "identity_constraints": {
         "claim_layers": [
@@ -5165,8 +5052,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.l2_persistence_window",
-        "memory",
         "L2 Persistent Cache Window",
         "lts__t_sector_hit_rate.pct"
       ],
@@ -5174,7 +5059,7 @@
       "mechanism_key": "memory.l2_persistence_window",
       "priority": 16,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Window, device limits, reuse distance and concurrency."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -5230,16 +5115,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 50,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "sm__cycles_active.pct_of_peak"
+        "kind": "knowledge_only",
+        "steps": ["Compare output tiles with SM count, then bound partial writes, reduction time and precision changes."]
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "sm__cycles_active.pct_of_peak is not a bad trigger under the frozen measurement"
+        "Enough output tiles already exist or the partial reduction consumes the gain."
       ],
-      "distinguishing_question": "Does sm__cycles_active.pct_of_peak meet the frozen workload acceptance?",
+      "distinguishing_question": "Would K splitting fill idle SMs after accounting for the extra reduction?",
       "id": "method.memory.split_k_parallel_reduce",
       "identity_constraints": {
         "claim_layers": [
@@ -5268,8 +5151,6 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.split_k_parallel_reduce",
-        "memory",
         "Split-K 并行规约 (GEMM K-dim 切分)",
         "sm__cycles_active.pct_of_peak"
       ],
@@ -5277,7 +5158,7 @@
       "mechanism_key": "memory.split_k_parallel_reduce",
       "priority": 17,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "M/N/K, tile geometry and reduction method."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -5287,16 +5168,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": null,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "dram__bytes.sum"
+        "action_id": "compiler-sass-inspection",
+        "rationale": "Inspect the emitted logic and operand layout before replacing any sequence."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "dram__bytes.sum is not a bad trigger under the frozen measurement"
+        "The compiler already emitted equivalent logic or unpacking is off the critical path."
       ],
-      "distinguishing_question": "Does dram__bytes.sum meet the frozen workload acceptance?",
+      "distinguishing_question": "Is bit unpacking exposed in the selected dequantization path?",
       "id": "method.compute.lop3_bit_manipulation",
       "identity_constraints": {
         "claim_layers": [
@@ -5325,16 +5204,13 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.lop3_bit_manipulation",
-        "compute",
-        "lop3 三目逻辑 int4/int8→fp16 反量化",
-        "dram__bytes.sum"
+        "lop3 三目逻辑 int4/int8→fp16 反量化"
       ],
       "mechanism": "lop3 三目逻辑 int4/int8→fp16 反量化",
       "mechanism_key": "compute.lop3_bit_manipulation",
       "priority": 18,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Generated instructions, packed format and exact output reference."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -5344,16 +5220,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 20,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_short_scoreboard.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Verify pointer provenance at every supported call site, then inspect whether loads actually change."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_short_scoreboard.pct is not a bad trigger under the frozen measurement"
+        "An allowed alias makes a restrict annotation invalid even if a benchmark improves."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_short_scoreboard.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Can the relevant pointers legally be proven non-aliasing?",
       "id": "method.compute.pragma_no_alias",
       "identity_constraints": {
         "claim_layers": [
@@ -5382,16 +5256,14 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "compute.pragma_no_alias",
-        "compute",
-        "__restrict__ + #pragma unroll + 别名消除",
-        "smsp__warp_issue_stalled_short_scoreboard.pct"
+        "__restrict__",
+        "别名消除"
       ],
-      "mechanism": "__restrict__ + #pragma unroll + 别名消除",
+      "mechanism": "Pointer aliasing and __restrict__",
       "mechanism_key": "compute.pragma_no_alias",
       "priority": 19,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Caller alias contract and generated loads."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -5401,16 +5273,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": 15,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "smsp__warp_issue_stalled_membar.pct"
+        "action_id": "inspect-existing-code",
+        "rationale": "Inspect destination distribution, return-value use and permissible reduction order."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "smsp__warp_issue_stalled_membar.pct is not a bad trigger under the frozen measurement"
+        "Updates are uncontended or their order or individual return values are required."
       ],
-      "distinguishing_question": "Does smsp__warp_issue_stalled_membar.pct meet the frozen workload acceptance?",
+      "distinguishing_question": "Can a local reduction safely reduce competing updates at the same destination?",
       "id": "method.latency.atomic_optimize",
       "identity_constraints": {
         "claim_layers": [
@@ -5439,16 +5309,13 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "latency.atomic_optimize",
-        "latency",
-        "Atomic 操作优化 (局部归约再 atomic)",
-        "smsp__warp_issue_stalled_membar.pct"
+        "Atomic 操作优化 (局部归约再 atomic)"
       ],
       "mechanism": "Atomic 操作优化 (局部归约再 atomic)",
       "mechanism_key": "latency.atomic_optimize",
       "priority": 19,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Target addresses, operation and accuracy or ordering contract."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -5458,16 +5325,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": null,
-        "direction": "low_is_bad",
-        "kind": "observed_metric",
-        "metric": "launch__occupancy_limit_registers"
+        "kind": "knowledge_only",
+        "steps": ["Check the ptxas report, compilation mode, toolkit support and shared-memory headroom before enabling shared spilling."]
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "launch__occupancy_limit_registers is not a bad trigger under the frozen measurement"
+        "Register-limited occupancy alone is not evidence of spill traffic."
       ],
-      "distinguishing_question": "Does launch__occupancy_limit_registers meet the frozen workload acceptance?",
+      "distinguishing_question": "Are hot local-memory accesses actually compiler spills, and is shared memory available?",
       "id": "method.memory.smem_register_spilling",
       "identity_constraints": {
         "claim_layers": [
@@ -5494,16 +5359,14 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.smem_register_spilling",
-        "memory",
         "Shared-memory register spilling (CUDA 13.0)",
-        "launch__occupancy_limit_registers"
+        "ptxas spills"
       ],
       "mechanism": "Shared-memory register spilling (CUDA 13.0)",
       "mechanism_key": "memory.smem_register_spilling",
       "priority": 19,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Toolchain, spill loads/stores and shared-memory allocation."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
@@ -5513,16 +5376,14 @@
     },
     {
       "cheapest_falsifier": {
-        "bad_threshold": null,
-        "direction": "high_is_bad",
-        "kind": "observed_metric",
-        "metric": "dram__bytes.sum"
+        "action_id": "inspect-existing-code",
+        "rationale": "Check tensor descriptors, strides, layout, padding and lowering for the actual convolution."
       },
       "content_kind": "heuristic",
       "counter_signals": [
-        "dram__bytes.sum is not a bad trigger under the frozen measurement"
+        "Unsupported geometry or an existing efficient gather leaves no removable transformation."
       ],
-      "distinguishing_question": "Does dram__bytes.sum meet the frozen workload acceptance?",
+      "distinguishing_question": "Can the selected target and tensor-map form express this convolution's accesses?",
       "id": "method.memory.tma_im2col_implicit_conv",
       "identity_constraints": {
         "claim_layers": [
@@ -5546,20 +5407,18 @@
         "identity mismatch"
       ],
       "match_terms": [
-        "memory.tma_im2col_implicit_conv",
-        "memory",
-        "TMA im2col 隐式卷积",
-        "dram__bytes.sum"
+        "TMA im2col 隐式卷积"
       ],
       "mechanism": "TMA im2col 隐式卷积",
       "mechanism_key": "memory.tma_im2col_implicit_conv",
       "priority": 20,
       "required_evidence": [
-        "identity-compatible correctness and paired workload measurement"
+        "Instruction target, tensor map and production convolution shape."
       ],
       "source_ids": [
         "nvidia-cuda-best-practices",
-        "nvidia-cuda-programming-guide"
+        "nvidia-cuda-programming-guide",
+        "nvidia-ptx-isa"
       ],
       "status": "advisory"
     },
